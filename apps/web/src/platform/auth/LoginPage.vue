@@ -67,7 +67,7 @@ const submit = async (): Promise<void> => {
       <section class="login-panel" aria-labelledby="login-title">
         <div class="form-topline"><span>工作台登录</span><LockKeyhole :size="15" /></div>
         <h2 id="login-title">欢迎回来</h2>
-        <p class="form-description">登录账号，继续你的创作。</p>
+        <p class="form-description">登录工作台，继续你的创作。</p>
         <div v-if="checking" class="login-status" role="status">
           <LoaderCircle class="spin" :size="22" />正在连接工作台…
         </div>
