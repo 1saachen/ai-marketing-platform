@@ -1,0 +1,48 @@
+import { resolve } from 'node:path';
+
+import { CustomizedExtractionModule } from './workflows/customized/information-extraction/customized-extraction.module';
+import { StoryboardModule } from './workflows/customized/storyboard/storyboard.module';
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+
+import { validateEnvironment } from './config/environment';
+import { PrismaModule } from './database/prisma.module';
+import { AuthModule } from './platform/auth/auth.module';
+import { RedisCacheModule } from './platform/cache/redis-cache.module';
+import { HealthModule } from './platform/health/health.module';
+import { AssetModule } from './platform/asset/asset.module';
+import { ProjectModule } from './platform/project/project.module';
+import { WorkflowModule } from './platform/workflow/workflow.module';
+import { EffectExtractionModule } from './workflows/effect/information-extraction/effect-extraction.module';
+import { EffectPromptModule } from './workflows/effect/prompt-generation/effect-prompt.module';
+import { EffectSegmentRenderModule } from './workflows/effect/segment-render/effect-segment-render.module';
+import { EffectSourceImportModule } from './workflows/effect/source-import/effect-source-import.module';
+import { EffectTemplateMixModule } from './workflows/effect/template-mix/effect-template-mix.module';
+import { CustomizedSourceImportModule } from './workflows/customized/source-import/customized-source-import.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      cache: true,
+      envFilePath: [resolve(process.cwd(), '.env'), resolve(process.cwd(), '../../.env')],
+      validate: validateEnvironment,
+    }),
+    PrismaModule,
+    AuthModule,
+    RedisCacheModule,
+    HealthModule,
+    ProjectModule,
+    AssetModule,
+    WorkflowModule,
+    EffectSourceImportModule,
+    CustomizedSourceImportModule,
+    CustomizedExtractionModule,
+    StoryboardModule,
+    EffectExtractionModule,
+    EffectPromptModule,
+    EffectSegmentRenderModule,
+    EffectTemplateMixModule,
+  ],
+})
+export class AppModule {}

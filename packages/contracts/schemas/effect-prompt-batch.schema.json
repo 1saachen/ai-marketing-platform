@@ -1,0 +1,729 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-marketing.local/schemas/effect-prompt-batch.json",
+  "title": "EffectPromptBatchResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["settings", "renderProfile", "items", "metrics", "qualityStatus"],
+  "properties": {
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targetCount",
+        "defaultDurationSeconds",
+        "styleMode",
+        "styleTone",
+        "deliveryChannel",
+        "disabledElements"
+      ],
+      "properties": {
+        "targetCount": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100
+        },
+        "defaultDurationSeconds": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 15
+        },
+        "styleMode": {
+          "enum": ["AI_AUTO", "FIXED"]
+        },
+        "styleTone": {
+          "type": ["string", "null"],
+          "maxLength": 120
+        },
+        "deliveryChannel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "disabledElements": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          }
+        }
+      }
+    },
+    "renderProfile": {
+      "$ref": "#/$defs/renderProfile"
+    },
+    "sharedPrompt": {
+      "$ref": "#/$defs/sharedPrompt"
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targetCount",
+        "acceptedCount",
+        "generatedCandidateCount",
+        "candidateTargetCount",
+        "rejectedCount",
+        "replenishmentRounds",
+        "exactDuplicateCount",
+        "semanticEvaluation",
+        "purposeDistribution",
+        "averageScores",
+        "hardIssueCounts",
+        "warningCounts",
+        "insightCoverage"
+      ],
+      "properties": {
+        "targetCount": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100
+        },
+        "acceptedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "candidateTargetCount": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 240
+        },
+        "generatedCandidateCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejectedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replenishmentRounds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "exactDuplicateCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "semanticEvaluation": {
+          "$ref": "#/$defs/semanticEvaluation"
+        },
+        "purposeDistribution": {
+          "$ref": "#/$defs/purposeDistribution"
+        },
+        "averageScores": {
+          "$ref": "#/$defs/qualityScores"
+        },
+        "hardIssueCounts": {
+          "$ref": "#/$defs/issueCounts"
+        },
+        "warningCounts": {
+          "$ref": "#/$defs/issueCounts"
+        },
+        "insightCoverage": {
+          "$ref": "#/$defs/insightCoverage"
+        }
+      }
+    },
+    "qualityStatus": {
+      "enum": ["PASS", "NEEDS_REVIEW"]
+    }
+  },
+  "$defs": {
+    "fragmentType": {
+      "type": "string",
+      "enum": ["HOOK", "PRODUCT_DISPLAY", "EFFECT", "CTA"]
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["narrative", "scene", "persona", "productRelation", "camera", "emotion"],
+      "properties": {
+        "narrative": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "scene": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "persona": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "productRelation": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 240
+        },
+        "camera": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "emotion": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 120
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "classificationStatus": {
+                "const": "NEEDS_REVISION"
+              }
+            },
+            "required": ["classificationStatus"]
+          },
+          "then": {
+            "required": ["reviewIssues"],
+            "properties": {
+              "reviewIssues": {
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reviewIssues": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "origin": {
+                "const": "AI"
+              }
+            },
+            "required": ["origin"]
+          },
+          "then": {
+            "properties": {
+              "targetDurationSeconds": {
+                "maximum": 15
+              },
+              "creativeCore": {
+                "minLength": 1
+              },
+              "dimensions": {
+                "properties": {
+                  "narrative": { "minLength": 1 },
+                  "scene": { "minLength": 1 },
+                  "persona": { "minLength": 1 },
+                  "productRelation": { "minLength": 1 },
+                  "camera": { "minLength": 1 },
+                  "emotion": { "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "required": [
+        "id",
+        "code",
+        "origin",
+        "fragmentType",
+        "primaryPurpose",
+        "compatiblePurposes",
+        "classificationStatus",
+        "productRelevance",
+        "targetDurationSeconds",
+        "creativeCore",
+        "dimensions",
+        "content",
+        "insightBindings",
+        "manualEdited",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "origin": {
+          "enum": ["AI", "MANUAL"]
+        },
+        "fragmentType": {
+          "$ref": "#/$defs/fragmentType"
+        },
+        "primaryPurpose": {
+          "$ref": "#/$defs/fragmentType"
+        },
+        "compatiblePurposes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/fragmentType"
+          }
+        },
+        "classificationStatus": {
+          "enum": ["PENDING", "VERIFIED", "NEEDS_REVISION"]
+        },
+        "productRelevance": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "targetDurationSeconds": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 30
+        },
+        "creativeCore": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "dimensions": {
+          "$ref": "#/$defs/dimensions"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 12000
+        },
+        "insightBindings": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/insightBinding"
+          }
+        },
+        "reviewIssues": {
+          "type": "array",
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "manualEdited": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "renderProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ratio", "resolution", "capabilityKey", "sharedConstraints"],
+      "properties": {
+        "ratio": {
+          "enum": ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
+        },
+        "resolution": {
+          "enum": ["480p", "720p", "1080p", "4k"]
+        },
+        "capabilityKey": {
+          "enum": ["SEEDANCE_2_0", "SEEDANCE_2_0_FAST", "SEEDANCE_1_5_PRO", "SEEDANCE_1_0"]
+        },
+        "sharedConstraints": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disabledElements", "contentHash"],
+          "properties": {
+            "disabledElements": {
+              "type": "array",
+              "maxItems": 100,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            },
+            "prompt": {
+              "type": "string",
+              "maxLength": 60000
+            },
+            "contentHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "sharedPrompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sections", "compiledContent", "contentHash"],
+      "properties": {
+        "sections": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/sharedPromptSection"
+          }
+        },
+        "compiledContent": {
+          "type": "string",
+          "maxLength": 60000
+        },
+        "contentHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "sharedPromptSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "title", "source", "content", "editable", "sourceHash"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "source": {
+          "enum": ["SYSTEM", "USER"]
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 30000
+        },
+        "editable": {
+          "type": "boolean"
+        },
+        "sourceHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "purposeDistribution": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["purpose", "primaryCount", "compatibleCount"],
+        "properties": {
+          "purpose": {
+            "$ref": "#/$defs/fragmentType"
+          },
+          "primaryCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "compatibleCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          }
+        }
+      }
+    },
+    "semanticEvaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "evaluatedCount",
+        "duplicateGroupCount",
+        "duplicateCount",
+        "duplicateRate"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["PENDING", "VERIFIED"]
+        },
+        "evaluatedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 240
+        },
+        "duplicateGroupCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 240
+        },
+        "duplicateCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 240
+        },
+        "duplicateRate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "qualityScores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productRelevance",
+        "creativeCoherence",
+        "visualExecutability",
+        "commercialUsefulness",
+        "visualClarity"
+      ],
+      "properties": {
+        "productRelevance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "creativeCoherence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "visualExecutability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "commercialUsefulness": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "visualClarity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "issueCounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "count"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "insightField": {
+      "type": "string",
+      "enum": [
+        "SELLING_POINT",
+        "PRODUCT_NAME",
+        "PRODUCT_CATEGORY",
+        "CORE_SPECIFICATION",
+        "PRICE_RANGE",
+        "VISUAL_FEATURES",
+        "CORE_SELLING_POINT",
+        "SECONDARY_SELLING_POINT",
+        "TRUST_BACKING",
+        "TARGET_AUDIENCE",
+        "CORE_PAIN_POINT",
+        "DECISION_DRIVER",
+        "MARKETING_GOAL",
+        "USAGE_SCENARIO",
+        "PURCHASE_SCENARIO",
+        "EMOTIONAL_SCENARIO",
+        "SOURCE_DURATION",
+        "ASPECT_RATIO",
+        "RESOLUTION",
+        "DELIVERY_CHANNELS",
+        "DISABLED_ELEMENT",
+        "VISUAL_STYLE_BASELINE"
+      ]
+    },
+    "insightReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["factId", "field", "value", "valueHash"],
+      "properties": {
+        "factId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "field": {
+          "$ref": "#/$defs/insightField"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "valueHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "insightBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["factId", "field", "value", "valueHash", "role"],
+      "properties": {
+        "factId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "field": {
+          "$ref": "#/$defs/insightField"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "valueHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "role": {
+          "enum": ["PRIMARY", "CONTEXT", "EVIDENCE"]
+        }
+      }
+    },
+    "excludedInsight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["factId", "field", "value", "valueHash", "reason"],
+      "properties": {
+        "factId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "field": {
+          "$ref": "#/$defs/insightField"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "valueHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "reason": {
+          "enum": ["UNCERTAIN", "EMPTY", "UNSUPPORTED"]
+        }
+      }
+    },
+    "insightCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "covered",
+        "missing",
+        "adaptive",
+        "deferred",
+        "excluded",
+        "appliedConstraints"
+      ],
+      "properties": {
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/insightReference"
+          }
+        },
+        "covered": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/insightReference"
+          }
+        },
+        "missing": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/insightReference"
+          }
+        },
+        "adaptive": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/insightReference"
+          }
+        },
+        "deferred": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/insightReference"
+          }
+        },
+        "excluded": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/excludedInsight"
+          }
+        },
+        "appliedConstraints": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/insightReference"
+          }
+        }
+      }
+    }
+  }
+}

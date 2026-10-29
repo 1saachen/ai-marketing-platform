@@ -1,0 +1,328 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import {
+  Activity,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  LoaderCircle,
+  RefreshCw,
+  Workflow,
+} from '@lucide/vue';
+import {
+  storyboardStages,
+  isCommerceStrategy,
+  typedScriptStages,
+  CUSTOMIZED_VIDEO_TYPES,
+  type StoryboardTask,
+  type StoryboardDetail,
+} from '@ai-marketing/contracts';
+import WorkflowExecutionGraphDialog from '../../../platform/workflow/components/WorkflowExecutionGraphDialog.vue';
+import { isAbortError } from '../../../api/http-client';
+import { BaseButton } from '@ai-marketing/ui';
+import { storyboardApi } from './storyboard.api';
+const props = defineProps<{
+  open: boolean;
+  projectId: string;
+  task: StoryboardTask | null;
+  scripts: { id: string; name: string }[];
+}>();
+const emit = defineEmits<{ close: []; openScript: [id: string] }>();
+const selected = ref<string | null>(null),
+  detail = ref<StoryboardDetail | null>(null),
+  loading = ref(false),
+  error = ref(''),
+  page = ref(0);
+let controller: AbortController | undefined;
+const storyOnly = computed(() => !props.task || props.task.outputMode === 'STORY_ONLY');
+const showAllRoutes = ref(false);
+const typed = computed(() => props.task?.graphVersion === 'TYPED_CREATION_V1');
+const stages = computed(() => {
+  const actual = storyboardStages(props.task ?? { outputMode: 'STORY_ONLY' });
+  if (!typed.value || !showAllRoutes.value) return actual;
+  return [
+    ...actual.slice(0, 3),
+    ...CUSTOMIZED_VIDEO_TYPES.flatMap((t) =>
+      typedScriptStages(t, props.task?.strategyVersions?.concept).slice(3, -3),
+    ),
+    ...actual.slice(-3),
+  ];
+});
+const rows = computed(() =>
+  typed.value && showAllRoutes.value
+    ? [
+        ['SNAPSHOT'],
+        ['PREPARE'],
+        ['ROUTE'],
+        ...([
+          '2026-10-14.1',
+          '2026-10-14.2',
+          '2026-10-14.3',
+          '2026-10-14.4',
+          '2026-10-14.5',
+          '2026-10-14.6',
+          '2026-10-14.7',
+        ].includes(props.task?.strategyVersions?.concept ?? '')
+          ? [['BRAND_AD_PROPOSITION'], ['BRAND_AD_IDEAS']]
+          : []),
+        ...(isCommerceStrategy(props.task?.strategyVersions?.concept)
+          ? [['ECOMMERCE_MOTIVATION']]
+          : []),
+        ...['CONCEPT', 'STORY', 'REVIEW'].map((stage) =>
+          CUSTOMIZED_VIDEO_TYPES.map((t) => `${t}_${stage}`),
+        ),
+        ['REPAIR'],
+        ['RECHECK'],
+        ['SAVE'],
+      ]
+    : stages.value.map((n) => [n.id]),
+);
+const edges = computed(() => {
+  if (!typed.value) return undefined;
+  const routes = showAllRoutes.value ? CUSTOMIZED_VIDEO_TYPES : [props.task!.routeId!];
+  return [
+    { from: 'SNAPSHOT', to: 'PREPARE' },
+    { from: 'PREPARE', to: 'ROUTE' },
+    ...routes.flatMap((route) => {
+      const muted = route !== props.task?.routeId;
+      const chain = [
+        'ROUTE',
+        ...typedScriptStages(route, props.task?.strategyVersions?.concept)
+          .slice(3, -3)
+          .map((n) => n.id),
+      ];
+      return [
+        ...chain.slice(1).map((to, i) => ({ from: chain[i]!, to, muted })),
+        { from: `${route}_REVIEW`, to: 'REPAIR', label: muted ? '' : '需修订', muted },
+        { from: `${route}_REVIEW`, to: 'SAVE', label: muted ? '' : '通过', muted },
+      ];
+    }),
+    { from: 'REPAIR', to: 'RECHECK' },
+    { from: 'RECHECK', to: 'SAVE', label: '复核通过' },
+  ];
+});
+const savedScripts = computed(() => [
+  ...new Set(
+    props.task?.steps
+      .filter((step) => step.nodeId === 'SAVE' && step.status === 'SUCCEEDED')
+      .map((step) => step.scriptId)
+      .filter((id): id is string => !!id) ?? [],
+  ),
+]);
+const nodes = computed(() =>
+  stages.value.map((n) => {
+    const steps = props.task?.steps.filter((s) => s.nodeId === n.id) ?? [];
+    const unselected = typed.value && !storyboardStages(props.task!).some((s) => s.id === n.id);
+    const skipped = steps.length > 0 && steps.every((s) => s.status === 'SKIPPED');
+    const status = steps.some((s) => s.status === 'RUNNING')
+      ? 'RUNNING'
+      : steps.some((s) => s.status === 'FAILED')
+        ? 'FAILED'
+        : steps.length && steps.every((s) => ['SUCCEEDED', 'SKIPPED'].includes(s.status))
+          ? 'SUCCEEDED'
+          : 'PENDING';
+    return {
+      ...n,
+      tone: unselected
+        ? 'unselected'
+        : status === 'RUNNING'
+          ? 'running'
+          : status === 'FAILED'
+            ? 'danger'
+            : status === 'SUCCEEDED'
+              ? 'success'
+              : 'pending',
+      statusLabel: unselected
+        ? '未选择'
+        : skipped
+          ? '已跳过'
+          : status === 'RUNNING'
+            ? '执行中'
+            : status === 'FAILED'
+              ? '未完成'
+              : status === 'SUCCEEDED'
+                ? '已完成'
+                : '等待执行',
+    };
+  }),
+);
+async function load(append = false) {
+  controller?.abort();
+  controller = new AbortController();
+  const scope = controller;
+  if (!append) {
+    detail.value = null;
+    page.value = 0;
+  }
+  error.value = '';
+  loading.value = false;
+  if (
+    !props.open ||
+    !props.task ||
+    !selected.value ||
+    nodes.value.find((n) => n.id === selected.value)?.tone === 'unselected'
+  )
+    return;
+  loading.value = true;
+  try {
+    const value = await storyboardApi.detail(
+      props.projectId,
+      props.task.id,
+      selected.value,
+      '',
+      page.value,
+      scope.signal,
+    );
+    if (scope !== controller || scope.signal.aborted) return;
+    if (append && detail.value) {
+      value.sections = value.sections.map((s, i) =>
+        s.kind === 'OUTPUT'
+          ? { ...s, items: [...(detail.value!.sections[i]?.items ?? []), ...s.items] }
+          : s,
+      );
+    }
+    detail.value = value;
+  } catch (e) {
+    if (!isAbortError(e) && scope === controller)
+      error.value = '节点详情查询中断，请重试；后台任务状态不受影响。';
+  } finally {
+    if (scope === controller) loading.value = false;
+  }
+}
+watch([() => props.open, () => props.projectId, () => props.task?.id], () => {
+  selected.value = null;
+  controller?.abort();
+  detail.value = null;
+});
+watch(selected, () => void load());
+watch(
+  () => props.task?.updatedAt,
+  () => {
+    if (props.open && selected.value && page.value === 0 && !loading.value) void load();
+  },
+);
+onBeforeUnmount(() => controller?.abort());
+</script>
+<template>
+  <WorkflowExecutionGraphDialog
+    :open="open"
+    :title="storyOnly ? '脚本创作工作流' : '分镜创作工作流'"
+    :eyebrow="storyOnly ? 'SCRIPT WORKFLOW' : 'STORYBOARD WORKFLOW'"
+    :description="
+      storyOnly
+        ? '从差异化构思到完整脚本，每份方案独立审校与保存。'
+        : '从完整故事到逐镜脚本，每份方案独立审校与保存。'
+    "
+    :rows="rows"
+    :nodes="nodes"
+    :selected="selected"
+    :edge-count="edges?.length ?? Math.max(0, stages.length - 1)"
+    :edges="edges"
+    :empty-message="!task ? '尚未开始 AI 创作，执行后可在此查看每个阶段的实际内容。' : undefined"
+    @close="emit('close')"
+    @select="selected = $event"
+  >
+    <template #toolbar
+      ><div v-if="task && typed" class="storyboard-graph-filter">
+        <BaseButton type="button" @click="showAllRoutes = !showAllRoutes">{{
+          showAllRoutes ? '聚焦当前线路' : '查看全部线路'
+        }}</BaseButton>
+      </div></template
+    >
+    <div v-if="!selected" class="node-detail-empty">
+      <Workflow :size="30" /><strong>选择节点查看结果</strong>
+      <p>
+        {{ storyOnly ? '阅读正文、创意安排与具体审校意见。' : '阅读故事、镜头与具体审校意见。' }}
+      </p>
+    </div>
+    <template v-else
+      ><header class="node-detail-header">
+        <div>
+          <span>NODE DETAIL</span><strong>{{ nodes.find((n) => n.id === selected)?.label }}</strong>
+        </div>
+        <button type="button" aria-label="刷新当前节点详情" :disabled="loading" @click="load()">
+          <RefreshCw :size="14" :class="{ spin: loading }" />
+        </button>
+      </header>
+      <p v-if="loading && !detail" class="node-detail-message">
+        <LoaderCircle :size="14" class="spin" />正在读取已保存内容…
+      </p>
+      <p v-if="error" class="node-detail-message error" role="alert">{{ error }}</p>
+      <template v-if="detail"
+        ><p class="node-summary">{{ detail.summary }}</p>
+        <details
+          v-for="section in detail.sections"
+          :key="section.kind"
+          class="node-detail-section"
+          :class="`is-${section.kind.toLowerCase()}`"
+          :open="section.kind !== 'EXECUTION'"
+        >
+          <summary class="node-detail-section__heading">
+            <span class="node-detail-section__icon"
+              ><ArrowDownToLine v-if="section.kind === 'INPUT'" :size="13" /><ArrowUpFromLine
+                v-else-if="section.kind === 'OUTPUT'"
+                :size="13" /><Activity v-else :size="13" /></span
+            ><strong>{{ section.title }}</strong>
+          </summary>
+          <div class="node-detail-section__content">
+            <section v-for="(item, i) in section.items" :key="i" class="node-result-block">
+              <h3>{{ item.title }}</h3>
+              <p class="storyboard-result-text">{{ item.content }}</p>
+            </section>
+            <p v-if="!section.items.length" class="node-detail-no-fields">尚无已保存结果</p>
+          </div>
+        </details>
+        <div v-if="selected === 'SAVE' && savedScripts.length" class="saved-script-actions">
+          <BaseButton
+            v-for="(id, index) in savedScripts"
+            :key="id"
+            type="button"
+            @click="emit('openScript', id)"
+          >
+            打开{{ scripts.find((s) => s.id === id)?.name || `创作方案 ${index + 1}` }}
+          </BaseButton>
+        </div>
+        <BaseButton
+          v-if="detail.hasMore"
+          type="button"
+          :disabled="loading"
+          @click="
+            page++;
+            load(true);
+          "
+        >
+          继续阅读
+        </BaseButton></template
+      >
+      <p
+        v-else-if="nodes.find((n) => n.id === selected)?.tone === 'unselected'"
+        class="node-detail-no-fields"
+      >
+        本次未选择此线路，不执行生成任务。
+      </p>
+      <p v-else-if="!task" class="node-detail-no-fields">尚未执行，暂无业务产物。</p>
+    </template>
+  </WorkflowExecutionGraphDialog>
+</template>
+<style scoped>
+.storyboard-graph-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 0 20px 12px;
+  color: #61738c;
+  font-size: 12px;
+}
+.saved-script-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.storyboard-result-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+  font-size: 12px;
+  color: #475569;
+}
+</style>

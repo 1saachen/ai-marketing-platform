@@ -1,0 +1,2483 @@
+import { createHash } from 'node:crypto';
+
+import type {
+  EffectPromptBatchSettings,
+  EffectPromptDimensions,
+  EffectPromptFragmentType,
+  EffectPromptNodeDetailBlock,
+  EffectPromptNodeDetailBlueprint,
+  EffectPromptNodeDetailCreativeSample,
+  EffectPromptNodeDetailField,
+  EffectPromptNodeDetailPrompt,
+  EffectPromptNodeDetailSection,
+  EffectPromptNodeId,
+  EffectPromptQualityScores,
+  GetEffectPromptNodeDetailData,
+} from '@ai-marketing/contracts';
+import {
+  EFFECT_PROMPT_DIMENSIONS,
+  EFFECT_PROMPT_FRAGMENT_TYPE_LABELS,
+  EFFECT_PROMPT_FRAGMENT_TYPES,
+  EFFECT_PROMPT_MAX_RUN_ATTEMPTS,
+  EFFECT_PROMPT_NODE_DETAIL_LIMITS,
+  EFFECT_PROMPT_SEMANTIC_DUPLICATE_RATE_LIMIT,
+  EFFECT_PROMPT_SEMANTIC_SIMILARITY_THRESHOLD,
+  normalizeEffectPromptFragmentType,
+} from '@ai-marketing/contracts';
+
+import type { EffectPromptNodeDetailRunRecord } from './effect-prompt.repository';
+import { normalizeEffectExtractionResult } from '../information-extraction/effect-extraction.validation';
+import {
+  EFFECT_PROMPT_VISUAL_OVERLAP_THRESHOLD,
+  isEffectPromptSettings,
+  trigramDice,
+} from './effect-prompt.quality';
+
+type JsonRecord = Record<string, unknown>;
+type Candidate = EffectPromptNodeDetailPrompt & {
+  invalidReasons: string[];
+  ordinal: number;
+  round: number;
+  shardIndex: number;
+};
+type Combination = {
+  dimensions: EffectPromptDimensions;
+  evidenceMode: string;
+  fragmentType: EffectPromptFragmentType;
+  ordinal: number;
+  round: number;
+  shardIndex: number;
+  targetDurationSeconds: number;
+  visibleAction: string;
+};
+type DisplayResult = {
+  items: EffectPromptNodeDetailPrompt[];
+  qualityStatus: string;
+  metrics: {
+    acceptedCount: number;
+    executionInvalidReasons: Array<{ code: string; count: number }>;
+    fragmentTypeDistribution: Array<{
+      actualCount: number;
+      fragmentType: EffectPromptFragmentType;
+      targetCount: number;
+    }>;
+    insightCoverage: JsonRecord;
+    removedDimensionConflicts: number;
+    removedExecutionInvalid: number;
+    removedSemanticDuplicates: number;
+    removedVisualDuplicates: number;
+    semanticDuplicateRate: number;
+    sellingPointCoverage: { covered: string[]; missing: string[]; required: string[] };
+    targetCount: number;
+    visualOverlapRate: number;
+  };
+};
+
+type Relationship = {
+  bundleId: string;
+  fragmentType: EffectPromptFragmentType;
+  primaryFactId: string;
+  factIds: string[];
+  creativeIntent: string;
+  blueprintQuota: number;
+};
+
+type Coordinate = {
+  coordinateId: string;
+  fragmentType: EffectPromptFragmentType;
+  dimension: keyof EffectPromptDimensions;
+  value: string;
+  compatibleBundleIds: string[];
+  sourceFactIds: string[];
+};
+
+const GENERATION_FRAGMENT_BY_NODE: Partial<Record<string, EffectPromptFragmentType>> = {
+  GENERATE_HOOK: 'HOOK',
+  GENERATE_PAIN: 'HOOK',
+  GENERATE_PRODUCT_DISPLAY: 'PRODUCT_DISPLAY',
+  GENERATE_SELLING_POINT_EXPLANATION: 'EFFECT',
+  GENERATE_CTA: 'CTA',
+  GENERATE_OUTRO: 'CTA',
+};
+
+const RELATIONSHIP_FRAGMENT_BY_NODE: Partial<Record<string, EffectPromptFragmentType>> = {
+  PLAN_HOOK_RELATIONSHIPS: 'HOOK',
+  PLAN_PAIN_RELATIONSHIPS: 'HOOK',
+  PLAN_PRODUCT_DISPLAY_RELATIONSHIPS: 'PRODUCT_DISPLAY',
+  PLAN_SELLING_POINT_EXPLANATION_RELATIONSHIPS: 'EFFECT',
+  PLAN_CTA_RELATIONSHIPS: 'CTA',
+  PLAN_OUTRO_RELATIONSHIPS: 'CTA',
+};
+
+const COORDINATE_FRAGMENT_BY_NODE: Partial<Record<string, EffectPromptFragmentType>> = {
+  PLAN_HOOK_COORDINATES: 'HOOK',
+  PLAN_PAIN_COORDINATES: 'HOOK',
+  PLAN_PRODUCT_DISPLAY_COORDINATES: 'PRODUCT_DISPLAY',
+  PLAN_SELLING_POINT_EXPLANATION_COORDINATES: 'EFFECT',
+  PLAN_CTA_COORDINATES: 'CTA',
+  PLAN_OUTRO_COORDINATES: 'CTA',
+};
+
+const BLUEPRINT_FRAGMENT_BY_NODE: Partial<Record<string, EffectPromptFragmentType>> = {
+  GENERATE_HOOK_BLUEPRINTS: 'HOOK',
+  GENERATE_PAIN_BLUEPRINTS: 'HOOK',
+  GENERATE_PRODUCT_DISPLAY_BLUEPRINTS: 'PRODUCT_DISPLAY',
+  GENERATE_SELLING_POINT_EXPLANATION_BLUEPRINTS: 'EFFECT',
+  GENERATE_CTA_BLUEPRINTS: 'CTA',
+  GENERATE_OUTRO_BLUEPRINTS: 'CTA',
+};
+
+const ISSUE_LABELS: Record<string, string> = {
+  ABSTRACT_VISUAL: '把抽象信息伪造成可见画面证据',
+  ABSTRACT_PERSONA: '受众画像被当作出镜人物',
+  AUDIO_OVERREACH: '素材包含口播、旁白或背景音乐要求',
+  SPEECH_DEPENDENT_MATERIAL: '素材依赖人物口播、旁白或可辨识台词',
+  BAKED_TEXT: '素材要求烧录字幕或界面文字',
+  BROKEN_TEXT: '正文存在破损或占位内容',
+  DIMENSION_CONFLICT: '六维差异不足',
+  DURATION_MISMATCH: '片段时长与类型配置不一致',
+  FIELD_DUPLICATION: '字段或句子机械重复',
+  FULL_TIMELINE: '包含完整时间轴或多镜头结构',
+  FULL_TIMELINE_NOT_FRAGMENT: '包含完整时间轴或多镜头结构',
+  CAMERA_CONFLICT: '同一片段包含互相冲突的运镜',
+  CTA_NO_SAFE_AREA: '转化片段没有形成可供后续文案使用的安全留白',
+  EVIDENCE_MODE_MISMATCH: '卖点画面与允许呈现的证据类型不一致',
+  FACT_OVERLOAD: '单条片段承载了过多提炼事实',
+  MISSING_DEEP_BUSINESS_FACT: '单条片段只建立了产品身份，未实际使用卖点、痛点、受众或场景',
+  HOOK_RESOLVED: '钩子片段提前揭晓了答案或解决方案',
+  META_LANGUAGE: '包含策划元话语',
+  MULTI_STAGE_STORY: '片段包含多个叙事阶段',
+  NO_VISIBLE_ACTION: '缺少可拍摄的连续动作',
+  NEGATIVE_TAIL_DUPLICATION: '重复附加了长篇禁用说明',
+  OVERLOADED_ACTION: '单条片段包含多个主要动作',
+  OUTRO_NEW_MESSAGE: '片尾品牌片段重新引入了卖点或新信息',
+  OUTRO_UNSTABLE: '片尾品牌片段仍包含明显运动，无法稳定定格',
+  PAIN_RESOLVED: '痛点片段在同一镜头中完成了解决',
+  PLACEHOLDER_TEXT: '正文存在占位描述',
+  PRODUCT_NOT_FIRST_FRAME: '产品展示片段没有在首帧建立清楚产品主体',
+  PRODUCT_ROLE_OVERLOAD: '产品展示片段混入了效果或解决方案',
+  PROMPT_LENGTH_MISMATCH: '正文长度与目标片段时长不匹配',
+  ROLE_CONFLICT: '片段承担了互相冲突的职责',
+  PHYSICS_BREAK: '画面包含缺乏依据的物理跳变',
+  REFERENCE_DEPENDENCY: '没有参考图却要求精确还原包装细节',
+  SEMANTIC_DIVERSITY_SOFT_TARGET_NOT_MET:
+    '已按目标数量保存；当前批次仍有少量语义相近内容，可按需人工调整',
+  SEMANTIC_DUPLICATE: '语义高度相似',
+  SOURCE_FACT_VIOLATION: '使用了上游未确认事实',
+  STACKED_PERSONA: '人物身份或受众画像堆叠',
+  UNFILMABLE_EVIDENCE: '把不可观察信息写成确定画面',
+  VISUAL_OVERLAP: '画面结构高度重合',
+};
+
+const isRecord = (value: unknown): value is JsonRecord =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const publicText = (value: unknown, maxLength = 12_000): string =>
+  String(value ?? '')
+    .replace(/data:[^\s,]+;base64,[a-z\d+/=]+/giu, '[图片数据已隐藏]')
+    .replace(/[a-z\d+/]{256,}={0,2}/giu, '[Base64 数据已隐藏]')
+    .replace(/(?:https?|tos|s3):\/\/\S+/giu, '[链接已隐藏]')
+    .replace(/[a-z]:\\(?:[^\\\s]+\\)+[^\s]+/giu, '[本地路径已隐藏]')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, maxLength);
+
+const publicMultilineText = (value: unknown, maxLength = 30_000): string =>
+  String(value ?? '')
+    .replace(/data:[^\s,]+;base64,[a-z\d+/=]+/giu, '[图片数据已隐藏]')
+    .replace(/[a-z\d+/]{256,}={0,2}/giu, '[Base64 数据已隐藏]')
+    .replace(/(?:https?|tos|s3):\/\/\S+/giu, '[链接已隐藏]')
+    .replace(/[a-z]:\\(?:[^\\\s]+\\)+[^\s]+/giu, '[本地路径已隐藏]')
+    .split(/\r?\n/gu)
+    .map((line) => line.replace(/[\t ]+/gu, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .slice(0, maxLength);
+
+const safeStrings = (value: unknown, limit = 40): string[] =>
+  (Array.isArray(value) ? value : [])
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => publicText(item, 400))
+    .filter(Boolean)
+    .filter((item, index, items) => items.indexOf(item) === index)
+    .slice(0, limit);
+
+const safeNumber = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+
+const fragmentType = (value: unknown): EffectPromptFragmentType | null =>
+  normalizeEffectPromptFragmentType(value);
+
+const dimensions = (value: unknown): EffectPromptDimensions | null => {
+  if (!isRecord(value)) return null;
+  const entries = EFFECT_PROMPT_DIMENSIONS.map(({ key }) => [
+    key,
+    publicText(
+      key === 'productRelation' ? (value.productRelation ?? value.sellingPoint) : value[key],
+      240,
+    ),
+  ]);
+  if (entries.some(([, item]) => !item)) return null;
+  return Object.fromEntries(entries) as EffectPromptDimensions;
+};
+
+const metadataRecord = (value: unknown): JsonRecord => (isRecord(value) ? value : {});
+
+const compact = (
+  fields: Array<EffectPromptNodeDetailField | null>,
+): EffectPromptNodeDetailField[] =>
+  fields.filter((field): field is EffectPromptNodeDetailField => field !== null);
+
+const textField = (label: string, value: unknown): EffectPromptNodeDetailField | null => {
+  const text = publicText(value, 1000);
+  return text ? { label, value: text } : null;
+};
+
+const numberField = (
+  metadata: JsonRecord,
+  key: string,
+  label: string,
+): EffectPromptNodeDetailField | null => {
+  const value = safeNumber(metadata[key]);
+  return value === null ? null : { label, value };
+};
+
+const enumField = (
+  metadata: JsonRecord,
+  key: string,
+  label: string,
+  allowed: readonly string[],
+): EffectPromptNodeDetailField | null => {
+  const value = metadata[key];
+  return typeof value === 'string' && allowed.includes(value) ? { label, value } : null;
+};
+
+const inputSnapshot = (run: EffectPromptNodeDetailRunRecord): JsonRecord =>
+  metadataRecord(run.inputSnapshot);
+
+const inputSettings = (run: EffectPromptNodeDetailRunRecord): EffectPromptBatchSettings | null => {
+  const settings = inputSnapshot(run).settings;
+  return isEffectPromptSettings(settings) ? settings : null;
+};
+
+const dimensionValue = (
+  dimensionsValue: EffectPromptNodeDetailPrompt['dimensions'],
+  key: keyof EffectPromptDimensions,
+): string => dimensionsValue[key];
+
+const insightResult = (run: EffectPromptNodeDetailRunRecord): JsonRecord => {
+  const artifact = metadataRecord(inputSnapshot(run).insightArtifact);
+  return metadataRecord(artifact.result);
+};
+
+const insightText = (insight: JsonRecord, ...keys: string[]): string => {
+  for (const key of keys) {
+    const value = publicText(insight[key], 500);
+    if (value) return value;
+  }
+  return '';
+};
+
+const insightList = (insight: JsonRecord, ...keys: string[]): string[] => {
+  for (const key of keys) {
+    const value = safeStrings(insight[key]);
+    if (value.length) return value;
+  }
+  return [];
+};
+
+const insightReferenceValues = (value: unknown): string[] =>
+  (Array.isArray(value) ? value : []).flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const text = publicText(item.value, 400);
+    return text ? [text] : [];
+  });
+
+const promptCode = (ordinal: number): string => `P${String(ordinal).padStart(3, '0')}`;
+
+const candidates = (run: EffectPromptNodeDetailRunRecord): Candidate[] => {
+  const rows: Candidate[] = [];
+  for (const shard of run.shards) {
+    if (shard.phase === 'BLUEPRINT') continue;
+    for (const raw of Array.isArray(shard.items) ? shard.items : []) {
+      if (!isRecord(raw)) continue;
+      const type = fragmentType(raw.fragmentType);
+      const itemDimensions = dimensions(raw.dimensions);
+      const content = publicText(raw.content);
+      const ordinal = safeNumber(raw.ordinal);
+      const duration = safeNumber(raw.targetDurationSeconds);
+      if (!type || !itemDimensions || !content || ordinal === null || duration === null) continue;
+      rows.push({
+        code: promptCode(ordinal),
+        fragmentType: type,
+        targetDurationSeconds: duration,
+        dimensions: itemDimensions,
+        content,
+        invalidReasons: safeStrings(raw.executionInvalidReasons, 20),
+        ordinal,
+        round: shard.round,
+        shardIndex: shard.shardIndex,
+      });
+    }
+  }
+  return rows
+    .filter(
+      (item, index, items) =>
+        items.findIndex(
+          (candidate) => candidate.ordinal === item.ordinal && candidate.content === item.content,
+        ) === index,
+    )
+    .sort((left, right) => left.ordinal - right.ordinal || left.round - right.round);
+};
+
+const combinations = (run: EffectPromptNodeDetailRunRecord): Combination[] => {
+  const rows: Combination[] = [];
+  for (const shard of run.shards) {
+    if (shard.phase === 'BLUEPRINT') continue;
+    for (const raw of Array.isArray(shard.combinationPlan) ? shard.combinationPlan : []) {
+      if (!isRecord(raw)) continue;
+      const type = fragmentType(raw.fragmentType);
+      const itemDimensions = dimensions(raw.dimensions);
+      const ordinal = safeNumber(raw.ordinal);
+      const duration = safeNumber(raw.targetDurationSeconds);
+      if (!type || !itemDimensions || ordinal === null || duration === null) continue;
+      rows.push({
+        fragmentType: type,
+        dimensions: itemDimensions,
+        evidenceMode: publicText(raw.evidenceMode, 80),
+        visibleAction: publicText(raw.visibleAction, 500),
+        targetDurationSeconds: duration,
+        ordinal,
+        round: shard.round,
+        shardIndex: shard.shardIndex,
+      });
+    }
+  }
+  return rows
+    .filter(
+      (item, index, items) =>
+        items.findIndex(
+          (candidate) => candidate.ordinal === item.ordinal && candidate.round === item.round,
+        ) === index,
+    )
+    .sort((left, right) => left.round - right.round || left.ordinal - right.ordinal);
+};
+
+const promptPreview = (item: EffectPromptNodeDetailPrompt): EffectPromptNodeDetailPrompt => ({
+  code: publicText(item.code, 40),
+  fragmentType: item.fragmentType,
+  targetDurationSeconds: item.targetDurationSeconds,
+  dimensions: Object.fromEntries(
+    Object.entries(item.dimensions).map(([key, value]) => [key, publicText(value, 240)]),
+  ) as EffectPromptDimensions,
+  content: publicText(item.content),
+});
+
+const rawPromptPreview = (value: unknown): EffectPromptNodeDetailPrompt | null => {
+  if (!isRecord(value)) return null;
+  const type = fragmentType(value.fragmentType);
+  const itemDimensions = dimensions(value.dimensions);
+  const content = publicText(value.content);
+  const duration = safeNumber(value.targetDurationSeconds);
+  const code = publicText(value.code, 40);
+  if (!type || !itemDimensions || !content || duration === null || !code) return null;
+  return {
+    code,
+    fragmentType: type,
+    targetDurationSeconds: duration,
+    dimensions: itemDimensions,
+    content,
+  };
+};
+
+const retainedPrompts = (run: EffectPromptNodeDetailRunRecord): EffectPromptNodeDetailPrompt[] => {
+  const retained = inputSnapshot(run).retainedManualItems;
+  return (Array.isArray(retained) ? retained : []).flatMap((item) => {
+    const parsed = rawPromptPreview(item);
+    return parsed ? [parsed] : [];
+  });
+};
+
+const finalResult = (run: EffectPromptNodeDetailRunRecord): DisplayResult | null => {
+  const raw = run.result ? metadataRecord(run.result.draftResult) : {};
+  const metrics = metadataRecord(raw.metrics);
+  const coverage = metadataRecord(metrics.sellingPointCoverage);
+  const items = (Array.isArray(raw.items) ? raw.items : []).flatMap((item) => {
+    const parsed = rawPromptPreview(item);
+    return parsed ? [parsed] : [];
+  });
+  if (!items.length) return null;
+  const distribution = (
+    Array.isArray(metrics.fragmentTypeDistribution) ? metrics.fragmentTypeDistribution : []
+  ).flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const type = fragmentType(item.fragmentType);
+    const targetCount = safeNumber(item.targetCount);
+    const actualCount = safeNumber(item.actualCount);
+    return type && targetCount !== null && actualCount !== null
+      ? [{ fragmentType: type, targetCount, actualCount }]
+      : [];
+  });
+  const reasons = (
+    Array.isArray(metrics.executionInvalidReasons) ? metrics.executionInvalidReasons : []
+  ).flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const code = publicText(item.code, 120);
+    const count = safeNumber(item.count);
+    return code && count !== null ? [{ code, count }] : [];
+  });
+  const metricNumber = (key: string): number => safeNumber(metrics[key]) ?? 0;
+  return {
+    items,
+    qualityStatus: publicText(raw.qualityStatus, 40) || 'NEEDS_REVIEW',
+    metrics: {
+      acceptedCount: metricNumber('acceptedCount'),
+      targetCount: metricNumber('targetCount'),
+      removedSemanticDuplicates: metricNumber('removedSemanticDuplicates'),
+      removedVisualDuplicates: metricNumber('removedVisualDuplicates'),
+      removedDimensionConflicts: metricNumber('removedDimensionConflicts'),
+      removedExecutionInvalid: metricNumber('removedExecutionInvalid'),
+      semanticDuplicateRate: metricNumber('semanticDuplicateRate'),
+      visualOverlapRate: metricNumber('visualOverlapRate'),
+      fragmentTypeDistribution: distribution,
+      sellingPointCoverage: {
+        required: safeStrings(coverage.required),
+        covered: safeStrings(coverage.covered),
+        missing: safeStrings(coverage.missing),
+      },
+      insightCoverage: metadataRecord(metrics.insightCoverage),
+      executionInvalidReasons: reasons,
+    },
+  };
+};
+
+const tagGroup = (label: string, values: string[]) => {
+  const unique = values
+    .filter(Boolean)
+    .filter((value, index, items) => items.indexOf(value) === index);
+  return {
+    label,
+    values: unique.slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxTagValues),
+    remainingCount: Math.max(0, unique.length - EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxTagValues),
+  };
+};
+
+const tagBlock = (
+  title: string,
+  groups: Array<ReturnType<typeof tagGroup>>,
+): EffectPromptNodeDetailBlock | null => {
+  const visible = groups.filter(({ values }) => values.length);
+  return visible.length ? { kind: 'TAG_LIST', title, groups: visible } : null;
+};
+
+const combinationBlock = (
+  title: string,
+  items: Combination[],
+): EffectPromptNodeDetailBlock | null => {
+  const visible = items.slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxSamples);
+  return visible.length
+    ? {
+        kind: 'COMBINATION_LIST',
+        title,
+        items: visible.map((item, index) => ({
+          title: `组合 ${index + 1} · ${EFFECT_PROMPT_FRAGMENT_TYPE_LABELS[item.fragmentType]}`,
+          fragmentType: item.fragmentType,
+          targetDurationSeconds: item.targetDurationSeconds,
+          dimensions: item.dimensions,
+          visibleAction: item.visibleAction,
+          evidenceMode: item.evidenceMode,
+        })),
+      }
+    : null;
+};
+
+const promptBlock = (
+  title: string,
+  items: EffectPromptNodeDetailPrompt[],
+): EffectPromptNodeDetailBlock | null => {
+  const visible = items.slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxSamples).map(promptPreview);
+  return visible.length ? { kind: 'PROMPT_LIST', title, items: visible } : null;
+};
+
+const routeBlock = (
+  run: EffectPromptNodeDetailRunRecord,
+  title: string,
+  finalCounts?: Partial<Record<EffectPromptFragmentType, number>>,
+  phase: 'BLUEPRINT' | 'PROMPT' = 'PROMPT',
+): EffectPromptNodeDetailBlock | null => {
+  const settings = inputSettings(run);
+  if (!settings) return null;
+  const allCandidates = candidates(run);
+  const rows = EFFECT_PROMPT_FRAGMENT_TYPES.map((type) => {
+    const typeShards = run.shards.filter(
+      (shard) =>
+        shard.phase === phase &&
+        (Array.isArray(shard.combinationPlan) ? shard.combinationPlan : []).some(
+          (raw) => isRecord(raw) && raw.fragmentType === type,
+        ),
+    );
+    const completedShards = typeShards.filter(({ status }) => status === 'SUCCEEDED').length;
+    const failedShards = typeShards.filter(({ status }) => status === 'FAILED').length;
+    const runningShards = typeShards.filter(({ status }) => status === 'RUNNING').length;
+    const status = failedShards
+      ? completedShards
+        ? 'PARTIAL'
+        : 'FAILED'
+      : runningShards
+        ? 'RUNNING'
+        : completedShards
+          ? 'SUCCEEDED'
+          : 'PENDING';
+    return {
+      fragmentType: type,
+      targetCount: Math.ceil(settings.targetCount / EFFECT_PROMPT_FRAGMENT_TYPES.length),
+      candidateCount:
+        finalCounts?.[type] ??
+        (phase === 'BLUEPRINT'
+          ? blueprints(run).filter((item) => item.fragmentType === type).length
+          : allCandidates.filter((item) => item.fragmentType === type).length),
+      totalShards: typeShards.length,
+      completedShards,
+      failedShards,
+      status,
+    } as const;
+  });
+  return { kind: 'ROUTE_LIST', title, items: rows };
+};
+
+const issueBlock = (
+  title: string,
+  issues: Array<{ code: string; count: number; examples?: string[] }>,
+): EffectPromptNodeDetailBlock | null => {
+  const visible = issues
+    .filter(({ count }) => count > 0)
+    .slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxIssues)
+    .map(({ code, count, examples = [] }) => ({
+      code: publicText(code, 120),
+      label: ISSUE_LABELS[code] ?? publicText(code, 160),
+      count,
+      examples: examples
+        .map((example) => publicText(example, 500))
+        .filter(Boolean)
+        .slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxSamples),
+    }));
+  return visible.length ? { kind: 'ISSUE_LIST', title, items: visible } : null;
+};
+
+const normalizedValue = (value: string): string =>
+  value.normalize('NFC').trim().toLocaleLowerCase('zh-CN').replace(/\s+/gu, ' ');
+
+const checkpointPlan = (value: unknown): JsonRecord => {
+  const checkpoint = metadataRecord(metadataRecord(value).checkpoint);
+  return metadataRecord(checkpoint.plan);
+};
+
+const CREATIVE_DIRECTION_DIMENSION_LABELS: Record<string, string> = {
+  NARRATIVE: '叙事结构',
+  SCENE: '场景',
+  PERSONA: '人物',
+  PRODUCT_RELATION: '产品关联点',
+  CAMERA: '镜头语言',
+  EMOTION: '情绪基调',
+};
+
+const creativePlanBlock = (value: unknown): EffectPromptNodeDetailBlock | null => {
+  const plan = checkpointPlan(value);
+  const landscape = metadataRecord(plan.landscape);
+  const rawTerritories = Array.isArray(landscape.territories) ? landscape.territories : [];
+  const rawDirections = Array.isArray(plan.directions) ? plan.directions : [];
+  const territories = rawTerritories.flatMap((rawTerritory) => {
+    if (!isRecord(rawTerritory)) return [];
+    const territoryId = publicText(rawTerritory.territoryId, 80);
+    const title = publicText(rawTerritory.label, 120);
+    const sceneBoundary = publicText(rawTerritory.sceneBoundary, 360);
+    const differentiationGoal = publicText(rawTerritory.differentiationGoal, 360);
+    const targetSlots = safeNumber(rawTerritory.targetSlots);
+    if (!territoryId || !title || !sceneBoundary || !differentiationGoal || targetSlots === null)
+      return [];
+    const actions = (Array.isArray(rawTerritory.actions) ? rawTerritory.actions : []).flatMap(
+      (rawAction) => {
+        if (!isRecord(rawAction)) return [];
+        const actionId = publicText(rawAction.actionId, 80);
+        const label = publicText(rawAction.label, 160);
+        return actionId && label ? [{ actionId, label }] : [];
+      },
+    );
+    const actionById = new Map(actions.map((action) => [action.actionId, action.label]));
+    const directions = rawDirections.flatMap((rawDirection, directionIndex) => {
+      if (!isRecord(rawDirection) || publicText(rawDirection.territoryId, 80) !== territoryId)
+        return [];
+      const creativeDirection = publicText(rawDirection.creativeDirection, 500);
+      if (!creativeDirection) return [];
+      const primaryActionId = publicText(rawDirection.primaryActionId, 80);
+      return [
+        {
+          code: `方向 ${String(directionIndex + 1).padStart(2, '0')}`,
+          creativeDirection,
+          primaryAction: actionById.get(primaryActionId) ?? '按该空间动作范围执行',
+          priorityDimensions: safeStrings(rawDirection.priorityDimensions, 2).flatMap(
+            (dimension) => CREATIVE_DIRECTION_DIMENSION_LABELS[dimension] ?? [],
+          ),
+        },
+      ];
+    });
+    return [
+      {
+        title,
+        sceneBoundary,
+        differentiationGoal,
+        targetSlots,
+        actions: actions.map((action) => action.label),
+        directions,
+      },
+    ];
+  });
+  if (!territories.length) return null;
+  return {
+    kind: 'CREATIVE_PLAN_LIST',
+    title: '产品创意空间与方向',
+    territoryCount: territories.length,
+    directionCount: territories.reduce(
+      (total, territory) => total + territory.directions.length,
+      0,
+    ),
+    items: territories,
+  };
+};
+
+const collectStringLeaves = (value: unknown, output: string[] = []): string[] => {
+  if (typeof value === 'string') {
+    const cleaned = publicText(value, 500);
+    if (cleaned) output.push(cleaned);
+    return output;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectStringLeaves(item, output));
+    return output;
+  }
+  if (isRecord(value)) Object.values(value).forEach((item) => collectStringLeaves(item, output));
+  return output;
+};
+
+const factValueLookup = (run: EffectPromptNodeDetailRunRecord): Map<string, string> => {
+  const result = new Map<string, string>();
+  for (const value of collectStringLeaves(insightResult(run))) {
+    const digest = createHash('sha256').update(normalizedValue(value)).digest('hex').slice(0, 20);
+    if (!result.has(digest)) result.set(digest, value);
+  }
+  return result;
+};
+
+const displayFact = (lookup: Map<string, string>, factId: string): string => {
+  const digest = factId.includes(':') ? factId.slice(factId.lastIndexOf(':') + 1) : '';
+  return lookup.get(digest) ?? '已确认事实（当前阶段未提供展示文本）';
+};
+
+const relationships = (run: EffectPromptNodeDetailRunRecord): Relationship[] => {
+  const quotaByBundle = new Map<string, number>();
+  for (const shard of run.shards) {
+    if (shard.phase !== 'BLUEPRINT') continue;
+    for (const raw of Array.isArray(shard.combinationPlan) ? shard.combinationPlan : []) {
+      if (!isRecord(raw)) continue;
+      const bundleId = publicText(raw.bundleId, 120);
+      if (bundleId) quotaByBundle.set(bundleId, (quotaByBundle.get(bundleId) ?? 0) + 1);
+    }
+  }
+  const rows: Relationship[] = [];
+  for (const stage of run.stages) {
+    if (!stage.nodeId.endsWith('_RELATIONSHIPS')) continue;
+    const plan = checkpointPlan(stage.metadata);
+    for (const raw of Array.isArray(plan.bundles) ? plan.bundles : []) {
+      if (!isRecord(raw)) continue;
+      const type = fragmentType(raw.fragmentType);
+      const bundleId = publicText(raw.bundleId, 120);
+      const primaryFactId = publicText(raw.primaryFactId, 120);
+      const factIds = safeStrings(raw.factIds, 8);
+      const creativeIntent = publicText(raw.creativeIntent, 500);
+      if (!type || !bundleId || !primaryFactId || !factIds.length || !creativeIntent) continue;
+      rows.push({
+        bundleId,
+        fragmentType: type,
+        primaryFactId,
+        factIds,
+        creativeIntent,
+        blueprintQuota: quotaByBundle.get(bundleId) ?? 0,
+      });
+    }
+  }
+  return rows.filter(
+    (item, index, items) => items.findIndex(({ bundleId }) => bundleId === item.bundleId) === index,
+  );
+};
+
+const coordinates = (run: EffectPromptNodeDetailRunRecord): Coordinate[] => {
+  const groups: Array<[keyof EffectPromptDimensions, string]> = [
+    ['narrative', 'narratives'],
+    ['scene', 'scenes'],
+    ['persona', 'personas'],
+    ['productRelation', 'sellingPoints'],
+    ['camera', 'cameras'],
+    ['emotion', 'emotions'],
+  ];
+  const rows: Coordinate[] = [];
+  for (const stage of run.stages) {
+    if (!stage.nodeId.endsWith('_COORDINATES')) continue;
+    const plan = checkpointPlan(stage.metadata);
+    const type = fragmentType(plan.fragmentType);
+    if (!type) continue;
+    for (const [dimension, key] of groups) {
+      for (const raw of Array.isArray(plan[key]) ? plan[key] : []) {
+        if (!isRecord(raw)) continue;
+        const coordinateId = publicText(raw.coordinateId, 120);
+        const value = publicText(raw.value, 240);
+        const compatibleBundleIds = safeStrings(raw.compatibleBundleIds, 16);
+        if (!coordinateId || !value || !compatibleBundleIds.length) continue;
+        rows.push({
+          coordinateId,
+          fragmentType: type,
+          dimension,
+          value,
+          compatibleBundleIds,
+          sourceFactIds: safeStrings(raw.sourceFactIds, 8),
+        });
+      }
+    }
+  }
+  return rows.filter(
+    (item, index, items) =>
+      items.findIndex(
+        ({ coordinateId, fragmentType: type }) =>
+          coordinateId === item.coordinateId && type === item.fragmentType,
+      ) === index,
+  );
+};
+
+const blueprints = (run: EffectPromptNodeDetailRunRecord): EffectPromptNodeDetailBlueprint[] => {
+  const coordinateById = new Map(
+    coordinates(run).map((item) => [`${item.fragmentType}:${item.coordinateId}`, item]),
+  );
+  const relationshipById = new Map(
+    relationships(run).map((item) => [item.bundleId, item.creativeIntent]),
+  );
+  const rows: EffectPromptNodeDetailBlueprint[] = [];
+  for (const shard of run.shards) {
+    if (shard.phase !== 'BLUEPRINT') continue;
+    const taskBySlot = new Map<string, JsonRecord>();
+    for (const raw of Array.isArray(shard.combinationPlan) ? shard.combinationPlan : []) {
+      if (!isRecord(raw)) continue;
+      const slotId = publicText(raw.slotId, 160);
+      if (slotId) taskBySlot.set(slotId, raw);
+    }
+    for (const raw of Array.isArray(shard.items) ? shard.items : []) {
+      if (!isRecord(raw)) continue;
+      const slotId = publicText(raw.slotId, 160);
+      const type = fragmentType(raw.fragmentType);
+      const task = taskBySlot.get(slotId);
+      const duration = safeNumber(task?.targetDurationSeconds);
+      const ordinal = safeNumber(task?.ordinal);
+      const bundleId = publicText(raw.bundleId, 120);
+      const coordinateIds: Record<keyof EffectPromptDimensions, string> = {
+        narrative: publicText(raw.narrativeCoordinateId, 120),
+        scene: publicText(raw.sceneCoordinateId, 120),
+        persona: publicText(raw.personaCoordinateId, 120),
+        productRelation: publicText(raw.sellingPointCoordinateId, 120),
+        camera: publicText(raw.cameraCoordinateId, 120),
+        emotion: publicText(raw.emotionCoordinateId, 120),
+      };
+      const itemDimensions = Object.fromEntries(
+        EFFECT_PROMPT_DIMENSIONS.map(({ key }) => [
+          key,
+          type ? coordinateById.get(`${type}:${coordinateIds[key]}`)?.value : undefined,
+        ]),
+      ) as EffectPromptDimensions;
+      if (
+        !slotId ||
+        !type ||
+        duration === null ||
+        ordinal === null ||
+        EFFECT_PROMPT_DIMENSIONS.some(({ key }) => !itemDimensions[key])
+      )
+        continue;
+      rows.push({
+        title: `蓝图 ${String(ordinal).padStart(3, '0')}`,
+        fragmentType: type,
+        relationshipTitle: relationshipById.get(bundleId) ?? '所属营销组合',
+        targetDurationSeconds: duration,
+        dimensions: itemDimensions,
+        openingState: publicText(raw.openingState, 500),
+        actionArc: publicText(raw.actionArc, 800),
+        endingState: publicText(raw.endingState, 500),
+      });
+    }
+  }
+  return rows.filter(
+    (item, index, items) =>
+      items.findIndex(
+        (candidate) =>
+          candidate.title === item.title && candidate.fragmentType === item.fragmentType,
+      ) === index,
+  );
+};
+
+const blueprintDistance = (
+  left: EffectPromptNodeDetailBlueprint,
+  right: EffectPromptNodeDetailBlueprint,
+): number =>
+  EFFECT_PROMPT_DIMENSIONS.reduce(
+    (total, { key }) =>
+      total +
+      (normalizedValue(left.dimensions[key]) === normalizedValue(right.dimensions[key]) ? 0 : 1),
+    0,
+  );
+
+const relationshipBlock = (
+  run: EffectPromptNodeDetailRunRecord,
+  title: string,
+  items: Relationship[],
+): EffectPromptNodeDetailBlock | null => {
+  const facts = factValueLookup(run);
+  const visible = items.slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxSamples).map((item) => ({
+    title: item.creativeIntent,
+    fragmentType: item.fragmentType,
+    primaryFact: displayFact(facts, item.primaryFactId),
+    auxiliaryFacts: item.factIds
+      .filter((factId) => factId !== item.primaryFactId)
+      .map((factId) => displayFact(facts, factId)),
+    creativeIntent: item.creativeIntent,
+    blueprintQuota: item.blueprintQuota,
+  }));
+  return visible.length ? { kind: 'RELATIONSHIP_LIST', title, items: visible } : null;
+};
+
+const coordinateBlock = (
+  run: EffectPromptNodeDetailRunRecord,
+  title: string,
+  items: Coordinate[],
+): EffectPromptNodeDetailBlock | null => {
+  const facts = factValueLookup(run);
+  const groups = EFFECT_PROMPT_DIMENSIONS.flatMap(({ key, label }) => {
+    const coordinatesForDimension = items
+      .filter(({ dimension }) => dimension === key)
+      .slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxTagValues)
+      .map((item) => ({
+        value: item.value,
+        compatibleBundleCount: item.compatibleBundleIds.length,
+        sourceFacts: item.sourceFactIds.map((factId) => displayFact(facts, factId)),
+      }));
+    return coordinatesForDimension.length
+      ? [{ dimension: key, label, items: coordinatesForDimension }]
+      : [];
+  });
+  return groups.length ? { kind: 'COORDINATE_LIST', title, groups } : null;
+};
+
+const blueprintBlock = (
+  title: string,
+  items: EffectPromptNodeDetailBlueprint[],
+): EffectPromptNodeDetailBlock | null => {
+  const visible = items.slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxSamples);
+  return visible.length ? { kind: 'BLUEPRINT_LIST', title, items: visible } : null;
+};
+
+const orthogonalBlock = (
+  title: string,
+  items: EffectPromptNodeDetailBlueprint[],
+): EffectPromptNodeDetailBlock | null => {
+  const pairs: Extract<EffectPromptNodeDetailBlock, { kind: 'ORTHOGONAL_PAIR_LIST' }>['items'] = [];
+  for (let leftIndex = 0; leftIndex < items.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < items.length; rightIndex += 1) {
+      const left = items[leftIndex]!;
+      const right = items[rightIndex]!;
+      const distance = blueprintDistance(left, right);
+      if (distance >= 3) continue;
+      pairs.push({
+        distance,
+        sameDimensions: EFFECT_PROMPT_DIMENSIONS.flatMap(({ key }) =>
+          normalizedValue(left.dimensions[key]) === normalizedValue(right.dimensions[key])
+            ? [key]
+            : [],
+        ),
+        left,
+        right,
+      });
+    }
+  }
+  const visible = pairs.slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxSamples);
+  return visible.length ? { kind: 'ORTHOGONAL_PAIR_LIST', title, items: visible } : null;
+};
+
+const semanticSignature = (item: EffectPromptNodeDetailPrompt): string =>
+  [
+    item.fragmentType,
+    item.dimensions.narrative,
+    dimensionValue(item.dimensions, 'productRelation'),
+    item.dimensions.scene,
+  ]
+    .map(normalizedValue)
+    .join('|');
+
+const pairBlock = (
+  title: string,
+  metric: 'SEMANTIC' | 'VISUAL',
+  items: EffectPromptNodeDetailPrompt[],
+): EffectPromptNodeDetailBlock | null => {
+  const pairs: Extract<EffectPromptNodeDetailBlock, { kind: 'PAIR_LIST' }>['items'] = [];
+  for (let leftIndex = 0; leftIndex < items.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < items.length; rightIndex += 1) {
+      const left = items[leftIndex]!;
+      const right = items[rightIndex]!;
+      if (metric === 'SEMANTIC') {
+        const sameSignature = semanticSignature(left) === semanticSignature(right);
+        const score = sameSignature ? 1 : trigramDice(left.content, right.content);
+        if (score < EFFECT_PROMPT_SEMANTIC_SIMILARITY_THRESHOLD) continue;
+        pairs.push({
+          score,
+          reasons: [sameSignature ? '结构化内容意图一致' : '正文语义高度相似'],
+          left: promptPreview(left),
+          right: promptPreview(right),
+        });
+        continue;
+      }
+      const visualKeys = [
+        ['scene', '场景'],
+        ['persona', '人物'],
+        ['camera', '镜头'],
+        ['emotion', '情绪'],
+      ] as const;
+      const visualWeights = { scene: 0.35, persona: 0.2, camera: 0.3, emotion: 0.15 } as const;
+      const score = visualKeys.reduce(
+        (total, [key]) =>
+          total +
+          (normalizedValue(dimensionValue(left.dimensions, key)) ===
+          normalizedValue(dimensionValue(right.dimensions, key))
+            ? visualWeights[key]
+            : 0),
+        0,
+      );
+      if (score < EFFECT_PROMPT_VISUAL_OVERLAP_THRESHOLD) continue;
+      const reasons = visualKeys.flatMap(([key, label]) =>
+        normalizedValue(dimensionValue(left.dimensions, key as keyof EffectPromptDimensions)) ===
+        normalizedValue(dimensionValue(right.dimensions, key as keyof EffectPromptDimensions))
+          ? [label]
+          : [],
+      );
+      pairs.push({
+        score,
+        reasons,
+        left: promptPreview(left),
+        right: promptPreview(right),
+      });
+    }
+  }
+  const visible = pairs
+    .sort((left, right) => right.score - left.score)
+    .slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxSamples)
+    .map((pair) => ({ ...pair, score: Math.round(pair.score * 10_000) / 10_000 }));
+  return visible.length ? { kind: 'PAIR_LIST', title, metric, items: visible } : null;
+};
+
+const nodeMetricFields = (nodeId: string, rawMetadata: unknown): EffectPromptNodeDetailField[] => {
+  const metadata = metadataRecord(rawMetadata);
+  switch (nodeId) {
+    case 'INSIGHT_MAPPING':
+      return compact([
+        numberField(metadata, 'requiredCount', '必须应用信息'),
+        numberField(metadata, 'adaptiveCount', '自适应信息'),
+        numberField(metadata, 'excludedCount', '不适用信息'),
+      ]);
+    case 'FACT_VISUAL_STRATEGY_COMPILATION': {
+      const counts = metadataRecord(metadata.usageCounts);
+      return compact([
+        numberField(metadata, 'policyCount', '已编译事实'),
+        numberField(counts, 'DIRECTLY_VISIBLE', '可直接呈现'),
+        numberField(counts, 'ACTION_DEMONSTRABLE', '可通过动作呈现'),
+        numberField(counts, 'FORBIDDEN_VISUAL_PROOF', '禁止视觉证明'),
+        textField('策略来源', metadata.reusedCheckpoint === true ? '已复用' : '本次编译'),
+      ]);
+    }
+    case 'SHARED_PROMPT_COMPILATION':
+      return compact([
+        numberField(metadata, 'sectionCount', '共用段落'),
+        numberField(metadata, 'disabledElementCount', '禁用元素'),
+        textField(
+          '共用提示词',
+          metadata.sharedPromptGenerated === true
+            ? '已编译'
+            : metadata.sharedPromptGenerated === false
+              ? '当前为空'
+              : null,
+        ),
+        textField(
+          '用户补充',
+          metadata.hasUserAdditionalContent === true ? '已应用（历史批次）' : null,
+        ),
+      ]);
+    case 'COHERENT_CREATIVE_GENERATION':
+      return compact([
+        textField(
+          '当前步骤',
+          (
+            {
+              CREATIVE_SPACE_PLANNING: '规划产品创意空间',
+              MATERIAL_TASK_PLANNING: '安排卖点素材任务',
+              CREATIVE_SPACE_REVIEW: '复核产品创意空间',
+              CREATIVE_DIRECTION_PLANNING: '规划批次创意方向',
+              CREATIVE_DIRECTION_REVIEW: '复核创意关系',
+              CANDIDATE_GENERATION: '生成候选 Prompt',
+              CANDIDATE_GENERATION_COMPLETE: '候选生成完成',
+            } as Record<string, string>
+          )[typeof metadata.perceptionPhase === 'string' ? metadata.perceptionPhase : ''],
+        ),
+        numberField(metadata, 'targetCount', '目标创意'),
+        numberField(metadata, 'materialTaskCount', '卖点素材任务'),
+        numberField(metadata, 'referenceImageCount', '生成参考商品图片'),
+        numberField(metadata, 'territoryCount', '产品创意空间'),
+        numberField(metadata, 'directionCount', '创意方向'),
+        numberField(metadata, 'candidateTargetCount', '候选目标'),
+        numberField(metadata, 'candidateCount', '已生成候选'),
+        numberField(metadata, 'generatedCandidateCount', '当前候选'),
+        numberField(metadata, 'totalShardCount', '生成分片总数'),
+        numberField(metadata, 'completedShardCount', '已完成分片（含恢复）'),
+        numberField(metadata, 'pendingShardCount', '本轮待生成分片'),
+        textField(
+          '规划复核',
+          metadata.semanticReviewPassed === true
+            ? '已通过'
+            : metadata.semanticReviewPassed === false
+              ? metadata.perceptionPhase === 'CANDIDATE_GENERATION' ||
+                metadata.perceptionPhase === 'CANDIDATE_GENERATION_COMPLETE'
+                ? '已复核，仍有优化提醒'
+                : '待通过'
+              : null,
+        ),
+      ]);
+    case 'CREATIVE_EVALUATION_CLASSIFICATION':
+      return compact([
+        textField(
+          '当前步骤',
+          metadata.perceptionPhase === 'DIAGNOSED_EXECUTION_REWRITE'
+            ? '修订有明确执行问题的素材并复评'
+            : null,
+        ),
+        numberField(metadata, 'evaluatedCount', '已评估创意'),
+        numberField(metadata, 'acceptedCount', '通过评估'),
+        numberField(metadata, 'rejectedCount', '未通过评估'),
+        numberField(metadata, 'executionAuditRecommendedCount', 'AI 建议专职审片'),
+        numberField(metadata, 'executionAuditCandidateCount', '专职执行审片条次'),
+        numberField(metadata, 'executionRepairAttemptedCount', '执行修订尝试'),
+        numberField(metadata, 'executionRepairAcceptedCount', '复评后采用修订'),
+        numberField(metadata, 'executionRepairUnresolvedCount', '修订后仍保留提醒'),
+        numberField(metadata, 'semanticEvaluatedCount', '语义评估数量'),
+        numberField(metadata, 'semanticDuplicateGroupCount', '重复组'),
+        numberField(metadata, 'semanticDuplicateCount', '重复条目'),
+        numberField(metadata, 'semanticDuplicateRate', '语义重复度（%）'),
+        {
+          label: '相似判定标准',
+          value: `${Math.round(EFFECT_PROMPT_SEMANTIC_SIMILARITY_THRESHOLD * 100)}%`,
+        },
+        {
+          label: '重复度参考',
+          value: `< ${EFFECT_PROMPT_SEMANTIC_DUPLICATE_RATE_LIMIT}%（仅提醒）`,
+        },
+      ]);
+    case 'EXACT_SELECTION_AND_SUPPLEMENT':
+      return compact([
+        numberField(metadata, 'targetCount', '目标数量'),
+        numberField(metadata, 'selectedCount', '已择优保留'),
+        numberField(metadata, 'supplementedCount', '补充数量'),
+        numberField(metadata, 'semanticDuplicateRate', '最终语义重复度（%）'),
+      ]);
+    case 'ITEM_EVALUATE':
+      return compact([
+        numberField(metadata, 'evaluatedCount', '已处理 Prompt'),
+        enumField(metadata, 'classificationStatus', '自动补齐状态', [
+          'PENDING',
+          'VERIFIED',
+          'NEEDS_REVISION',
+        ]),
+      ]);
+    case 'STRATEGY_PLANNING':
+      return compact([
+        numberField(metadata, 'relationshipBundleCount', '营销关系束'),
+        numberField(metadata, 'modelRelationshipBundleCount', '模型有效规划'),
+        numberField(metadata, 'workerCompletedRelationshipBundleCount', '系统安全补齐'),
+        numberField(metadata, 'plannedFactCount', '已规划事实'),
+      ]);
+    case 'GLOBAL_FACT_ALLOCATION':
+      return compact([
+        numberField(metadata, 'fragmentTypeCount', '已分配片段类型'),
+        numberField(metadata, 'mandatoryFactCount', '必须承载事实'),
+        numberField(metadata, 'bundleTargetCount', '目标创意母版'),
+      ]);
+    case 'STRATEGY_FRAGMENT_ROUTER':
+      return compact([
+        numberField(metadata, 'branchCount', '规划分支'),
+        numberField(metadata, 'reusedCheckpointCount', '复用成功分支'),
+      ]);
+    case 'PLAN_HOOK_STRATEGY':
+    case 'PLAN_PAIN_STRATEGY':
+    case 'PLAN_PRODUCT_DISPLAY_STRATEGY':
+    case 'PLAN_SELLING_POINT_EXPLANATION_STRATEGY':
+    case 'PLAN_CTA_STRATEGY':
+    case 'PLAN_OUTRO_STRATEGY':
+      return compact([
+        numberField(metadata, 'targetBundleCount', '目标母版'),
+        numberField(metadata, 'actualBundleCount', '实际母版'),
+        numberField(metadata, 'mandatoryFactCount', '必须事实'),
+        numberField(metadata, 'coveredMandatoryFactCount', '已覆盖必须事实'),
+        textField('检查点', metadata.reusedCheckpoint === true ? '已复用' : '本次生成'),
+      ]);
+    case 'STRATEGY_MERGE_VALIDATION':
+      return compact([
+        numberField(metadata, 'completedBranchCount', '完成规划分支'),
+        numberField(metadata, 'relationshipBundleCount', '已合并创意母版'),
+        numberField(metadata, 'plannedFactCount', '已规划事实'),
+      ]);
+    case 'RELATIONSHIP_FRAGMENT_ROUTER':
+      return compact([
+        numberField(metadata, 'branchCount', '营销组合分支'),
+        numberField(metadata, 'reusedCheckpointCount', '复用成功分支'),
+      ]);
+    case 'PLAN_HOOK_RELATIONSHIPS':
+    case 'PLAN_PAIN_RELATIONSHIPS':
+    case 'PLAN_PRODUCT_DISPLAY_RELATIONSHIPS':
+    case 'PLAN_SELLING_POINT_EXPLANATION_RELATIONSHIPS':
+    case 'PLAN_CTA_RELATIONSHIPS':
+    case 'PLAN_OUTRO_RELATIONSHIPS':
+      return compact([
+        numberField(metadata, 'targetBundleCount', '目标营销组合'),
+        numberField(metadata, 'actualBundleCount', '实际营销组合'),
+        numberField(metadata, 'plannedFactCount', '已规划事实'),
+        textField('检查点', metadata.reusedCheckpoint === true ? '已复用' : '本次生成'),
+      ]);
+    case 'RELATIONSHIP_MERGE_VALIDATION':
+      return compact([
+        numberField(metadata, 'completedBranchCount', '完成组合分支'),
+        numberField(metadata, 'relationshipBundleCount', '已合并营销组合'),
+        numberField(metadata, 'plannedFactCount', '已规划事实'),
+      ]);
+    case 'DIMENSION_COORDINATE_ROUTER':
+      return compact([
+        numberField(metadata, 'branchCount', '坐标规划分支'),
+        numberField(metadata, 'reusedCheckpointCount', '复用成功分支'),
+      ]);
+    case 'PLAN_HOOK_COORDINATES':
+    case 'PLAN_PAIN_COORDINATES':
+    case 'PLAN_PRODUCT_DISPLAY_COORDINATES':
+    case 'PLAN_SELLING_POINT_EXPLANATION_COORDINATES':
+    case 'PLAN_CTA_COORDINATES':
+    case 'PLAN_OUTRO_COORDINATES':
+      return compact([
+        numberField(metadata, 'coordinateCount', '六维坐标候选'),
+        numberField(metadata, 'compatibleBundleCount', '适用营销组合'),
+        textField('检查点', metadata.reusedCheckpoint === true ? '已复用' : '本次生成'),
+      ]);
+    case 'COORDINATE_MERGE_VALIDATION':
+      return compact([
+        numberField(metadata, 'completedBranchCount', '完成坐标分支'),
+        numberField(metadata, 'coordinateCount', '已合并坐标候选'),
+        numberField(metadata, 'invalidCoordinateCount', '无效坐标'),
+      ]);
+    case 'BLUEPRINT_QUOTA_ALLOCATION':
+      return compact([
+        numberField(metadata, 'relationshipBundleCount', '参与营销组合'),
+        numberField(metadata, 'targetBlueprintCount', '目标蓝图'),
+        numberField(metadata, 'candidateBlueprintCount', '候选蓝图'),
+      ]);
+    case 'BLUEPRINT_FRAGMENT_ROUTER':
+      return compact([
+        numberField(metadata, 'fragmentTypeCount', '路由类型'),
+        numberField(metadata, 'totalShards', '蓝图分片总数'),
+        numberField(metadata, 'routedShards', '已路由分片'),
+      ]);
+    case 'GENERATE_HOOK_BLUEPRINTS':
+    case 'GENERATE_PAIN_BLUEPRINTS':
+    case 'GENERATE_PRODUCT_DISPLAY_BLUEPRINTS':
+    case 'GENERATE_SELLING_POINT_EXPLANATION_BLUEPRINTS':
+    case 'GENERATE_CTA_BLUEPRINTS':
+    case 'GENERATE_OUTRO_BLUEPRINTS':
+      return compact([
+        numberField(metadata, 'targetCount', '目标蓝图'),
+        numberField(metadata, 'candidateCount', '实际蓝图'),
+        numberField(metadata, 'totalShards', '分片总数'),
+        numberField(metadata, 'completedShards', '完成分片'),
+        numberField(metadata, 'failedShards', '失败分片'),
+      ]);
+    case 'BLUEPRINT_ORTHOGONAL_GATE':
+      return compact([
+        numberField(metadata, 'comparedPairCount', '全批次比较对数'),
+        numberField(metadata, 'acceptedCount', '正交通过蓝图'),
+        numberField(metadata, 'rejectedCount', '差异不足蓝图'),
+        numberField(metadata, 'missingCount', '待补齐蓝图'),
+      ]);
+    case 'DIMENSION_COMBINATION':
+      return compact([
+        numberField(metadata, 'plannedCandidateCount', '计划候选数'),
+        numberField(metadata, 'pendingShardCount', '待生成分片'),
+        numberField(metadata, 'resumedShardCount', '恢复分片'),
+        numberField(metadata, 'replenishmentRound', '规划轮次'),
+      ]);
+    case 'FRAGMENT_TYPE_ROUTER':
+      return compact([
+        numberField(metadata, 'fragmentTypeCount', '路由类型'),
+        numberField(metadata, 'totalShards', '分片总数'),
+        numberField(metadata, 'routedShards', '已路由分片'),
+      ]);
+    case 'GENERATE_HOOK':
+    case 'GENERATE_PAIN':
+    case 'GENERATE_PRODUCT_DISPLAY':
+    case 'GENERATE_SELLING_POINT_EXPLANATION':
+    case 'GENERATE_CTA':
+    case 'GENERATE_OUTRO':
+      return compact([
+        numberField(metadata, 'targetCount', '目标数量'),
+        numberField(metadata, 'candidateCount', '候选数量'),
+        numberField(metadata, 'totalShards', '分片总数'),
+        numberField(metadata, 'completedShards', '完成分片'),
+      ]);
+    case 'NORMALIZATION':
+      return compact([numberField(metadata, 'candidateCount', '可执行 Prompt')]);
+    case 'SEMANTIC_DEDUP':
+      return compact([
+        numberField(metadata, 'comparedPairCount', '比较 Prompt 对'),
+        numberField(metadata, 'violatingPairCount', '语义相似对'),
+        numberField(metadata, 'semanticDuplicateRate', '语义重复度（%）'),
+        { label: '相似判定阈值', value: EFFECT_PROMPT_SEMANTIC_SIMILARITY_THRESHOLD },
+      ]);
+    case 'VISUAL_DEDUP':
+      return compact([
+        numberField(metadata, 'comparedPairCount', '比较 Prompt 对'),
+        numberField(metadata, 'violatingPairCount', '视觉重合对'),
+        numberField(metadata, 'visualOverlapRate', '视觉重合度（%）'),
+        { label: '重合判定阈值', value: EFFECT_PROMPT_VISUAL_OVERLAP_THRESHOLD },
+      ]);
+    case 'QUALITY_GATE':
+      return compact([
+        numberField(metadata, 'acceptedCount', '最终通过'),
+        numberField(metadata, 'targetCount', '目标数量'),
+        numberField(metadata, 'semanticDuplicateRate', '语义重复度（%）'),
+        numberField(metadata, 'visualOverlapRate', '视觉重合度（%）'),
+        numberField(metadata, 'removedCount', '累计剔除'),
+        numberField(metadata, 'replenishmentRound', '补齐轮次'),
+        enumField(metadata, 'qualityStatus', '质量状态', ['PASS', 'NEEDS_REVIEW']),
+      ]);
+    case 'INSIGHT_COVERAGE':
+      return compact([
+        numberField(metadata, 'requiredCount', '必须覆盖信息'),
+        numberField(metadata, 'coveredCount', '已覆盖信息'),
+        numberField(metadata, 'missingCount', '缺失信息'),
+        numberField(metadata, 'appliedConstraintCount', '已应用约束'),
+      ]);
+    case 'REPLENISH':
+      return compact([
+        numberField(metadata, 'replenishmentRound', '补齐轮次'),
+        numberField(metadata, 'missingCount', '补齐前缺口'),
+        numberField(metadata, 'plannedCandidateCount', '补齐候选'),
+        numberField(metadata, 'pendingShardCount', '待生成分片'),
+      ]);
+    case 'RESULT_SAVE':
+      return compact([
+        numberField(metadata, 'batchSize', '已保存 Prompt'),
+        enumField(metadata, 'qualityStatus', '质量状态', ['PASS', 'NEEDS_REVIEW']),
+      ]);
+    case 'LOAD_AND_SNAPSHOT':
+      return [];
+    default:
+      return [];
+  }
+};
+
+const actualFields = (
+  run: EffectPromptNodeDetailRunRecord,
+  nodeId: string,
+  metadata: unknown,
+): EffectPromptNodeDetailField[] => {
+  if (nodeId === 'LOAD_AND_SNAPSHOT') {
+    const insight = insightResult(run);
+    const settings = inputSettings(run);
+    return compact([
+      textField('产品名称', insightText(insight, 'productName', 'product_name')),
+      textField('产品品类', insightText(insight, 'productCategory', 'product_category')),
+      settings ? { label: '目标数量', value: `${settings.targetCount} 条` } : null,
+      settings ? { label: '统一时长', value: `${settings.defaultDurationSeconds} 秒` } : null,
+      { label: '保留人工内容', value: retainedPrompts(run).length },
+    ]);
+  }
+  const stageFields = nodeMetricFields(nodeId, metadata);
+  const allCandidates = candidates(run);
+  const allRelationships = relationships(run);
+  const relationshipType = RELATIONSHIP_FRAGMENT_BY_NODE[nodeId];
+  if (relationshipType) {
+    const planned = allRelationships.filter((item) => item.fragmentType === relationshipType);
+    return [
+      ...stageFields,
+      { label: '实际营销组合', value: planned.length },
+      { label: '分配蓝图', value: planned.reduce((total, item) => total + item.blueprintQuota, 0) },
+    ];
+  }
+  const allCoordinates = coordinates(run);
+  const coordinateType = COORDINATE_FRAGMENT_BY_NODE[nodeId];
+  if (coordinateType) {
+    const planned = allCoordinates.filter((item) => item.fragmentType === coordinateType);
+    return [
+      ...stageFields,
+      { label: '实际坐标候选', value: planned.length },
+      {
+        label: '覆盖维度',
+        value: new Set(planned.map((item) => item.dimension)).size,
+      },
+    ];
+  }
+  const allBlueprints = blueprints(run);
+  const blueprintType = BLUEPRINT_FRAGMENT_BY_NODE[nodeId];
+  if (blueprintType) {
+    const generated = allBlueprints.filter((item) => item.fragmentType === blueprintType);
+    return [...stageFields, { label: '实际生成蓝图', value: generated.length }];
+  }
+  if (nodeId === 'BLUEPRINT_ORTHOGONAL_GATE') {
+    const pairCount = (allBlueprints.length * Math.max(0, allBlueprints.length - 1)) / 2;
+    let conflictCount = 0;
+    for (let left = 0; left < allBlueprints.length; left += 1)
+      for (let right = left + 1; right < allBlueprints.length; right += 1)
+        if (blueprintDistance(allBlueprints[left]!, allBlueprints[right]!) < 3) conflictCount += 1;
+    return [
+      ...stageFields,
+      { label: '实际蓝图', value: allBlueprints.length },
+      { label: '全批次比较对数', value: pairCount },
+      { label: '差异不足对数', value: conflictCount },
+    ];
+  }
+  const generationType = GENERATION_FRAGMENT_BY_NODE[nodeId];
+  if (generationType) {
+    const generated = allCandidates.filter((item) => item.fragmentType === generationType);
+    return [
+      ...stageFields,
+      {
+        label: '可执行候选',
+        value: generated.filter((item) => !item.invalidReasons.length).length,
+      },
+      { label: '门禁未通过', value: generated.filter((item) => item.invalidReasons.length).length },
+    ];
+  }
+  if (nodeId === 'NORMALIZATION')
+    return [
+      ...stageFields,
+      { label: '候选总数', value: allCandidates.length },
+      {
+        label: '可执行候选',
+        value: allCandidates.filter((item) => !item.invalidReasons.length).length,
+      },
+      {
+        label: '门禁未通过',
+        value: allCandidates.filter((item) => item.invalidReasons.length).length,
+      },
+    ];
+  const result = finalResult(run);
+  if (nodeId === 'QUALITY_GATE' && result)
+    return [
+      { label: '最终通过', value: result.metrics.acceptedCount },
+      { label: '目标数量', value: result.metrics.targetCount },
+      { label: '语义重复度', value: `${result.metrics.semanticDuplicateRate}%` },
+      { label: '画面重合度', value: `${result.metrics.visualOverlapRate}%` },
+      {
+        label: '累计剔除',
+        value:
+          result.metrics.removedSemanticDuplicates +
+          result.metrics.removedVisualDuplicates +
+          result.metrics.removedDimensionConflicts +
+          result.metrics.removedExecutionInvalid,
+      },
+      { label: '质量状态', value: result.qualityStatus },
+    ];
+  if (nodeId === 'RESULT_SAVE' && result) {
+    const legacySellingPointCoverage = result.metrics.sellingPointCoverage;
+    return compact([
+      { label: '已保存 Prompt', value: result.items.length },
+      { label: '质量状态', value: result.qualityStatus },
+      legacySellingPointCoverage.required.length
+        ? {
+            label: '卖点覆盖',
+            value: `${legacySellingPointCoverage.covered.length}/${legacySellingPointCoverage.required.length}`,
+          }
+        : null,
+    ]);
+  }
+  return stageFields;
+};
+
+const actualBlocks = (
+  run: EffectPromptNodeDetailRunRecord,
+  nodeId: string,
+): EffectPromptNodeDetailBlock[] => {
+  const blocks: Array<EffectPromptNodeDetailBlock | null> = [];
+  const insight = insightResult(run);
+  const allCombinations = combinations(run);
+  const allCandidates = candidates(run);
+  const validCandidates = allCandidates.filter((item) => !item.invalidReasons.length);
+  const result = finalResult(run);
+  const allRelationships = relationships(run);
+  const allCoordinates = coordinates(run);
+  const allBlueprints = blueprints(run);
+
+  if (nodeId === 'LOAD_AND_SNAPSHOT') {
+    blocks.push(
+      tagBlock('本次使用的营销信息', [
+        tagGroup('卖点', normalizeEffectExtractionResult(insight).sellingPoints),
+        tagGroup('继承禁用项', insightList(insight, 'disabledElements', 'disabled_elements')),
+      ]),
+    );
+  } else if (nodeId === 'INSIGHT_MAPPING') {
+    blocks.push(
+      tagBlock('实际映射的提炼信息', [
+        tagGroup('产品与品类', [
+          insightText(insight, 'productName', 'product_name'),
+          insightText(insight, 'productCategory', 'product_category'),
+        ]),
+        tagGroup('产品基础', [
+          insightText(insight, 'coreSpecification', 'core_specification'),
+          insightText(insight, 'priceRange', 'price_range'),
+          insightText(insight, 'visualFeatures', 'visual_features'),
+        ]),
+        tagGroup('卖点', normalizeEffectExtractionResult(insight).sellingPoints),
+      ]),
+    );
+  } else if (nodeId === 'FACT_VISUAL_STRATEGY_COMPILATION') {
+    const metadata = metadataRecord(run.stages.find((stage) => stage.nodeId === nodeId)?.metadata);
+    const samples = (Array.isArray(metadata.samples) ? metadata.samples : []).flatMap((item) => {
+      if (!isRecord(item)) return [];
+      const value = publicText(item.value, 500);
+      const usage = publicText(item.visualUsage, 80);
+      return value && usage ? [`${value} → ${usage}`] : [];
+    });
+    blocks.push(tagBlock('事实视觉角色样例', [tagGroup('策略样例', samples)]));
+  } else if (RELATIONSHIP_FRAGMENT_BY_NODE[nodeId]) {
+    const type = RELATIONSHIP_FRAGMENT_BY_NODE[nodeId]!;
+    blocks.push(
+      relationshipBlock(
+        run,
+        `${EFFECT_PROMPT_FRAGMENT_TYPE_LABELS[type]}实际营销组合`,
+        allRelationships.filter((item) => item.fragmentType === type),
+      ),
+    );
+  } else if (nodeId === 'RELATIONSHIP_MERGE_VALIDATION') {
+    blocks.push(relationshipBlock(run, '本批次已校验营销组合', allRelationships));
+  } else if (COORDINATE_FRAGMENT_BY_NODE[nodeId]) {
+    const type = COORDINATE_FRAGMENT_BY_NODE[nodeId]!;
+    blocks.push(
+      coordinateBlock(
+        run,
+        `${EFFECT_PROMPT_FRAGMENT_TYPE_LABELS[type]}实际六维坐标`,
+        allCoordinates.filter((item) => item.fragmentType === type),
+      ),
+    );
+  } else if (nodeId === 'COORDINATE_MERGE_VALIDATION') {
+    blocks.push(coordinateBlock(run, '本批次已校验六维坐标', allCoordinates));
+  } else if (nodeId === 'BLUEPRINT_QUOTA_ALLOCATION') {
+    blocks.push(relationshipBlock(run, '营销组合蓝图配额', allRelationships));
+  } else if (nodeId === 'BLUEPRINT_FRAGMENT_ROUTER') {
+    blocks.push(routeBlock(run, '六类蓝图实际路由结果', undefined, 'BLUEPRINT'));
+  } else if (BLUEPRINT_FRAGMENT_BY_NODE[nodeId]) {
+    const type = BLUEPRINT_FRAGMENT_BY_NODE[nodeId]!;
+    blocks.push(
+      blueprintBlock(
+        `${EFFECT_PROMPT_FRAGMENT_TYPE_LABELS[type]}实际蓝图`,
+        allBlueprints.filter((item) => item.fragmentType === type),
+      ),
+    );
+  } else if (nodeId === 'BLUEPRINT_ORTHOGONAL_GATE') {
+    blocks.push(
+      orthogonalBlock('实际六维差异不足蓝图对', allBlueprints),
+      blueprintBlock('正交校验蓝图样例', allBlueprints),
+    );
+  } else if (nodeId === 'STRATEGY_PLANNING') {
+    blocks.push(
+      tagBlock('本批次实际采用的策略', [
+        ...EFFECT_PROMPT_DIMENSIONS.map(({ key, label }) =>
+          tagGroup(
+            label,
+            allCombinations.map((item) => item.dimensions[key]),
+          ),
+        ),
+        tagGroup(
+          '连续动作',
+          allCombinations.map((item) => item.visibleAction),
+        ),
+        tagGroup(
+          '证据模式',
+          allCombinations.map((item) => item.evidenceMode),
+        ),
+      ]),
+    );
+  } else if (nodeId === 'DIMENSION_COMBINATION') {
+    blocks.push(combinationBlock('实际片段蓝图', allCombinations));
+  } else if (nodeId === 'FRAGMENT_TYPE_ROUTER') {
+    blocks.push(routeBlock(run, '六类实际路由结果'));
+  } else if (GENERATION_FRAGMENT_BY_NODE[nodeId]) {
+    const type = GENERATION_FRAGMENT_BY_NODE[nodeId]!;
+    blocks.push(
+      promptBlock(
+        '实际候选 Prompt',
+        allCandidates.filter((item) => item.fragmentType === type),
+      ),
+    );
+  } else if (nodeId === 'NORMALIZATION') {
+    const reasonMap = new Map<string, { count: number; examples: string[] }>();
+    for (const item of allCandidates) {
+      for (const code of item.invalidReasons) {
+        const issue = reasonMap.get(code) ?? { count: 0, examples: [] };
+        issue.count += 1;
+        issue.examples.push(item.content);
+        reasonMap.set(code, issue);
+      }
+    }
+    blocks.push(
+      promptBlock('标准化后的可执行 Prompt', validCandidates),
+      issueBlock(
+        '执行门禁未通过原因',
+        [...reasonMap].map(([code, issue]) => ({ code, ...issue })),
+      ),
+    );
+  } else if (nodeId === 'SEMANTIC_DEDUP') {
+    blocks.push(
+      pairBlock('实际语义相似 Prompt 对', 'SEMANTIC', [
+        ...retainedPrompts(run),
+        ...validCandidates,
+      ]),
+    );
+  } else if (nodeId === 'VISUAL_DEDUP') {
+    blocks.push(
+      pairBlock('实际视觉重合 Prompt 对', 'VISUAL', [...retainedPrompts(run), ...validCandidates]),
+    );
+  } else if (nodeId === 'INSIGHT_COVERAGE' && result) {
+    const coverage = result.metrics.insightCoverage;
+    blocks.push(
+      tagBlock('提炼信息实际覆盖结果', [
+        tagGroup('必须覆盖', insightReferenceValues(coverage.required)),
+        tagGroup('已覆盖', insightReferenceValues(coverage.covered)),
+        tagGroup('仍缺失', insightReferenceValues(coverage.missing)),
+        tagGroup('自适应使用', insightReferenceValues(coverage.adaptive)),
+        tagGroup('已应用约束', insightReferenceValues(coverage.appliedConstraints)),
+      ]),
+    );
+  } else if (nodeId === 'QUALITY_GATE' && result) {
+    const finalCounts = Object.fromEntries(
+      result.metrics.fragmentTypeDistribution.map(({ fragmentType: type, actualCount }) => [
+        type,
+        actualCount,
+      ]),
+    ) as Record<EffectPromptFragmentType, number>;
+    blocks.push(
+      routeBlock(run, '六类质量门禁结果', finalCounts),
+      tagBlock('卖点覆盖结果', [
+        tagGroup('已覆盖卖点', result.metrics.sellingPointCoverage.covered),
+        tagGroup('缺失卖点', result.metrics.sellingPointCoverage.missing),
+      ]),
+      issueBlock('质量剔除结果', [
+        { code: 'SEMANTIC_DUPLICATE', count: result.metrics.removedSemanticDuplicates },
+        { code: 'VISUAL_OVERLAP', count: result.metrics.removedVisualDuplicates },
+        { code: 'DIMENSION_CONFLICT', count: result.metrics.removedDimensionConflicts },
+        ...result.metrics.executionInvalidReasons,
+      ]),
+    );
+  } else if (nodeId === 'REPLENISH') {
+    const replenished = allCandidates.filter((item) => item.round > 0);
+    blocks.push(
+      replenished.length
+        ? promptBlock('实际补齐 Prompt', replenished)
+        : combinationBlock(
+            '实际补齐组合',
+            allCombinations.filter((item) => item.round > 0),
+          ),
+    );
+  } else if (nodeId === 'RESULT_SAVE' && result) {
+    const finalCounts = Object.fromEntries(
+      result.metrics.fragmentTypeDistribution.map(({ fragmentType: type, actualCount }) => [
+        type,
+        actualCount,
+      ]),
+    ) as Record<EffectPromptFragmentType, number>;
+    blocks.push(
+      routeBlock(run, '最终六类分布', finalCounts),
+      tagBlock('最终卖点覆盖', [
+        tagGroup('已覆盖卖点', result.metrics.sellingPointCoverage.covered),
+        tagGroup('缺失卖点', result.metrics.sellingPointCoverage.missing),
+      ]),
+      promptBlock('最终保存 Prompt', result.items),
+    );
+  }
+  return blocks.filter((block): block is EffectPromptNodeDetailBlock => block !== null);
+};
+
+type CreativeRow = {
+  slotId: string;
+  ordinal: number;
+  targetDurationSeconds: number;
+  creativeCore: string;
+  declaredFactIds: string[];
+  dimensions: EffectPromptDimensions;
+  content: string;
+};
+
+type EvaluationRow = {
+  slotId: string;
+  primaryPurpose: EffectPromptFragmentType;
+  compatiblePurposes: EffectPromptFragmentType[];
+  scores: EffectPromptQualityScores;
+  hardIssues: string[];
+  warnings: string[];
+};
+
+const purposeList = (value: unknown): EffectPromptFragmentType[] =>
+  (Array.isArray(value) ? value : [])
+    .map(fragmentType)
+    .filter((item): item is EffectPromptFragmentType => item !== null)
+    .filter((item, index, items) => items.indexOf(item) === index);
+
+const qualityScores = (value: unknown): EffectPromptQualityScores | null => {
+  const raw = metadataRecord(value);
+  const parsed = {
+    productRelevance: safeNumber(raw.productRelevance),
+    creativeCoherence: safeNumber(raw.creativeCoherence),
+    visualExecutability: safeNumber(raw.visualExecutability),
+    commercialUsefulness: safeNumber(raw.commercialUsefulness),
+    visualClarity: safeNumber(raw.visualClarity),
+  };
+  return Object.values(parsed).every((score) => score !== null)
+    ? (parsed as EffectPromptQualityScores)
+    : null;
+};
+
+const creativeRows = (run: EffectPromptNodeDetailRunRecord): CreativeRow[] => {
+  const taskBySlot = new Map<string, JsonRecord>();
+  const repairedBySlot = new Map<string, JsonRecord>();
+  for (const shard of run.shards) {
+    for (const raw of Array.isArray(shard.items) ? shard.items : []) {
+      if (!isRecord(raw) || !isRecord(raw.executionRepair)) continue;
+      const checkpoint = raw.executionRepair;
+      if (checkpoint.status !== 'ACCEPTED' || !isRecord(checkpoint.candidate)) continue;
+      const slotId = publicText(raw.slotId, 160);
+      if (slotId && checkpoint.candidate.slotId === raw.slotId)
+        repairedBySlot.set(slotId, checkpoint.candidate);
+    }
+    for (const raw of Array.isArray(shard.combinationPlan) ? shard.combinationPlan : []) {
+      if (!isRecord(raw) || !Array.isArray(raw.preferredFactIds)) continue;
+      const slotId = publicText(raw.slotId, 160);
+      if (slotId) taskBySlot.set(slotId, raw);
+    }
+  }
+  const rows: CreativeRow[] = [];
+  for (const shard of run.shards) {
+    for (const source of Array.isArray(shard.items) ? shard.items : []) {
+      if (!isRecord(source) || typeof source.creativeCore !== 'string') continue;
+      const repaired = repairedBySlot.get(publicText(source.slotId, 160));
+      // The Worker atomically persists the accepted body beside its evaluation.
+      // Only project public sample fields; never expose the repair checkpoint.
+      const raw =
+        repaired &&
+        repaired.ordinal === source.ordinal &&
+        repaired.round === source.round &&
+        repaired.creativeCore === source.creativeCore &&
+        JSON.stringify(repaired.declaredFactIds) === JSON.stringify(source.declaredFactIds) &&
+        dimensions(repaired.dimensions) &&
+        publicText(repaired.content)
+          ? repaired
+          : source;
+      const slotId = publicText(raw.slotId, 160);
+      const ordinal = safeNumber(raw.ordinal);
+      const itemDimensions = dimensions(raw.dimensions);
+      const content = publicText(raw.content);
+      const task = taskBySlot.get(slotId) ?? {};
+      const duration = safeNumber(task.targetDurationSeconds);
+      const creativeCore = publicText(raw.creativeCore, 300);
+      if (!slotId || ordinal === null || !itemDimensions || !content || duration === null) continue;
+      rows.push({
+        slotId,
+        ordinal,
+        targetDurationSeconds: duration,
+        creativeCore,
+        declaredFactIds: safeStrings(raw.declaredFactIds, 12),
+        dimensions: itemDimensions,
+        content,
+      });
+    }
+  }
+  return rows
+    .filter(
+      (item, index, items) =>
+        items.findIndex(
+          (candidate) => candidate.slotId === item.slotId && candidate.content === item.content,
+        ) === index,
+    )
+    .sort((left, right) => left.ordinal - right.ordinal);
+};
+
+const evaluationRows = (run: EffectPromptNodeDetailRunRecord): EvaluationRow[] => {
+  const rows: EvaluationRow[] = [];
+  for (const shard of run.shards) {
+    for (const raw of Array.isArray(shard.items) ? shard.items : []) {
+      if (!isRecord(raw) || !isRecord(raw.scores)) continue;
+      const slotId = publicText(raw.slotId, 160);
+      const primaryPurpose = fragmentType(raw.primaryPurpose);
+      const compatiblePurposes = purposeList(raw.compatiblePurposes);
+      const scores = qualityScores(raw.scores);
+      if (!slotId || !primaryPurpose || !scores) continue;
+      rows.push({
+        slotId,
+        primaryPurpose,
+        compatiblePurposes: compatiblePurposes.includes(primaryPurpose)
+          ? compatiblePurposes
+          : [primaryPurpose, ...compatiblePurposes],
+        scores,
+        hardIssues: safeStrings(raw.hardIssues, 20),
+        warnings: safeStrings(raw.warnings, 20),
+      });
+    }
+  }
+  return rows.filter(
+    (item, index, items) => items.findIndex(({ slotId }) => slotId === item.slotId) === index,
+  );
+};
+
+const issueLabels = (codes: string[]): string[] =>
+  codes.map((code) => ISSUE_LABELS[code] ?? publicText(code, 120));
+
+const creativeSamples = (
+  run: EffectPromptNodeDetailRunRecord,
+): EffectPromptNodeDetailCreativeSample[] => {
+  const evaluationBySlot = new Map(evaluationRows(run).map((item) => [item.slotId, item]));
+  const lookup = factValueLookup(run);
+  return creativeRows(run).map((item) => {
+    const evaluation = evaluationBySlot.get(item.slotId);
+    return {
+      code: promptCode(item.ordinal),
+      creativeCore: item.creativeCore,
+      dimensions: item.dimensions,
+      content: item.content,
+      sourceFacts: item.declaredFactIds
+        .map((factId) => displayFact(lookup, factId))
+        .filter((value, index, values) => values.indexOf(value) === index),
+      primaryPurpose: evaluation?.primaryPurpose ?? null,
+      compatiblePurposes: evaluation?.compatiblePurposes ?? [],
+      productRelevance: evaluation?.scores.productRelevance ?? null,
+      scores: evaluation?.scores ?? null,
+      outcome: !evaluation ? 'PENDING' : evaluation.hardIssues.length ? 'REJECTED' : 'ACCEPTED',
+      reasons: evaluation
+        ? issueLabels(evaluation.hardIssues.length ? evaluation.hardIssues : evaluation.warnings)
+        : [],
+    };
+  });
+};
+
+const finalResultRecord = (run: EffectPromptNodeDetailRunRecord): JsonRecord | null => {
+  const raw = run.result ? metadataRecord(run.result.draftResult) : {};
+  return Array.isArray(raw.items) && isRecord(raw.settings) && isRecord(raw.metrics) ? raw : null;
+};
+
+const finalResultSamples = (
+  run: EffectPromptNodeDetailRunRecord,
+): EffectPromptNodeDetailCreativeSample[] => {
+  const result = finalResultRecord(run);
+  if (!result) return [];
+  return (Array.isArray(result.items) ? result.items : []).flatMap((value) => {
+    if (!isRecord(value)) return [];
+    const itemDimensions = dimensions(value.dimensions);
+    const content = publicText(value.content);
+    const code = publicText(value.code, 40);
+    const primaryPurpose = fragmentType(value.primaryPurpose ?? value.fragmentType);
+    const compatiblePurposes = purposeList(value.compatiblePurposes);
+    const relevance = safeNumber(value.productRelevance);
+    if (!itemDimensions || !content || !code || !primaryPurpose) return [];
+    const bindings = (Array.isArray(value.insightBindings) ? value.insightBindings : []).flatMap(
+      (binding) => {
+        if (!isRecord(binding)) return [];
+        const factValue = publicText(binding.value, 400);
+        return factValue ? [factValue] : [];
+      },
+    );
+    return [
+      {
+        code,
+        creativeCore: itemDimensions.narrative,
+        dimensions: itemDimensions,
+        content,
+        sourceFacts: bindings.filter((item, index, items) => items.indexOf(item) === index),
+        primaryPurpose,
+        compatiblePurposes: compatiblePurposes.includes(primaryPurpose)
+          ? compatiblePurposes
+          : [primaryPurpose, ...compatiblePurposes],
+        productRelevance: relevance,
+        scores: null,
+        outcome: 'SAVED' as const,
+        reasons: [],
+      },
+    ];
+  });
+};
+
+const creativeSampleBlock = (
+  title: string,
+  items: EffectPromptNodeDetailCreativeSample[],
+  totalCount = items.length,
+): EffectPromptNodeDetailBlock | null => {
+  const visible = items.slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxSamples);
+  return visible.length
+    ? {
+        kind: 'CREATIVE_SAMPLE_LIST',
+        title,
+        totalCount,
+        remainingCount: Math.max(0, totalCount - visible.length),
+        items: visible,
+      }
+    : null;
+};
+
+const textContentBlock = (
+  title: string,
+  content: unknown,
+  sourceLabels: string[],
+): EffectPromptNodeDetailBlock | null => {
+  const safeContent = publicMultilineText(content, 30_000);
+  return safeContent
+    ? {
+        kind: 'TEXT_CONTENT',
+        title,
+        content: safeContent,
+        sourceLabels: safeStrings(sourceLabels, 12),
+      }
+    : null;
+};
+
+const materialTaskBlocks = (
+  run: EffectPromptNodeDetailRunRecord,
+  metadata: Record<string, unknown>,
+): EffectPromptNodeDetailBlock[] => {
+  const checkpoint = isRecord(metadata.checkpoint) ? metadata.checkpoint : {};
+  const plan = isRecord(checkpoint.plan) ? checkpoint.plan : {};
+  const tasks = (Array.isArray(plan.rounds) ? plan.rounds : []).flatMap((round) =>
+    isRecord(round) && Array.isArray(round.tasks) ? round.tasks.filter(isRecord) : [],
+  );
+  const lookup = factValueLookup(run);
+  const visible = tasks.slice(0, EFFECT_PROMPT_NODE_DETAIL_LIMITS.maxSamples);
+  return [
+    ...visible.map((task, index) =>
+      textContentBlock(
+        `素材任务 ${String(index + 1).padStart(2, '0')}`,
+        [publicText(task.visualEvent, 1000), publicText(task.difference, 500)]
+          .filter(Boolean)
+          .join('\n'),
+        (Array.isArray(task.factIds) ? task.factIds : [])
+          .filter((id): id is string => typeof id === 'string')
+          .map((id) => displayFact(lookup, id)),
+      ),
+    ),
+    tasks.length
+      ? textContentBlock(
+          '任务展示范围',
+          `共 ${tasks.length} 条，其余 ${tasks.length - visible.length} 条未展开`,
+          [],
+        )
+      : null,
+  ].filter((block): block is EffectPromptNodeDetailBlock => block !== null);
+};
+
+const averageQualityScores = (rows: EvaluationRow[]): EffectPromptQualityScores | null => {
+  if (!rows.length) return null;
+  const total = rows.reduce(
+    (sum, item) => ({
+      productRelevance: sum.productRelevance + item.scores.productRelevance,
+      creativeCoherence: sum.creativeCoherence + item.scores.creativeCoherence,
+      visualExecutability: sum.visualExecutability + item.scores.visualExecutability,
+      commercialUsefulness: sum.commercialUsefulness + item.scores.commercialUsefulness,
+      visualClarity: sum.visualClarity + item.scores.visualClarity,
+    }),
+    {
+      productRelevance: 0,
+      creativeCoherence: 0,
+      visualExecutability: 0,
+      commercialUsefulness: 0,
+      visualClarity: 0,
+    },
+  );
+  return Object.fromEntries(
+    Object.entries(total).map(([key, value]) => [key, Math.round((value / rows.length) * 10) / 10]),
+  ) as EffectPromptQualityScores;
+};
+
+const scoreFields = (scores: EffectPromptQualityScores | null): EffectPromptNodeDetailField[] =>
+  scores
+    ? [
+        { label: '产品相关性', value: scores.productRelevance },
+        { label: '创意连贯性', value: scores.creativeCoherence },
+        { label: '画面可执行性', value: scores.visualExecutability },
+        { label: '商业素材价值', value: scores.commercialUsefulness },
+        { label: '视觉表达清晰度', value: scores.visualClarity },
+      ]
+    : [];
+
+const creativeShardProgress = (run: EffectPromptNodeDetailRunRecord, metadata: JsonRecord) => {
+  const shards = run.shards.filter(
+    (shard) => shard.phase === 'BLUEPRINT' || String(shard.phase) === 'CREATIVE',
+  );
+  return {
+    available: shards.length > 0,
+    total: Math.max(safeNumber(metadata.totalShardCount) ?? 0, shards.length),
+    completed: shards.filter((shard) => shard.status === 'SUCCEEDED').length,
+    pending: shards.filter((shard) => shard.status === 'PENDING' || shard.status === 'RUNNING')
+      .length,
+  };
+};
+
+const additionalOutputFields = (
+  run: EffectPromptNodeDetailRunRecord,
+  nodeId: EffectPromptNodeId,
+  metadata: JsonRecord,
+): EffectPromptNodeDetailField[] => {
+  const samples = creativeSamples(run);
+  const evaluations = evaluationRows(run);
+  const result = finalResultRecord(run);
+  const resultMetrics = metadataRecord(result?.metrics);
+  if (nodeId === 'SHARED_PROMPT_COMPILATION')
+    return publicText(sharedPromptData(run, metadata).compiledContent)
+      ? [
+          {
+            label: '使用方式',
+            value: '生成时约束创意，视频渲染时统一追加一次',
+            description: '不会写进每条 Prompt 正文',
+          },
+        ]
+      : [];
+  if (nodeId === 'COHERENT_CREATIVE_GENERATION') {
+    const progress = creativeShardProgress(run, metadata);
+    return [
+      { label: '实际生成候选', value: samples.length },
+      { label: '实时分片进度', value: `${progress.completed}/${progress.total}` },
+      { label: '实际完成分片', value: progress.completed },
+      { label: '当前处理中分片', value: progress.pending },
+      ...compact([
+        numberField(metadata, 'availableSellingPointCount', '已接收卖点'),
+        numberField(metadata, 'plannedSellingPointCount', '已用于创意规划'),
+        numberField(metadata, 'unplannedSellingPointCount', '尚未用于创意规划'),
+        numberField(metadata, 'contextSellingPointCount', '仅作背景、不要求画面证明'),
+      ]),
+    ];
+  }
+  if (nodeId === 'ITEM_EVALUATE')
+    return [
+      { label: '处理对象', value: '用户输入的单条 Prompt' },
+      {
+        label: '生成内容',
+        value: '创意主线与完整六维信息',
+        description: '不会改写 Prompt 正文、片段类型或时长',
+      },
+    ];
+  if (nodeId === 'CREATIVE_EVALUATION_CLASSIFICATION')
+    return [
+      { label: '实际完成评估', value: evaluations.length },
+      { label: '通过评估', value: evaluations.filter((item) => !item.hardIssues.length).length },
+      { label: '未通过评估', value: evaluations.filter((item) => item.hardIssues.length).length },
+      ...scoreFields(averageQualityScores(evaluations)),
+      ...compact([
+        numberField(metadata, 'semanticEvaluatedCount', '语义评估数量'),
+        numberField(metadata, 'semanticDuplicateGroupCount', '重复组'),
+        numberField(metadata, 'semanticDuplicateCount', '重复条目'),
+        numberField(metadata, 'semanticDuplicateRate', '语义重复度（%）'),
+        {
+          label: '相似判定标准',
+          value: `${Math.round(EFFECT_PROMPT_SEMANTIC_SIMILARITY_THRESHOLD * 100)}%`,
+        },
+        {
+          label: '重复度参考',
+          value: `< ${EFFECT_PROMPT_SEMANTIC_DUPLICATE_RATE_LIMIT}%（仅提醒）`,
+        },
+      ]),
+    ];
+  if (nodeId === 'EXACT_SELECTION_AND_SUPPLEMENT')
+    return compact([
+      numberField(metadata, 'initialCandidateCount', '初始候选'),
+      numberField(metadata, 'cumulativeCandidateCount', '累计候选'),
+      numberField(metadata, 'safeCandidateCount', '无硬问题候选'),
+      numberField(metadata, 'selectedCandidateCount', 'AI 择优入选'),
+      numberField(metadata, 'acceptedCount', '已择优保留'),
+      numberField(metadata, 'targetCount', '目标数量'),
+      numberField(metadata, 'missingCount', '当前缺口'),
+      numberField(metadata, 'missingRequiredFactCount', '入选结果待覆盖事实'),
+      numberField(metadata, 'poolMissingRequiredFactCount', '候选池待覆盖事实'),
+      numberField(metadata, 'hardRejectedCount', '硬问题淘汰'),
+      numberField(metadata, 'eligibleNotSelectedCount', '合格但未入选'),
+      numberField(metadata, 'exactDuplicateCount', '完全重复淘汰'),
+      numberField(metadata, 'fixedAnchorCount', '固定参照 Prompt'),
+      numberField(metadata, 'embeddingInputCount', '向量化正文'),
+      numberField(metadata, 'embeddingRequestCount', '向量请求'),
+      numberField(metadata, 'embeddingDurationMs', '向量阶段耗时（毫秒）'),
+      numberField(metadata, 'localComparisonMs', '本地矩阵耗时（毫秒）'),
+      numberField(metadata, 'initialRedundantCandidateCount', '补充前高风险冗余'),
+      numberField(metadata, 'finalRedundantCandidateCount', '补充后高风险冗余'),
+      numberField(metadata, 'semanticDuplicateRate', '最终语义重复度（%）'),
+      textField('重复度参考', `< ${EFFECT_PROMPT_SEMANTIC_DUPLICATE_RATE_LIMIT}%（仅提醒）`),
+      textField(
+        'MMR 权重',
+        typeof metadata.mmrQualityWeight === 'number' &&
+          typeof metadata.mmrDiversityWeight === 'number'
+          ? `质量 ${Math.round(metadata.mmrQualityWeight * 100)}% / 多样性 ${Math.round(metadata.mmrDiversityWeight * 100)}%`
+          : null,
+      ),
+      textField(
+        '数量补充',
+        metadata.quantitySupplementTriggered === true
+          ? `已补充 ${typeof metadata.quantitySupplementCount === 'number' ? metadata.quantitySupplementCount : 0} 条候选`
+          : '未触发',
+      ),
+      textField(
+        '事实覆盖补充',
+        metadata.coverageSupplementTriggered === true
+          ? `已补充 ${typeof metadata.coverageSupplementCount === 'number' ? metadata.coverageSupplementCount : 0} 条候选`
+          : '未触发',
+      ),
+      textField(
+        '覆盖结论',
+        metadata.coverageNeedsReview === true ? '仍有事实待人工复核' : '无需人工补充复核',
+      ),
+      textField(
+        '多样性补充',
+        metadata.diversitySupplementTriggered === true
+          ? `已补充 ${typeof metadata.diversitySupplementCount === 'number' ? metadata.diversitySupplementCount : 0} 条候选`
+          : metadata.diversitySupplementAttempted === true
+            ? '已尝试规划新方向，但未通过全批复核，未生成候选'
+            : '未触发',
+      ),
+    ]);
+  if (nodeId === 'RESULT_SAVE' && result) {
+    const insightCoverage = metadataRecord(resultMetrics.insightCoverage);
+    const requiredFacts = Array.isArray(insightCoverage.required)
+      ? insightCoverage.required.length
+      : 0;
+    const coveredFacts = Array.isArray(insightCoverage.covered)
+      ? insightCoverage.covered.length
+      : 0;
+    const missingFacts = Array.isArray(insightCoverage.missing)
+      ? insightCoverage.missing.length
+      : 0;
+    return compact([
+      { label: '已保存 Prompt', value: (Array.isArray(result.items) ? result.items : []).length },
+      numberField(resultMetrics, 'targetCount', '目标数量'),
+      { label: '必用事实覆盖', value: `${coveredFacts}/${requiredFacts}` },
+      { label: '仍缺事实', value: missingFacts },
+      ...compact([
+        numberField(metadata, 'realizedSellingPointCount', '最终素材已体现卖点'),
+        numberField(metadata, 'contextSellingPointCount', '背景卖点（非画面覆盖要求）'),
+      ]),
+      textField('质量状态', result.qualityStatus),
+      textField(
+        '语义重复度',
+        resultMetrics.semanticEvaluation &&
+          typeof resultMetrics.semanticEvaluation === 'object' &&
+          !Array.isArray(resultMetrics.semanticEvaluation) &&
+          typeof (resultMetrics.semanticEvaluation as JsonRecord).duplicateRate === 'number'
+          ? `${(resultMetrics.semanticEvaluation as JsonRecord).duplicateRate}%`
+          : '待评估',
+      ),
+      { label: '提交状态', value: '已保存为节点草稿，尚未提交工作副本' },
+      ...scoreFields(qualityScores(resultMetrics.averageScores)),
+    ]);
+  }
+  return [];
+};
+
+const uniqueFields = (fields: EffectPromptNodeDetailField[]): EffectPromptNodeDetailField[] =>
+  fields.filter(
+    (field, index, items) => items.findIndex(({ label }) => label === field.label) === index,
+  );
+
+const metadataFactGroups = (metadata: JsonRecord): Array<ReturnType<typeof tagGroup>> => {
+  const group = (label: string, key: string) =>
+    tagGroup(
+      label,
+      (Array.isArray(metadata[key]) ? metadata[key] : []).flatMap((item) => {
+        if (!isRecord(item)) return [];
+        const value = publicText(item.value, 400);
+        return value ? [value] : [];
+      }),
+    );
+  return [
+    group('已接收的产品与卖点', 'requiredFacts'),
+    group('补充事实', 'adaptiveFacts'),
+    group('不参与生成', 'excludedFacts'),
+    group('全局约束', 'appliedConstraints'),
+  ];
+};
+
+const sharedPromptData = (
+  run: EffectPromptNodeDetailRunRecord,
+  metadata: JsonRecord,
+): JsonRecord => {
+  if (publicText(metadata.compiledContent)) return metadata;
+  const resultPrompt = metadataRecord(finalResultRecord(run)?.sharedPrompt);
+  if (publicText(resultPrompt.compiledContent)) return resultPrompt;
+  return metadataRecord(inputSnapshot(run).sharedPrompt);
+};
+
+const purposeDistributionBlock = (
+  run: EffectPromptNodeDetailRunRecord,
+): EffectPromptNodeDetailBlock | null => {
+  const metrics = metadataRecord(finalResultRecord(run)?.metrics);
+  const distribution = (
+    Array.isArray(metrics.purposeDistribution) ? metrics.purposeDistribution : []
+  ).flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const purpose = fragmentType(item.purpose);
+    const primaryCount = safeNumber(item.primaryCount);
+    const compatibleCount = safeNumber(item.compatibleCount);
+    return purpose && primaryCount !== null && compatibleCount !== null
+      ? [
+          `${EFFECT_PROMPT_FRAGMENT_TYPE_LABELS[purpose]}：主用途 ${primaryCount} 条，兼容 ${compatibleCount} 条`,
+        ]
+      : [];
+  });
+  return tagBlock('最终推荐用途分布', [tagGroup('用途分布', distribution)]);
+};
+
+const outputBlocks = (
+  run: EffectPromptNodeDetailRunRecord,
+  nodeId: EffectPromptNodeId,
+  metadata: JsonRecord,
+): EffectPromptNodeDetailBlock[] => {
+  const blocks: Array<EffectPromptNodeDetailBlock | null> = [];
+  const samples = creativeSamples(run);
+  const evaluations = evaluationRows(run);
+  if (nodeId === 'LOAD_AND_SNAPSHOT') {
+    blocks.push(...actualBlocks(run, nodeId));
+  } else if (nodeId === 'INSIGHT_MAPPING') {
+    const mapped = tagBlock('提炼信息应用结果', metadataFactGroups(metadata));
+    blocks.push(mapped ?? actualBlocks(run, nodeId)[0] ?? null);
+  } else if (nodeId === 'FACT_VISUAL_STRATEGY_COMPILATION') {
+    blocks.push(...actualBlocks(run, nodeId));
+  } else if (nodeId === 'SHARED_PROMPT_COMPILATION') {
+    const prompt = sharedPromptData(run, metadata);
+    const sectionLabels = (Array.isArray(prompt.sections) ? prompt.sections : []).flatMap(
+      (item) => {
+        if (!isRecord(item)) return [];
+        const title = publicText(item.title, 120);
+        return title ? [title] : [];
+      },
+    );
+    blocks.push(textContentBlock('最终共用提示词', prompt.compiledContent, sectionLabels));
+  } else if (nodeId === 'COHERENT_CREATIVE_GENERATION') {
+    blocks.push(
+      ...materialTaskBlocks(run, metadata),
+      creativePlanBlock(metadata),
+      creativeSampleBlock('创意候选样例', samples, samples.length),
+    );
+  } else if (nodeId === 'CREATIVE_EVALUATION_CLASSIFICATION' || nodeId === 'ITEM_EVALUATE') {
+    const accepted = samples.filter((item) => item.outcome === 'ACCEPTED');
+    const rejected = samples.filter((item) => item.outcome === 'REJECTED');
+    const hardCounts = new Map<string, number>();
+    for (const evaluation of evaluations)
+      for (const issue of evaluation.hardIssues)
+        hardCounts.set(issue, (hardCounts.get(issue) ?? 0) + 1);
+    blocks.push(
+      creativeSampleBlock('通过评估的创意样例', accepted, accepted.length),
+      creativeSampleBlock('未通过评估的创意样例', rejected, rejected.length),
+      issueBlock(
+        '未通过原因',
+        [...hardCounts].map(([code, count]) => ({ code, count })),
+      ),
+    );
+  } else if (nodeId === 'EXACT_SELECTION_AND_SUPPLEMENT') {
+    const saved = finalResultSamples(run);
+    const accepted = samples
+      .filter((item) => item.outcome === 'ACCEPTED')
+      .map((item) => ({ ...item, outcome: 'SELECTED' as const }));
+    blocks.push(
+      creativeSampleBlock(
+        saved.length ? '最终择优 Prompt 样例' : '当前合格候选样例',
+        saved.length ? saved.map((item) => ({ ...item, outcome: 'SELECTED' as const })) : accepted,
+        saved.length || accepted.length,
+      ),
+    );
+  } else if (nodeId === 'RESULT_SAVE') {
+    const saved = finalResultSamples(run);
+    blocks.push(
+      purposeDistributionBlock(run),
+      creativeSampleBlock('最终保存 Prompt 样例', saved, saved.length),
+    );
+  }
+  return blocks.filter((block): block is EffectPromptNodeDetailBlock => block !== null);
+};
+
+const expectedOutputSummary: Partial<Record<EffectPromptNodeId, string>> = {
+  LOAD_AND_SNAPSHOT: '将锁定本次商品、营销洞察、数量、时长与共用约束。',
+  INSIGHT_MAPPING: '将营销洞察划分为必须应用、自适应应用、排除信息和全局约束。',
+  FACT_VISUAL_STRATEGY_COMPILATION:
+    '将已确认事实分成可见画面任务、商业背景和禁止视觉证明的事实角色。',
+  SHARED_PROMPT_COMPILATION: '将本批次禁用元素编译为一段批次共用提示词。',
+  COHERENT_CREATIVE_GENERATION:
+    '将按卖点安排素材任务，生成六维信息与正文，并由 AI 完成整段画面执行修正后进入评分。',
+  CREATIVE_EVALUATION_CLASSIFICATION: '将给出质量判断、推荐主用途、兼容用途和问题原因。',
+  EXACT_SELECTION_AND_SUPPLEMENT:
+    '将先从现有候选中按质量与差异选满目标数量；安全候选不足时补充一次，候选池仍缺必用事实时再定向补充一次。覆盖仍不足会保留足量草稿并提示人工复核。',
+  RESULT_SAVE: '将最佳结果保存为节点草稿，完成校验前不会提交工作副本。',
+  ITEM_EVALUATE: '根据用户输入的 Prompt 自动补齐创意主线与六维信息。',
+};
+
+const inputSections = (
+  run: EffectPromptNodeDetailRunRecord,
+  nodeId: EffectPromptNodeId,
+): Pick<EffectPromptNodeDetailSection, 'summary' | 'fields' | 'blocks'> => {
+  const insight = insightResult(run);
+  const settings = inputSettings(run);
+  const samples = creativeSamples(run);
+  const evaluations = evaluationRows(run);
+  const retainedCount = retainedPrompts(run).length;
+  const base = compact([
+    textField('当前商品', insightText(insight, 'productName', 'product_name')),
+    textField('商品品类', insightText(insight, 'productCategory', 'product_category')),
+  ]);
+  if (nodeId === 'LOAD_AND_SNAPSHOT')
+    return {
+      summary: '读取已提交的营销洞察和本节点批次设置。',
+      fields: [
+        ...base,
+        ...(settings && 'targetCount' in settings
+          ? [
+              { label: '目标数量', value: `${settings.targetCount} 条` },
+              { label: '统一时长', value: `${settings.defaultDurationSeconds} 秒` },
+            ]
+          : []),
+        { label: '保留人工内容', value: retainedCount },
+      ],
+      blocks: [],
+    };
+  if (nodeId === 'INSIGHT_MAPPING')
+    return {
+      summary: '接收上游已确认的产品事实和营销洞察。',
+      fields: base,
+      blocks: actualBlocks(run, 'INSIGHT_MAPPING'),
+    };
+  if (nodeId === 'FACT_VISUAL_STRATEGY_COMPILATION')
+    return {
+      summary: '接收已经映射且允许使用的商品事实，判断每条事实应该怎样进入画面。',
+      fields: [
+        ...base,
+        {
+          label: '可用事实',
+          value: Object.entries(normalizeEffectExtractionResult(insight)).reduce(
+            (count, [key, value]) =>
+              count +
+              (key === 'sellingPoints'
+                ? (value as string[]).length
+                : typeof value === 'string' && value.trim()
+                  ? 1
+                  : 0),
+            0,
+          ),
+        },
+      ],
+      blocks: actualBlocks(run, 'INSIGHT_MAPPING'),
+    };
+  if (nodeId === 'SHARED_PROMPT_COMPILATION') {
+    const disabled = settings?.disabledElements ?? [];
+    const existing = metadataRecord(inputSnapshot(run).sharedPrompt);
+    const userContent = (Array.isArray(existing.sections) ? existing.sections : []).flatMap(
+      (item) =>
+        isRecord(item) && item.source === 'USER' ? [publicText(item.content, 30_000)] : [],
+    );
+    return {
+      summary: '接收本批次设置的禁用元素；历史批次如有用户补充内容也会一并读取。',
+      fields: [
+        { label: '禁用元素', value: disabled.length },
+        ...(userContent.some(Boolean) ? [{ label: '用户补充', value: '已设置（历史批次）' }] : []),
+      ],
+      blocks: [
+        tagBlock('批次禁用元素', [tagGroup('禁用元素', disabled)]),
+        textContentBlock('用户补充内容', userContent.filter(Boolean).join('\n'), ['用户补充']),
+      ].filter((block): block is EffectPromptNodeDetailBlock => block !== null),
+    };
+  }
+  if (nodeId === 'COHERENT_CREATIVE_GENERATION')
+    return {
+      summary: '接收可用营销事实、统一时长和已编译的共用约束。',
+      fields: compact([
+        settings && 'targetCount' in settings
+          ? { label: '最终目标', value: `${settings.targetCount} 条` }
+          : null,
+        settings && 'defaultDurationSeconds' in settings
+          ? { label: '统一时长', value: `${settings.defaultDurationSeconds} 秒` }
+          : null,
+        {
+          label: '共用约束',
+          value: publicText(sharedPromptData(run, {}).compiledContent) ? '已启用' : '未设置',
+        },
+      ]),
+      blocks: actualBlocks(run, 'INSIGHT_MAPPING'),
+    };
+  if (nodeId === 'CREATIVE_EVALUATION_CLASSIFICATION' || nodeId === 'ITEM_EVALUATE')
+    return {
+      summary:
+        nodeId === 'ITEM_EVALUATE'
+          ? '接收用户填写的单条 Prompt，正文、片段类型和时长保持不变。'
+          : '接收已生成的创意候选。',
+      fields: [{ label: '待评估候选', value: samples.length }],
+      blocks: [creativeSampleBlock('待评估创意样例', samples, samples.length)].filter(
+        (block): block is EffectPromptNodeDetailBlock => block !== null,
+      ),
+    };
+  if (nodeId === 'EXACT_SELECTION_AND_SUPPLEMENT') {
+    const qualified = evaluations.filter((item) => !item.hardIssues.length).length;
+    return {
+      summary: '接收已经完成质量评估的候选池和目标数量。',
+      fields: compact([
+        settings && 'targetCount' in settings
+          ? { label: '目标数量', value: `${settings.targetCount} 条` }
+          : null,
+        { label: '合格候选', value: qualified },
+        { label: '保留人工内容', value: retainedCount },
+      ]),
+      blocks: [],
+    };
+  }
+  if (nodeId === 'RESULT_SAVE') {
+    const finalSamples = finalResultSamples(run);
+    const selectedCount =
+      finalSamples.length || evaluations.filter((item) => !item.hardIssues.length).length;
+    return {
+      summary: '接收已经择优且完成用途评估的 Prompt。',
+      fields: compact([
+        { label: '待保存结果', value: selectedCount },
+        settings && 'targetCount' in settings
+          ? { label: '目标数量', value: `${settings.targetCount} 条` }
+          : null,
+        {
+          label: '共用提示词',
+          value: publicText(sharedPromptData(run, {}).compiledContent) ? '已包含' : '未设置',
+        },
+      ]),
+      blocks: [],
+    };
+  }
+  return { summary: '接收上一阶段已经完成的业务结果。', fields: base, blocks: [] };
+};
+
+const sectionState = (
+  status: GetEffectPromptNodeDetailData['detail']['status'],
+  hasContent: boolean,
+): EffectPromptNodeDetailSection['state'] => {
+  if (status === 'PENDING') return 'EXPECTED';
+  if (status === 'RUNNING' || status === 'PARTIAL' || status === 'FAILED')
+    return hasContent ? 'PARTIAL' : 'EMPTY';
+  return hasContent ? 'ACTUAL' : 'EMPTY';
+};
+
+const buildDetailSections = (
+  run: EffectPromptNodeDetailRunRecord,
+  nodeId: EffectPromptNodeId,
+  status: GetEffectPromptNodeDetailData['detail']['status'],
+  metadataValue: unknown,
+): EffectPromptNodeDetailSection[] => {
+  const metadata = metadataRecord(metadataValue);
+  const baseFields = actualFields(run, nodeId, metadata);
+  const input = inputSections(run, nodeId);
+  const outputFields = uniqueFields([
+    ...baseFields,
+    ...additionalOutputFields(run, nodeId, metadata),
+  ]);
+  const nodeOutputBlocks = outputBlocks(run, nodeId, metadata);
+  const outputHasContent = outputFields.length > 0 || nodeOutputBlocks.length > 0;
+  const outputState = sectionState(status, outputHasContent);
+  return [
+    {
+      kind: 'INPUT',
+      state: input.fields.length || input.blocks.length ? 'ACTUAL' : 'EMPTY',
+      title: '本次输入',
+      summary: input.summary,
+      fields: input.fields,
+      blocks: input.blocks,
+    },
+    {
+      kind: 'OUTPUT',
+      state: outputState,
+      title:
+        outputState === 'EXPECTED'
+          ? '预计输出'
+          : outputState === 'PARTIAL'
+            ? '已完成部分'
+            : '本次输出',
+      summary:
+        status === 'PENDING'
+          ? (expectedOutputSummary[nodeId] ?? '该节点执行后将在这里展示业务结果。')
+          : nodeId === 'RESULT_SAVE' && outputHasContent
+            ? '结果已保存为节点草稿；只有完成校验后才会提交 Prompt 工作副本。'
+            : outputHasContent
+              ? publicText(run.stages.find((item) => item.nodeId === nodeId)?.summary, 500)
+              : status === 'FAILED'
+                ? '当前没有可展示的业务输出，请查看下方失败原因。'
+                : '当前阶段没有额外可展示的业务结果。',
+      fields: outputFields,
+      blocks: nodeOutputBlocks,
+    },
+    {
+      kind: 'EXECUTION',
+      state: status === 'PENDING' ? 'EXPECTED' : 'ACTUAL',
+      title: '执行情况',
+      summary:
+        status === 'PENDING'
+          ? '任务开始后将展示尝试次数和阶段进度。'
+          : '这里展示安全的运行进度，不包含模型和内部调用信息。',
+      fields: compact([
+        safeNumber(run.attemptCount) === null
+          ? null
+          : {
+              label: '任务尝试',
+              value: `${run.attemptCount}/${EFFECT_PROMPT_MAX_RUN_ATTEMPTS}`,
+            },
+        numberField(metadata, 'completedShardCount', '完成分片'),
+        numberField(metadata, 'pendingShardCount', '待处理分片'),
+        numberField(metadata, 'round', '当前轮次'),
+      ]),
+      blocks: [],
+    },
+  ];
+};
+
+export const presentEffectPromptNodeDetail = (
+  run: EffectPromptNodeDetailRunRecord,
+  nodeId: EffectPromptNodeId,
+): GetEffectPromptNodeDetailData['detail'] => {
+  const stage = run.stages.find((item) => item.nodeId === nodeId);
+  const terminalFailure =
+    run.status === 'FAILED' && run.currentNode === nodeId && stage?.status === 'RUNNING';
+  const status = terminalFailure ? 'FAILED' : (stage?.status ?? 'PENDING');
+  let metadata = metadataRecord(stage?.metadata);
+  if (nodeId === 'COHERENT_CREATIVE_GENERATION') {
+    const progress = creativeShardProgress(run, metadata);
+    if (progress.available) {
+      // Stage metadata is a start/end snapshot; persisted shards advance during
+      // execution. Use one live projection for legacy fields and all sections.
+      const candidateCount = creativeSamples(run).length;
+      metadata = {
+        ...metadata,
+        candidateCount,
+        generatedCandidateCount: candidateCount,
+        totalShardCount: progress.total,
+        completedShardCount: progress.completed,
+        pendingShardCount: progress.pending,
+      };
+    }
+  }
+  return {
+    nodeId,
+    status,
+    summary: publicText(stage?.summary, 500),
+    sections: buildDetailSections(run, nodeId, status, metadata),
+    fields: actualFields(run, nodeId, metadata),
+    blocks: actualBlocks(run, nodeId),
+    warnings: issueLabels(safeStrings(stage?.warnings, 20)),
+    errorMessage: terminalFailure
+      ? publicText(run.errorMessage, 1000)
+      : stage?.errorMessage
+        ? publicText(stage.errorMessage, 1000)
+        : null,
+    updatedAt: terminalFailure
+      ? run.updatedAt.toISOString()
+      : (stage?.updatedAt.toISOString() ?? null),
+  };
+};

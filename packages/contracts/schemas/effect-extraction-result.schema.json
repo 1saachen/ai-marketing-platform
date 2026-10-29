@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-marketing.local/schemas/effect-extraction-result.schema.json",
+  "title": "EffectExtractionResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "productCategory",
+    "productName",
+    "coreSpecification",
+    "priceRange",
+    "visualFeatures",
+    "sellingPoints"
+  ],
+  "properties": {
+    "productCategory": { "type": "string", "maxLength": 500 },
+    "productName": { "type": "string", "maxLength": 500 },
+    "coreSpecification": { "type": "string", "maxLength": 2000 },
+    "priceRange": { "type": "string", "maxLength": 1000 },
+    "visualFeatures": { "type": "string", "maxLength": 4000 },
+    "sellingPoints": { "$ref": "#/$defs/sellingPoints" }
+  },
+  "$defs": {
+    "sellingPoints": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    }
+  }
+}

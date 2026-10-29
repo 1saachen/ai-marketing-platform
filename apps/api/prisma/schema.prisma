@@ -1,0 +1,1754 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model AuthSession {
+  tokenHash             String   @id
+  username              String
+  credentialFingerprint String
+  expiresAt             DateTime
+
+  @@index([expiresAt])
+}
+
+model AuthLoginAttempt {
+  key       String   @id
+  count     Int
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+enum ProjectStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+}
+
+enum AssetDirectory {
+  SOURCE_MATERIALS
+  SOURCE_VIDEOS
+  SCRIPTS
+  PROMPTS
+  VISUAL_ASSETS
+  AUDIO_ASSETS
+  VIDEO_MATERIALS
+  SUBTITLES
+  INSIGHTS
+  EDITING_PROJECTS
+  REPLACEMENT_PLANS
+  REPLACEMENT_CONFIGS
+  REPLACEMENT_REFERENCES
+  ARCHIVES
+  FINAL_VIDEOS
+  REPORTS_DELIVERABLES
+}
+
+enum AssetType {
+  DIGITAL_HUMAN_CHARACTER
+  AVATAR_REFERENCE
+  PERSON_ASSET
+  PRODUCT_ASSET
+  SCENE_BACKGROUND
+  VISUAL_ASSET
+  GENERIC_VIDEO
+  REFERENCE_VIDEO
+  SOURCE_VIDEO
+  VIDEO_MATERIAL
+  FINAL_VIDEO
+  VOICE_AUDIO
+  VOICE_PROFILE
+  SUBTITLE
+  PROMPT
+  SCRIPT_COPY
+  STORYBOARD_SCRIPT
+  SOURCE_MATERIAL
+  VIDEO_CONFIG
+  INSIGHT_RESULT
+  MIX_TEMPLATE
+  TIMELINE_PROJECT
+  EDITING_PROJECT
+  ARCHIVE_DELIVERABLE
+  REPLACEMENT_MAPPING
+  REPLACEMENT_CONFIGURATION
+  REFERENCE_SET
+  DELIVERY_MANIFEST
+  ANALYSIS_QUALITY_REPORT
+}
+
+enum AssetWorkflow {
+  EFFECT
+  CUSTOMIZED
+  FISSION
+}
+
+enum AssetWorkflowSpace {
+  EFFECT
+  CUSTOMIZED_PROJECT
+  CUSTOMIZED_VOICE_LIBRARY
+  FISSION_CLONE
+  FISSION_AVATAR
+  FISSION_LOCAL_REPLACE
+}
+
+enum AssetStatus {
+  AVAILABLE
+  PENDING_REVIEW
+  QUALITY_WARNING
+  UNAVAILABLE
+}
+
+enum EffectImportMode {
+  SINGLE
+  BATCH
+}
+
+enum EffectImportDraftStatus {
+  DRAFT
+  VALID
+  COMPLETED
+}
+
+enum EffectImportMaterialType {
+  PRODUCT_IMAGE
+  PRODUCT_DOCUMENT
+  BRAND_GUIDELINE
+  REFERENCE_VIDEO
+}
+
+enum EffectImportMaterialStatus {
+  MISSING
+  UPLOADING
+  READY
+  FAILED
+}
+
+enum EffectImportFailureDisposition {
+  RETRYABLE
+  REQUIRES_NEW_FILE
+}
+
+enum EffectManifestImportStatus {
+  PREVIEW
+  COMMITTED
+  CANCELLED
+  EXPIRED
+}
+
+enum EffectManifestFormat {
+  csv
+  xlsx
+}
+
+enum EffectManifestFileMatchStatus {
+  MATCHED
+  MISSING
+  AMBIGUOUS
+}
+
+enum EffectExtractionRunStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum EffectPromptOperation {
+  BATCH_GENERATE
+  ITEM_REGENERATE
+}
+
+enum EffectPromptRunStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum EffectPromptStageStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  SKIPPED
+  FAILED
+}
+
+enum EffectPromptShardPhase {
+  BLUEPRINT
+  PROMPT
+}
+
+enum EffectPromptQualityStatus {
+  PASS
+  NEEDS_REVIEW
+}
+
+enum EffectSegmentRenderBatchStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+enum EffectSegmentRenderTaskStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum EffectSegmentRenderOperationKind {
+  GENERATE
+  REPAIR
+}
+
+enum EffectSegmentRenderRepairStatus {
+  QUEUED
+  RUNNING
+  READY
+  FAILED
+}
+
+enum EffectTemplateMixAiRunStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum EffectTemplateMixAiRunStage {
+  CLASSIFYING
+  MATCHING
+  SAMPLING
+  TRIMMING
+  COMPLETED
+}
+
+enum WorkflowRunStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+enum WorkingArtifactKind {
+  FILE
+  STRUCTURED
+}
+
+enum WorkingArtifactFreshness {
+  CURRENT
+  STALE
+}
+
+enum WorkingArtifactAvailability {
+  AVAILABLE
+  SOURCE_REMOVED
+  PENDING_DELETE
+}
+
+enum WorkingArtifactDependencySourceType {
+  NODE_STATE
+  WORKING_ARTIFACT
+  EXECUTION_INPUT
+}
+
+enum EffectImportProductStatus {
+  ACTIVE
+  REMOVED
+}
+
+enum FileObjectStatus {
+  AVAILABLE
+  ORPHANED
+}
+
+enum EffectImportUploadSessionStatus {
+  UPLOADING
+  COMPLETED
+  FAILED
+  EXPIRED
+}
+
+enum EffectImportUploadItemStatus {
+  PENDING
+  UPLOADED
+  FAILED
+  REMOVED
+}
+
+enum EffectExtractionBranch {
+  DOCUMENT
+  IMAGE
+  COMMERCE
+  FORM
+  FUSION
+  SEMANTIC_REFINEMENT
+  NORMALIZATION
+}
+
+enum EffectExtractionBranchStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  SKIPPED
+  FAILED
+}
+
+enum JobOutboxStatus {
+  PENDING
+  PUBLISHED
+}
+
+model Project {
+  customizedProductionTasks CustomizedProductionTask[]
+  customizedStoryboardTasks CustomizedStoryboardTask[]
+  customizedStoryboardScripts CustomizedStoryboardScript[]
+  customizedExtractionTasks CustomizedExtractionTask[]
+  customizedExtractionResults CustomizedExtractionResult[]
+  id                         String                                @id @default(uuid()) @db.Uuid
+  name                       String                                @db.VarChar(120)
+  description                String?                               @db.VarChar(500)
+  client                     String?                               @db.VarChar(120)
+  productName                String?                               @db.VarChar(120)
+  iconKey                    String?                               @db.VarChar(80)
+  defaultWorkflow            AssetWorkflow?
+  defaultSpace               AssetWorkflowSpace?
+  status                     ProjectStatus                         @default(ACTIVE)
+  deletionState              String?                               @db.VarChar(20)
+  deletionError              String?                               @db.VarChar(500)
+  createdAt                  DateTime                              @default(now())
+  updatedAt                  DateTime                              @updatedAt
+  assets                     Asset[]
+  assetVersions              AssetVersion[]
+  effectImportWorkspace      EffectImportWorkspace[]
+  assetOperationReceipts     AssetOperationReceipt[]
+  storageCleanupTasks        StorageCleanupTask[]
+  effectExtractionRuns       EffectExtractionRun[]
+  effectExtractionResults    EffectExtractionResult[]
+  effectExtractionImageCache EffectExtractionImageCache[]
+  effectPromptRuns           EffectPromptRun[]
+  effectPromptResults        EffectPromptResult[]
+  effectSegmentRenderBatches EffectSegmentRenderBatch[]
+  effectSegmentRenderTasks   EffectSegmentRenderTask[]
+  effectSegmentRenderOps     EffectSegmentRenderOperationReceipt[]
+  effectTemplateMixAiRuns    EffectTemplateMixAiRun[]
+  effectTemplateDeletions    EffectTemplateDeletion[]
+  effectPackagingRuns       EffectPackagingRun[]
+  effectVoicePreviews        EffectVoicePreview[]
+  effectFinalOutputRuns     EffectFinalOutputRun[]
+  jobOutboxEntries           JobOutbox[]
+  effectExtractionFileHolds  EffectExtractionFileHold[]
+  workflowRuns               WorkflowRun[]
+  workflowNodeStates         WorkflowNodeState[]
+  workingArtifacts           WorkingArtifact[]
+  workingArtifactRevisions    WorkingArtifactRevisionSnapshot[]
+  fileObjects                FileObject[]
+  effectImportUploadSessions EffectImportUploadSession[]
+
+  @@index([updatedAt])
+  @@map("projects")
+}
+
+model Asset {
+  id               String             @id @default(uuid()) @db.Uuid
+  projectId        String             @db.Uuid
+  name             String             @db.VarChar(120)
+  directory        AssetDirectory
+  type             AssetType
+  storageWorkflow  AssetWorkflow      @default(EFFECT)
+  workflowSpace    AssetWorkflowSpace @default(EFFECT)
+  status           AssetStatus        @default(AVAILABLE)
+  qualityStatus    AssetStatus        @default(AVAILABLE)
+  currentVersion   Int                @default(1)
+  tags             String[]           @default([])
+  notes            String?            @db.VarChar(2000)
+  originalFileName String             @db.VarChar(255)
+  mimeType         String             @db.VarChar(120)
+  sizeBytes        Int
+  storageKey       String             @db.VarChar(500)
+  hasFile          Boolean            @default(true)
+  assetClass       String?            @db.VarChar(120)
+  businessType     String?            @db.VarChar(160)
+  contentKind      String?            @db.VarChar(160)
+  content          Json?
+  businessData     Json?
+  views            String[]           @default([])
+  sourceArtifactId String?            @db.VarChar(255)
+  sourceRunId      String?            @db.VarChar(255)
+  sourceNode       String?            @db.VarChar(255)
+  sourceShot       String?            @db.VarChar(255)
+  idempotencyKey   String?            @db.VarChar(500)
+  sourceProjectId  String?            @db.Uuid
+  sourceAssetId    String?            @db.Uuid
+  sourceVersion    Int?
+  importedAt       DateTime?
+  dependencies     Json?
+  archivedAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  project          Project            @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  versions         AssetVersion[]
+
+  @@unique([projectId, storageWorkflow, workflowSpace, idempotencyKey], map: "assets_project_workflow_space_idempotency_key")
+  @@index([projectId, archivedAt, updatedAt])
+  @@index([projectId, directory, type, archivedAt])
+  @@index([projectId, storageWorkflow, workflowSpace, archivedAt])
+  @@map("assets")
+}
+
+model WorkflowRun {
+  customizedProductionTasks CustomizedProductionTask[]
+  customizedStoryboardTasks CustomizedStoryboardTask[]
+  customizedStoryboardScripts CustomizedStoryboardScript[]
+  customizedExtractionTasks CustomizedExtractionTask[]
+  customizedExtractionResults CustomizedExtractionResult[]
+  id                         String                      @id @default(uuid()) @db.Uuid
+  projectId                  String                      @db.Uuid
+  parentWorkflowRunId        String?                     @db.Uuid
+  forkNodeId                 String?                     @db.VarChar(160)
+  forkScriptId               String?                     @db.Uuid
+  forkTemplateId             String?                     @db.VarChar(160)
+  branchLabel                String?                     @db.VarChar(160)
+  branchPublishedAt          DateTime?
+  branchCreationKey          String?                     @db.VarChar(160)
+  editBaselineHash           String?                     @db.Char(64)
+  editSessionNodeId          String?                     @db.VarChar(160)
+  editSessionPurpose         String?                     @db.VarChar(32)
+  editIdMap                  Json?
+  workflow                   AssetWorkflow
+  workflowSpace              AssetWorkflowSpace
+  status                     WorkflowRunStatus           @default(ACTIVE)
+  activeKey                  String?                     @default("ACTIVE") @db.VarChar(32)
+  currentNodeId              String?                     @db.VarChar(160)
+  lastActiveAt               DateTime                    @default(now())
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  completedAt                DateTime?
+  project                    Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parentWorkflowRun          WorkflowRun?                @relation("WorkflowRunBranches", fields: [projectId, parentWorkflowRunId], references: [projectId, id], onDelete: Restrict)
+  childWorkflowRuns          WorkflowRun[]               @relation("WorkflowRunBranches")
+  nodeStates                 WorkflowNodeState[]
+  workingArtifacts           WorkingArtifact[]
+  workingArtifactRevisions    WorkingArtifactRevisionSnapshot[]
+  fileObjects                FileObject[]
+  effectImportUploadSessions EffectImportUploadSession[]
+  effectWorkspace            EffectImportWorkspace?
+  effectImportProducts       EffectImportProduct[]
+  effectImportMaterials      EffectImportMaterial[]
+  effectImportUploadItems    EffectImportUploadItem[]
+  effectPromptRuns           EffectPromptRun[]
+  effectPromptResults        EffectPromptResult[]
+  effectSegmentRenderBatches EffectSegmentRenderBatch[]
+  effectSegmentRenderTasks   EffectSegmentRenderTask[]
+  effectTemplateMixAiRuns    EffectTemplateMixAiRun[]
+  effectPackagingRuns       EffectPackagingRun[]
+  effectVoicePreviews        EffectVoicePreview[]
+  effectFinalOutputRuns     EffectFinalOutputRun[]
+
+  @@unique([projectId, workflow, workflowSpace, activeKey])
+  @@unique([projectId, workflow, workflowSpace, branchCreationKey])
+  @@unique([projectId, id])
+  @@index([projectId, workflow, workflowSpace, status])
+  @@index([projectId, workflow, workflowSpace, parentWorkflowRunId])
+  @@map("workflow_runs")
+}
+
+model WorkflowNodeState {
+  id                          String      @id @default(uuid()) @db.Uuid
+  projectId                   String      @db.Uuid
+  workflowRunId               String      @db.Uuid
+  nodeId                      String      @db.VarChar(160)
+  schemaVersion               Int         @default(1)
+  revision                    Int         @default(1)
+  contentHash                 String      @db.Char(64)
+  executionInputHash          String      @default("0e9561cfb83d50990a103b3896fe249a11fe27fa28985448187f93ec12116d72") @db.Char(64)
+  executionInputSchemaVersion Int         @default(1)
+  state                       Json
+  savedAt                     DateTime    @default(now())
+  createdAt                   DateTime    @default(now())
+  updatedAt                   DateTime    @updatedAt
+  project                     Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun                 WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, workflowRunId, nodeId])
+  @@index([projectId, updatedAt])
+  @@map("workflow_node_states")
+}
+
+model WorkingArtifact {
+  id               String                      @id @default(uuid()) @db.Uuid
+  projectId        String                      @db.Uuid
+  workflowRunId    String                      @db.Uuid
+  nodeId           String                      @db.VarChar(160)
+  artifactKey      String                      @db.VarChar(500)
+  kind             WorkingArtifactKind
+  name             String                      @db.VarChar(120)
+  directory        AssetDirectory
+  type             AssetType
+  tags             String[]                    @default([])
+  payload          Json?
+  metadata         Json?
+  originalFileName String?                     @db.VarChar(255)
+  mimeType         String?                     @db.VarChar(120)
+  sizeBytes        Int?
+  storageKey       String?                     @db.VarChar(500)
+  sourceRunId      String?                     @db.VarChar(255)
+  sourceArtifactId String?                     @db.VarChar(255)
+  revision         Int                         @default(1)
+  contentHash      String                      @default("") @db.Char(64)
+  freshness        WorkingArtifactFreshness    @default(CURRENT)
+  availability     WorkingArtifactAvailability @default(AVAILABLE)
+  createdAt        DateTime                    @default(now())
+  updatedAt        DateTime                    @updatedAt
+  project          Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun      WorkflowRun                 @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  files            WorkingArtifactFile[]
+  dependencies     WorkingArtifactDependency[] @relation("WorkingArtifactDependencies")
+  sourceDependents WorkingArtifactDependency[] @relation("WorkingArtifactDependencySources")
+
+  @@unique([projectId, workflowRunId, nodeId, artifactKey])
+  @@unique([projectId, id])
+  @@unique([projectId, workflowRunId, id])
+  @@index([projectId, workflowRunId, nodeId, updatedAt])
+  @@map("working_artifacts")
+}
+
+// Immutable confirmed revisions used by effect workflow branches. The mutable
+// WorkingArtifact row remains the latest pointer for existing readers.
+model WorkingArtifactRevisionSnapshot {
+  id                String   @id @default(uuid()) @db.Uuid
+  projectId         String   @db.Uuid
+  workflowRunId     String   @db.Uuid
+  workingArtifactId String   @db.Uuid
+  nodeId            String   @db.VarChar(160)
+  artifactKey       String   @db.VarChar(500)
+  revision          Int
+  contentHash       String   @db.Char(64)
+  snapshot          Json
+  confirmedAt       DateTime @default(now())
+  files             WorkingArtifactRevisionFile[]
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade, map: "working_artifact_revisions_project_fkey")
+  workflowRun       WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade, map: "working_artifact_revisions_run_fkey")
+
+  @@unique([projectId, workflowRunId, nodeId, artifactKey, revision], map: "working_artifact_revisions_scope_key")
+  @@index([projectId, workingArtifactId, revision], map: "working_artifact_revisions_artifact_idx")
+  @@map("working_artifact_revision_snapshots")
+}
+
+model WorkingArtifactRevisionFile {
+  id             String                          @id @default(uuid()) @db.Uuid
+  projectId      String                          @db.Uuid
+  workflowRunId  String                          @db.Uuid
+  snapshotId     String                          @db.Uuid
+  fileObjectId   String                          @db.Uuid
+  role           String                          @db.VarChar(80)
+  sortOrder      Int
+  snapshot       WorkingArtifactRevisionSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  fileObject     FileObject                       @relation(fields: [projectId, fileObjectId], references: [projectId, id], onDelete: Restrict, map: "working_artifact_revision_files_project_file_fkey")
+
+  @@unique([snapshotId, fileObjectId, role, sortOrder], map: "working_artifact_revision_files_binding_key")
+  @@index([projectId, fileObjectId], map: "working_artifact_revision_files_lookup_idx")
+  @@map("working_artifact_revision_files")
+}
+
+model FileObject {
+  id               String                   @id @default(uuid()) @db.Uuid
+  projectId        String                   @db.Uuid
+  workflowRunId    String                   @db.Uuid
+  nodeId           String                   @db.VarChar(160)
+  originalFileName String                   @db.VarChar(255)
+  mimeType         String                   @db.VarChar(120)
+  sizeBytes        Int
+  storageKey       String                   @db.VarChar(500)
+  sha256           String                   @db.Char(64)
+  status           FileObjectStatus         @default(AVAILABLE)
+  orphanedAt       DateTime?
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+  project          Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun      WorkflowRun              @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  artifactLinks    WorkingArtifactFile[]
+  revisionLinks    WorkingArtifactRevisionFile[]
+  materials        EffectImportMaterial[]
+  uploadItems      EffectImportUploadItem[]
+  packagingFiles   EffectPackagingFile[]
+  voicePreviews    EffectVoicePreview[]
+  finalOutputItems EffectFinalOutputItem[]
+
+  @@unique([projectId, storageKey])
+  @@unique([projectId, id])
+  @@unique([projectId, workflowRunId, id])
+  @@index([projectId, workflowRunId, status, updatedAt])
+  @@map("file_objects")
+}
+
+model WorkingArtifactFile {
+  id                String          @id @default(uuid()) @db.Uuid
+  projectId         String          @db.Uuid
+  workflowRunId     String          @db.Uuid
+  workingArtifactId String          @db.Uuid
+  fileObjectId      String          @db.Uuid
+  role              String          @db.VarChar(80)
+  sortOrder         Int             @default(0)
+  createdAt         DateTime        @default(now())
+  workingArtifact   WorkingArtifact @relation(fields: [projectId, workflowRunId, workingArtifactId], references: [projectId, workflowRunId, id], onDelete: Cascade)
+  fileObject        FileObject      @relation(fields: [projectId, fileObjectId], references: [projectId, id], onDelete: Restrict, map: "working_artifact_files_project_file_fkey")
+
+  @@unique([projectId, workingArtifactId, fileObjectId])
+  @@index([projectId, workflowRunId, workingArtifactId, sortOrder])
+  @@index([projectId, fileObjectId])
+  @@map("working_artifact_files")
+}
+
+model WorkingArtifactDependency {
+  id                  String                              @id @default(uuid()) @db.Uuid
+  projectId           String                              @db.Uuid
+  workflowRunId       String                              @db.Uuid
+  dependentArtifactId String                              @db.Uuid
+  sourceType          WorkingArtifactDependencySourceType
+  sourceNodeId        String?                             @db.VarChar(160)
+  sourceArtifactId    String?                             @db.Uuid
+  sourceKey           String                              @db.VarChar(500)
+  sourceRevision      Int?
+  sourceHash          String?                             @db.Char(64)
+  createdAt           DateTime                            @default(now())
+  dependentArtifact   WorkingArtifact                     @relation("WorkingArtifactDependencies", fields: [projectId, workflowRunId, dependentArtifactId], references: [projectId, workflowRunId, id], onDelete: Cascade)
+  sourceArtifact      WorkingArtifact?                    @relation("WorkingArtifactDependencySources", fields: [projectId, sourceArtifactId], references: [projectId, id], onDelete: Restrict, map: "working_artifact_dependencies_project_source_fkey")
+
+  @@unique([projectId, dependentArtifactId, sourceType, sourceKey])
+  @@index([projectId, workflowRunId, sourceType, sourceKey])
+  @@index([projectId, sourceArtifactId])
+  @@map("working_artifact_dependencies")
+}
+
+model AssetVersion {
+  id               String      @id @default(uuid()) @db.Uuid
+  projectId        String      @db.Uuid
+  assetId          String      @db.Uuid
+  version          Int
+  changeNote       String      @db.VarChar(2000)
+  status           AssetStatus
+  qualityStatus    AssetStatus
+  content          Json?
+  businessData     Json?
+  originalFileName String      @db.VarChar(255)
+  mimeType         String      @db.VarChar(120)
+  sizeBytes        Int
+  storageKey       String      @db.VarChar(500)
+  createdAt        DateTime    @default(now())
+  project          Project     @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  asset            Asset       @relation(fields: [assetId], references: [id], onDelete: Restrict)
+
+  @@unique([projectId, assetId, version])
+  @@index([projectId, assetId, createdAt])
+  @@map("asset_versions")
+}
+
+model AssetOperationReceipt {
+  id             String   @id @default(uuid()) @db.Uuid
+  projectId      String   @db.Uuid
+  operationKey   String   @db.VarChar(500)
+  assetId        String   @db.Uuid
+  assetVersionId String   @db.Uuid
+  version        Int
+  createdAt      DateTime @default(now())
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Restrict)
+
+  @@unique([projectId, operationKey])
+  @@index([projectId, assetId])
+  @@map("asset_operation_receipts")
+}
+
+model EffectImportWorkspace {
+  id            String              @id @default(uuid()) @db.Uuid
+  projectId     String              @db.Uuid
+  workflowRunId String              @unique @db.Uuid
+  currentMode   EffectImportMode    @default(SINGLE)
+  revision      Int                 @default(1)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  project       Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun   WorkflowRun         @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  drafts        EffectImportDraft[]
+
+  @@unique([projectId, id])
+  @@unique([projectId, workflowRunId])
+  @@index([projectId, updatedAt])
+  @@map("effect_import_workspaces")
+}
+
+model EffectImportDraft {
+  id                String                      @id @default(uuid()) @db.Uuid
+  projectId         String                      @db.Uuid
+  workspaceId       String                      @db.Uuid
+  mode              EffectImportMode
+  status            EffectImportDraftStatus     @default(DRAFT)
+  globalConfig      Json
+  revision          Int                         @default(1)
+  validatedRevision Int?
+  validationIssues  Json
+  validatedAt       DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime                    @default(now())
+  updatedAt         DateTime                    @updatedAt
+  workspace         EffectImportWorkspace       @relation(fields: [projectId, workspaceId], references: [projectId, id], onDelete: Cascade)
+  products          EffectImportProduct[]
+  manifestImports   EffectManifestImport[]
+  extractionRuns    EffectExtractionRun[]
+  extractionResults EffectExtractionResult[]
+  uploadSessions    EffectImportUploadSession[]
+
+  @@unique([workspaceId, mode])
+  @@unique([projectId, id])
+  @@index([projectId, updatedAt])
+  @@map("effect_import_drafts")
+}
+
+model EffectImportProduct {
+  id                      String                      @id @default(uuid()) @db.Uuid
+  projectId               String                      @db.Uuid
+  workflowRunId           String                      @db.Uuid
+  draftId                 String                      @db.Uuid
+  status                  EffectImportProductStatus   @default(ACTIVE)
+  removedAt               DateTime?
+  purgeAfter              DateTime?
+  name                    String                      @default("") @db.VarChar(120)
+  category                String                      @default("") @db.VarChar(120)
+  sku                     String                      @default("") @db.VarChar(160)
+  normalizedSku           String                      @default("") @db.VarChar(160)
+  commerceUrl             String?                     @db.VarChar(2000)
+  configOverride          Json
+  sortOrder               Int                         @default(0)
+  sourceManifestImportId  String?                     @db.Uuid
+  sourceManifestRowNumber Int?
+  createdAt               DateTime                    @default(now())
+  updatedAt               DateTime                    @updatedAt
+  draft                   EffectImportDraft           @relation(fields: [projectId, draftId], references: [projectId, id], onDelete: Cascade)
+  workflowRun             WorkflowRun                 @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  sourceManifestImport    EffectManifestImport?       @relation(fields: [projectId, sourceManifestImportId], references: [projectId, id], onDelete: Restrict)
+  materials               EffectImportMaterial[]
+  extractionRuns          EffectExtractionRun[]
+  extractionResults       EffectExtractionResult[]
+  promptRuns              EffectPromptRun[]
+  promptResults           EffectPromptResult[]
+  segmentRenderBatches    EffectSegmentRenderBatch[]
+  segmentRenderTasks      EffectSegmentRenderTask[]
+  uploadSessions          EffectImportUploadSession[]
+
+  @@unique([projectId, id])
+  @@unique([projectId, workflowRunId, id])
+  @@index([projectId, workflowRunId, status, purgeAfter])
+  @@index([projectId, draftId, sortOrder])
+  @@index([projectId, draftId, normalizedSku])
+  @@map("effect_import_products")
+}
+
+model EffectImportMaterial {
+  id                 String                          @id @default(uuid()) @db.Uuid
+  projectId          String                          @db.Uuid
+  workflowRunId      String                          @db.Uuid
+  productId          String                          @db.Uuid
+  type               EffectImportMaterialType
+  status             EffectImportMaterialStatus      @default(UPLOADING)
+  expectedFileName   String?                         @db.VarChar(255)
+  originalFileName   String?                         @db.VarChar(255)
+  mimeType           String?                         @db.VarChar(120)
+  sizeBytes          Int?
+  storageKey         String?                         @db.VarChar(500)
+  fileObjectId       String?                         @db.Uuid
+  failureDisposition EffectImportFailureDisposition?
+  errorCode          String?                         @db.VarChar(120)
+  errorMessage       String?                         @db.VarChar(500)
+  retryCount         Int                             @default(0)
+  createdAt          DateTime                        @default(now())
+  updatedAt          DateTime                        @updatedAt
+  product            EffectImportProduct             @relation(fields: [projectId, productId], references: [projectId, id], onDelete: Cascade)
+  workflowRun        WorkflowRun                     @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  fileObject         FileObject?                     @relation(fields: [projectId, fileObjectId], references: [projectId, id], onDelete: Restrict, map: "effect_import_materials_project_file_fkey")
+
+  @@unique([projectId, id])
+  @@index([projectId, productId, type])
+  @@index([projectId, fileObjectId])
+  @@map("effect_import_materials")
+}
+
+model EffectImportUploadSession {
+  id               String                          @id @default(uuid()) @db.Uuid
+  projectId        String                          @db.Uuid
+  workflowRunId    String                          @db.Uuid
+  draftId          String                          @db.Uuid
+  productId        String                          @db.Uuid
+  expectedRevision Int
+  status           EffectImportUploadSessionStatus @default(UPLOADING)
+  completionKey    String?                         @db.VarChar(500)
+  expiresAt        DateTime
+  completedAt      DateTime?
+  createdAt        DateTime                        @default(now())
+  updatedAt        DateTime                        @updatedAt
+  project          Project                         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun      WorkflowRun                     @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  draft            EffectImportDraft               @relation(fields: [projectId, draftId], references: [projectId, id], onDelete: Cascade)
+  product          EffectImportProduct             @relation(fields: [projectId, productId], references: [projectId, id], onDelete: Cascade)
+  items            EffectImportUploadItem[]
+
+  @@unique([projectId, id])
+  @@unique([projectId, workflowRunId, id])
+  @@unique([projectId, completionKey])
+  @@index([projectId, productId, status, expiresAt])
+  @@map("effect_import_upload_sessions")
+}
+
+model EffectImportUploadItem {
+  id               String                       @id @default(uuid()) @db.Uuid
+  projectId        String                       @db.Uuid
+  workflowRunId    String                       @db.Uuid
+  sessionId        String                       @db.Uuid
+  clientFileId     String                       @db.VarChar(160)
+  type             EffectImportMaterialType
+  expectedFileName String?                      @db.VarChar(255)
+  status           EffectImportUploadItemStatus @default(PENDING)
+  originalFileName String                       @db.VarChar(255)
+  mimeType         String                       @db.VarChar(120)
+  sizeBytes        Int
+  storageKey       String?                      @db.VarChar(500)
+  sha256           String?                      @db.Char(64)
+  fileObjectId     String?                      @db.Uuid
+  errorCode        String?                      @db.VarChar(120)
+  errorMessage     String?                      @db.VarChar(500)
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+  session          EffectImportUploadSession    @relation(fields: [projectId, workflowRunId, sessionId], references: [projectId, workflowRunId, id], onDelete: Cascade)
+  workflowRun      WorkflowRun                  @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  fileObject       FileObject?                  @relation(fields: [projectId, workflowRunId, fileObjectId], references: [projectId, workflowRunId, id], onDelete: Restrict)
+
+  @@unique([projectId, sessionId, clientFileId])
+  @@index([projectId, fileObjectId])
+  @@map("effect_import_upload_items")
+}
+
+model EffectManifestImport {
+  id                   String                     @id @default(uuid()) @db.Uuid
+  projectId            String                     @db.Uuid
+  draftId              String                     @db.Uuid
+  status               EffectManifestImportStatus @default(PREVIEW)
+  format               EffectManifestFormat
+  originalFileName     String                     @db.VarChar(255)
+  rowCount             Int
+  previewRows          Json
+  issues               Json
+  idempotencyKey       String?                    @db.VarChar(500)
+  commitIdempotencyKey String?                    @db.VarChar(500)
+  expiresAt            DateTime
+  committedAt          DateTime?
+  cancelledAt          DateTime?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  draft                EffectImportDraft          @relation(fields: [projectId, draftId], references: [projectId, id], onDelete: Cascade)
+  stagedFiles          EffectManifestStagedFile[]
+  products             EffectImportProduct[]
+
+  @@unique([projectId, id])
+  @@unique([projectId, draftId, idempotencyKey])
+  @@index([projectId, draftId, status, expiresAt])
+  @@map("effect_manifest_imports")
+}
+
+model StorageCleanupTask {
+  id            String   @id @default(uuid()) @db.Uuid
+  projectId     String   @db.Uuid
+  storageKey    String   @db.VarChar(500)
+  reason        String   @db.VarChar(120)
+  attempts      Int      @default(0)
+  lastError     String?  @db.VarChar(500)
+  nextAttemptAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, storageKey])
+  @@index([projectId, nextAttemptAt])
+  @@map("storage_cleanup_tasks")
+}
+
+// Independent of Project: cleanup must survive permanent deletion and process restarts.
+model ProjectDeletionCleanup {
+  projectId     String   @id @db.Uuid
+  storageKeys   Json
+  phase         String   @default("FILES") @db.VarChar(20)
+  status        String   @default("QUEUED") @db.VarChar(20)
+  lastError     String?  @db.VarChar(500)
+  projectSnapshot Json?
+  attempts      Int      @default(0)
+  leaseToken    String?  @db.Uuid
+  nextAttemptAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([nextAttemptAt])
+  @@map("project_deletion_cleanups")
+}
+
+// Durable deletion receipt/tombstone; no business snapshot survives cleanup.
+model EffectTemplateDeletion {
+  id             String   @id @default(uuid()) @db.Uuid
+  projectId      String   @db.Uuid
+  templateId     String   @db.Uuid
+  workflowRunIds String[] @default([]) @db.Uuid
+  fallbackRunId  String   @db.Uuid
+  storageKeys    Json
+  phase          String   @default("DATABASE") @db.VarChar(20)
+  status         String   @default("QUEUED") @db.VarChar(20)
+  attempts       Int      @default(0)
+  leaseToken     String?  @db.Uuid
+  lastError      String?  @db.VarChar(500)
+  nextAttemptAt  DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, templateId])
+  @@index([status, nextAttemptAt])
+  @@map("effect_template_deletions")
+}
+
+model EffectManifestStagedFile {
+  id                  String                        @id @default(uuid()) @db.Uuid
+  projectId           String                        @db.Uuid
+  manifestImportId    String                        @db.Uuid
+  originalFileName    String                        @db.VarChar(255)
+  mimeType            String                        @db.VarChar(120)
+  sizeBytes           Int
+  storageKey          String                        @db.VarChar(500)
+  matchedRowNumbers   Int[]                         @default([])
+  matchedMaterialType EffectImportMaterialType?
+  matchStatus         EffectManifestFileMatchStatus
+  transferredAt       DateTime?
+  createdAt           DateTime                      @default(now())
+  updatedAt           DateTime                      @updatedAt
+  manifestImport      EffectManifestImport          @relation(fields: [projectId, manifestImportId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, id])
+  @@index([projectId, manifestImportId])
+  @@map("effect_manifest_staged_files")
+}
+
+model EffectExtractionRun {
+  id                String                         @id @default(uuid()) @db.Uuid
+  projectId         String                         @db.Uuid
+  draftId           String                         @db.Uuid
+  productId         String                         @db.Uuid
+  requestRevision   Int
+  idempotencyKey    String                         @db.VarChar(500)
+  requestHash       String                         @db.VarChar(64)
+  sourceFingerprint String                         @db.VarChar(64)
+  inputSnapshot     Json
+  status            EffectExtractionRunStatus      @default(QUEUED)
+  progress          Int                            @default(0)
+  currentNode       String?                        @db.VarChar(120)
+  warnings          Json
+  errorCode         String?                        @db.VarChar(120)
+  errorMessage      String?                        @db.VarChar(1000)
+  attemptCount      Int                            @default(0)
+  attemptToken      String?                        @db.Uuid
+  leaseExpiresAt    DateTime?
+  startedAt         DateTime?
+  heartbeatAt       DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime                       @default(now())
+  updatedAt         DateTime                       @updatedAt
+  project           Project                        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  draft             EffectImportDraft              @relation(fields: [projectId, draftId], references: [projectId, id], onDelete: Cascade)
+  product           EffectImportProduct            @relation(fields: [projectId, productId], references: [projectId, id], onDelete: Cascade)
+  branches          EffectExtractionBranchOutput[]
+  result            EffectExtractionResult?
+  fileHolds         EffectExtractionFileHold[]
+  artifacts         EffectExtractionArtifact[]
+
+  @@unique([projectId, id])
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, draftId, productId, status, updatedAt])
+  @@index([status, leaseExpiresAt])
+  @@map("effect_extraction_runs")
+}
+
+model EffectExtractionBranchOutput {
+  id               String                       @id @default(uuid()) @db.Uuid
+  projectId        String                       @db.Uuid
+  runId            String                       @db.Uuid
+  branch           EffectExtractionBranch
+  status           EffectExtractionBranchStatus @default(PENDING)
+  structuredOutput Json?
+  textStorageKey   String?                      @db.VarChar(500)
+  warnings         Json
+  errorCode        String?                      @db.VarChar(120)
+  errorMessage     String?                      @db.VarChar(1000)
+  startedAt        DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+  run              EffectExtractionRun          @relation(fields: [projectId, runId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, runId, branch])
+  @@index([projectId, runId, updatedAt])
+  @@map("effect_extraction_branch_outputs")
+}
+
+model EffectExtractionImageCache {
+  id        String    @id @default(uuid()) @db.Uuid
+  projectId String    @db.Uuid
+  cacheKey  String    @db.Char(64)
+  candidate Json
+  metadata  Json      @default("{}")
+  hitCount  Int       @default(0)
+  lastHitAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, cacheKey])
+  @@index([projectId, updatedAt])
+  @@map("effect_extraction_image_cache")
+}
+
+model EffectExtractionResult {
+  id                String              @id @default(uuid()) @db.Uuid
+  projectId         String              @db.Uuid
+  draftId           String              @db.Uuid
+  productId         String              @db.Uuid
+  runId             String              @unique @db.Uuid
+  schemaVersion     Int                 @default(1)
+  generatedResult   Json
+  draftResult       Json
+  manualOverrides   Json                @default("{}")
+  provenance        Json
+  conflictReport    Json
+  sourceFingerprint String              @db.VarChar(64)
+  revision          Int                 @default(1)
+  savedAt           DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  project           Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  draft             EffectImportDraft   @relation(fields: [projectId, draftId], references: [projectId, id], onDelete: Cascade)
+  product           EffectImportProduct @relation(fields: [projectId, productId], references: [projectId, id], onDelete: Cascade)
+  run               EffectExtractionRun @relation(fields: [projectId, runId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, id])
+  @@unique([projectId, runId])
+  @@index([projectId, draftId, productId, createdAt])
+  @@map("effect_extraction_results")
+}
+
+model JobOutbox {
+  id            String          @id @default(uuid()) @db.Uuid
+  projectId     String          @db.Uuid
+  jobType       String          @db.VarChar(120)
+  aggregateId   String          @db.Uuid
+  routingKey    String          @db.VarChar(160)
+  payload       Json
+  status        JobOutboxStatus @default(PENDING)
+  attempts      Int             @default(0)
+  dispatchToken String?         @db.Uuid
+  nextAttemptAt DateTime        @default(now())
+  lastError     String?         @db.VarChar(1000)
+  publishedAt   DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  project       Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, jobType, aggregateId])
+  @@index([status, nextAttemptAt])
+  @@map("job_outbox")
+}
+
+model EffectExtractionFileHold {
+  id         String              @id @default(uuid()) @db.Uuid
+  projectId  String              @db.Uuid
+  runId      String              @db.Uuid
+  storageKey String              @db.VarChar(500)
+  createdAt  DateTime            @default(now())
+  project    Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  run        EffectExtractionRun @relation(fields: [projectId, runId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, runId, storageKey])
+  @@index([projectId, storageKey])
+  @@map("effect_extraction_file_holds")
+}
+
+model EffectExtractionArtifact {
+  id               String              @id @default(uuid()) @db.Uuid
+  projectId        String              @db.Uuid
+  runId            String              @db.Uuid
+  artifactKind     String              @db.VarChar(120)
+  sourceId         String?             @db.VarChar(255)
+  idempotencyKey   String              @db.VarChar(500)
+  originalFileName String              @db.VarChar(255)
+  mimeType         String              @db.VarChar(120)
+  sizeBytes        Int
+  storageKey       String              @db.VarChar(500)
+  createdAt        DateTime            @default(now())
+  run              EffectExtractionRun @relation(fields: [projectId, runId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, runId, idempotencyKey])
+  @@index([projectId, runId, artifactKind])
+  @@map("effect_extraction_artifacts")
+}
+
+model EffectPromptRun {
+  id                String                    @id @default(uuid()) @db.Uuid
+  projectId         String                    @db.Uuid
+  workflowRunId     String                    @db.Uuid
+  productId         String                    @db.Uuid
+  operation         EffectPromptOperation
+  targetItemId      String?                   @db.Uuid
+  idempotencyKey    String                    @db.VarChar(500)
+  requestHash       String                    @db.Char(64)
+  sourceFingerprint String                    @db.Char(64)
+  settingsHash      String                    @db.Char(64)
+  inputSnapshot     Json
+  status            EffectPromptRunStatus     @default(QUEUED)
+  progress          Int                       @default(0)
+  currentNode       String?                   @db.VarChar(120)
+  warnings          Json                      @default("[]")
+  errorCode         String?                   @db.VarChar(120)
+  errorMessage      String?                   @db.VarChar(1000)
+  attemptCount      Int                       @default(0)
+  attemptToken      String?                   @db.Uuid
+  leaseExpiresAt    DateTime?
+  startedAt         DateTime?
+  heartbeatAt       DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+  project           Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun       WorkflowRun               @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  product           EffectImportProduct       @relation(fields: [projectId, workflowRunId, productId], references: [projectId, workflowRunId, id], onDelete: Cascade)
+  stages            EffectPromptStageOutput[]
+  shards            EffectPromptShardOutput[]
+  result            EffectPromptResult?
+
+  @@unique([projectId, id])
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, workflowRunId, productId, status, updatedAt])
+  @@index([status, leaseExpiresAt])
+  @@map("effect_prompt_runs")
+}
+
+model EffectPromptStageOutput {
+  id           String                  @id @default(uuid()) @db.Uuid
+  projectId    String                  @db.Uuid
+  runId        String                  @db.Uuid
+  nodeId       String                  @db.VarChar(120)
+  status       EffectPromptStageStatus @default(PENDING)
+  summary      String                  @default("") @db.VarChar(500)
+  warnings     Json                    @default("[]")
+  metadata     Json                    @default("{}")
+  errorMessage String?                 @db.VarChar(1000)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+  run          EffectPromptRun         @relation(fields: [projectId, runId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, runId, nodeId])
+  @@index([projectId, runId, updatedAt])
+  @@map("effect_prompt_stage_outputs")
+}
+
+model EffectPromptShardOutput {
+  id              String                  @id @default(uuid()) @db.Uuid
+  projectId       String                  @db.Uuid
+  runId           String                  @db.Uuid
+  phase           EffectPromptShardPhase  @default(PROMPT)
+  round           Int
+  shardIndex      Int
+  status          EffectPromptStageStatus @default(PENDING)
+  combinationPlan Json                    @default("[]")
+  items           Json                    @default("[]")
+  warnings        Json                    @default("[]")
+  errorCode       String?                 @db.VarChar(120)
+  errorMessage    String?                 @db.VarChar(1000)
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+  run             EffectPromptRun         @relation(fields: [projectId, runId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, runId, phase, round, shardIndex], map: "effect_prompt_shard_phase_round_key")
+  @@index([projectId, runId, phase, round, shardIndex], map: "effect_prompt_shard_phase_round_idx")
+  @@map("effect_prompt_shard_outputs")
+}
+
+model EffectPromptResult {
+  id                String                    @id @default(uuid()) @db.Uuid
+  projectId         String                    @db.Uuid
+  workflowRunId     String                    @db.Uuid
+  productId         String                    @db.Uuid
+  runId             String                    @unique @db.Uuid
+  schemaVersion     Int                       @default(1)
+  generatedResult   Json
+  draftResult       Json
+  manualOverrides   Json                      @default("{}")
+  qualityStatus     EffectPromptQualityStatus
+  sourceFingerprint String                    @db.Char(64)
+  settingsHash      String                    @db.Char(64)
+  revision          Int                       @default(1)
+  savedAt           DateTime?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+  project           Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun       WorkflowRun               @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  product           EffectImportProduct       @relation(fields: [projectId, workflowRunId, productId], references: [projectId, workflowRunId, id], onDelete: Cascade)
+  run               EffectPromptRun           @relation(fields: [projectId, runId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, id])
+  @@unique([projectId, runId])
+  @@index([projectId, workflowRunId, productId, createdAt])
+  @@map("effect_prompt_results")
+}
+
+model EffectSegmentRenderBatch {
+  id                     String                                @id @default(uuid()) @db.Uuid
+  projectId              String                                @db.Uuid
+  workflowRunId          String                                @db.Uuid
+  productId              String                                @db.Uuid
+  sourcePromptArtifactId String                                @db.Uuid
+  sourcePromptRevision   Int
+  sourcePromptHash       String                                @db.Char(64)
+  sourceFingerprint      String                                @db.Char(64)
+  idempotencyKey         String                                @db.VarChar(500)
+  requestHash            String                                @db.Char(64)
+  status                 EffectSegmentRenderBatchStatus        @default(QUEUED)
+  activeKey              String?                               @default("ACTIVE") @db.VarChar(32)
+  revision               Int                                   @default(1)
+  committedAt            DateTime?
+  archivedAt             DateTime?
+  createdAt              DateTime                              @default(now())
+  updatedAt              DateTime                              @updatedAt
+  project                Project                               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun            WorkflowRun                           @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  product                EffectImportProduct                   @relation(fields: [projectId, workflowRunId, productId], references: [projectId, workflowRunId, id], onDelete: Cascade)
+  tasks                  EffectSegmentRenderTask[]
+  operations             EffectSegmentRenderOperationReceipt[]
+  importDrafts           EffectSegmentImportDraft[]
+
+  @@unique([projectId, id])
+  @@unique([projectId, idempotencyKey])
+  @@unique([projectId, workflowRunId, productId, activeKey])
+  @@index([projectId, workflowRunId, productId, createdAt])
+  @@map("effect_segment_render_batches")
+}
+
+model EffectSegmentImportDraft {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  workflowRunId String @db.Uuid
+  batchId String @db.Uuid
+  uploadKey String @db.VarChar(500)
+  fileName String @db.VarChar(255)
+  mimeType String @db.VarChar(120)
+  sizeBytes Int
+  storageKey String @db.VarChar(500)
+  sha256 String @db.Char(64)
+    durationSeconds Float
+    width Int
+    height Int
+    frameRate Float?
+  status String @default("READY") @db.VarChar(20)
+  descriptionStatus String @default("IDLE") @db.VarChar(20)
+  promptText String @default("")
+  primaryPurpose String? @db.VarChar(30)
+  compatiblePurposes String[] @default([])
+  creativeCore String @default("") @db.VarChar(160)
+  dimensions Json @default("{}")
+  errorMessage String? @db.VarChar(500)
+  descriptionKey String? @db.VarChar(500)
+  attemptToken String? @db.Uuid
+  leaseExpiresAt DateTime?
+  expiresAt DateTime
+  importedTaskId String? @db.Uuid
+  cleanedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  batch EffectSegmentRenderBatch @relation(fields: [projectId, batchId], references: [projectId, id], onDelete: Restrict)
+
+  @@unique([projectId, id])
+  @@unique([projectId, uploadKey])
+  @@index([status, expiresAt])
+  @@map("effect_segment_import_drafts")
+}
+
+model EffectSegmentRenderTask {
+  id                          String                           @id @default(uuid()) @db.Uuid
+  projectId                   String                           @db.Uuid
+  workflowRunId               String                           @db.Uuid
+  productId                   String                           @db.Uuid
+  batchId                     String                           @db.Uuid
+  promptId                    String                           @db.Uuid
+  promptCode                  String                           @db.VarChar(120)
+  renderCode                  String                           @db.VarChar(120)
+  sourceFingerprint           String                           @db.Char(64)
+  requestSnapshot             Json
+  generationRequestSnapshot   Json
+  operationKind               EffectSegmentRenderOperationKind @default(GENERATE)
+  status                      EffectSegmentRenderTaskStatus    @default(QUEUED)
+  progress                    Int                              @default(0)
+  renderVersion               Int                              @default(1)
+  activeOutputVersion         Int?
+  retryCount                  Int                              @default(0)
+  maxAutoRetries              Int                              @default(2)
+  attemptCount                Int                              @default(0)
+  attemptToken                String?                          @db.Uuid
+  leaseExpiresAt              DateTime?
+  heartbeatAt                 DateTime?
+  providerTaskId              String?                          @db.VarChar(255)
+  outputFileObjectId          String?                          @db.Uuid
+  outputStorageKey            String?                          @db.VarChar(500)
+  outputFileName              String?                          @db.VarChar(255)
+  outputMimeType              String?                          @db.VarChar(120)
+  outputSizeBytes             Int?
+  outputContentHash           String?                          @db.Char(64)
+  outputPoster                Json?
+  repairStatus                EffectSegmentRenderRepairStatus?
+  repairSourceVersion         Int?
+  repairStartMs               Int?
+  repairEndMs                 Int?
+  repairRegion                Json?
+  repairInstruction           String?                          @db.VarChar(1000)
+  repairRequestHash           String?                          @db.Char(64)
+  repairCandidateFileObjectId String?                          @db.Uuid
+  repairCandidateStorageKey   String?                          @db.VarChar(500)
+  repairCandidateFileName     String?                          @db.VarChar(255)
+  repairCandidateMimeType     String?                          @db.VarChar(120)
+  repairCandidateSizeBytes    Int?
+  repairCandidateContentHash  String?                          @db.Char(64)
+  repairCandidatePoster       Json?
+  repairCandidateVersion      Int?
+  repairCandidateCreatedAt    DateTime?
+  errorCode                   String?                          @db.VarChar(120)
+  errorMessage                String?                          @db.VarChar(1000)
+  queuedAt                    DateTime                         @default(now())
+  startedAt                   DateTime?
+  completedAt                 DateTime?
+  createdAt                   DateTime                         @default(now())
+  updatedAt                   DateTime                         @updatedAt
+  project                     Project                          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun                 WorkflowRun                      @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  product                     EffectImportProduct              @relation(fields: [projectId, workflowRunId, productId], references: [projectId, workflowRunId, id], onDelete: Cascade)
+  batch                       EffectSegmentRenderBatch         @relation(fields: [projectId, batchId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, id])
+  @@unique([projectId, batchId, promptId])
+  @@index([projectId, workflowRunId, productId, status, updatedAt])
+  @@index([status, leaseExpiresAt])
+  @@map("effect_segment_render_tasks")
+}
+
+model EffectSegmentRenderOperationReceipt {
+  id             String                   @id @default(uuid()) @db.Uuid
+  projectId      String                   @db.Uuid
+  batchId        String                   @db.Uuid
+  idempotencyKey String                   @db.VarChar(500)
+  requestHash    String                   @db.Char(64)
+  createdAt      DateTime                 @default(now())
+  project        Project                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  batch          EffectSegmentRenderBatch @relation(fields: [projectId, batchId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, batchId, createdAt])
+  @@map("effect_segment_render_operation_receipts")
+}
+
+model EffectTemplateMixAiRun {
+  id                    String                       @id @default(uuid()) @db.Uuid
+  projectId             String                       @db.Uuid
+  workflowRunId         String                       @db.Uuid
+  templateId            String                       @db.Uuid
+  targetVariantId       String?                      @db.Uuid
+  outputVariantId       String?                      @db.Uuid
+  idempotencyKey        String                       @db.VarChar(500)
+  requestHash           String                       @db.Char(64)
+  inputHash             String                       @db.Char(64)
+  inputSnapshot         Json
+  classificationResult  Json?
+  selectionResult       Json?
+  samplingResult        Json?
+  trimResult            Json?
+  expectedDraftRevision Int
+  templateEditVersion   Int
+  status                EffectTemplateMixAiRunStatus @default(QUEUED)
+  stage                 EffectTemplateMixAiRunStage  @default(CLASSIFYING)
+  progress              Int                          @default(0)
+  attemptCount          Int                          @default(0)
+  maxAttempts           Int                          @default(2)
+  unclaimedRecoveryCount Int                          @default(0)
+  attemptToken          String?                      @db.Uuid
+  leaseExpiresAt        DateTime?
+  heartbeatAt           DateTime?
+  errorCode             String?                      @db.VarChar(120)
+  errorMessage          String?                      @db.VarChar(1000)
+  queuedAt              DateTime                     @default(now())
+  startedAt             DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+  project               Project                      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun           WorkflowRun                  @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+
+  @@unique([projectId, id])
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, workflowRunId, templateId, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@map("effect_template_mix_ai_runs")
+}
+
+model EffectVoicePreview {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  workflowRunId String @db.Uuid
+  templateId String @db.Uuid
+  cacheKey String @db.Char(64)
+  snapshot Json
+  status String @default("QUEUED") @db.VarChar(20)
+  attemptToken String? @db.Uuid
+  leaseExpiresAt DateTime?
+  submittedAt DateTime?
+  fileObjectId String? @db.Uuid
+  errorCode String? @db.VarChar(80)
+  errorMessage String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade, map: "effect_voice_previews_run_fkey")
+  fileObject FileObject? @relation(fields: [projectId, workflowRunId, fileObjectId], references: [projectId, workflowRunId, id], onDelete: Restrict, map: "effect_voice_previews_file_fkey")
+  requests EffectVoicePreviewRequest[]
+  @@unique([projectId, id])
+  @@index([projectId, workflowRunId, templateId, cacheKey], map: "voice_preview_cache_idx")
+  @@index([status, leaseExpiresAt])
+  @@map("effect_voice_previews")
+}
+
+model EffectVoicePreviewRequest {
+  projectId String @db.Uuid
+  idempotencyKey String @db.VarChar(500)
+  requestHash String @db.Char(64)
+  previewId String @db.Uuid
+  preview EffectVoicePreview @relation(fields: [projectId, previewId], references: [projectId, id], onDelete: Cascade, map: "effect_voice_preview_requests_preview_fkey")
+  @@id([projectId, idempotencyKey])
+  @@map("effect_voice_preview_requests")
+}
+
+model EffectVoiceCatalogSample {
+  id        String   @id @default(uuid()) @db.Uuid
+  profileId String   @db.VarChar(80)
+  version   String   @db.VarChar(100)
+  storageKey String  @db.VarChar(500)
+  sha256    String   @db.Char(64)
+  sizeBytes Int
+  mimeType  String   @db.VarChar(120)
+  duration  Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([profileId, version])
+  @@unique([storageKey])
+  @@map("effect_voice_catalog_samples")
+}
+
+model EffectVoiceCatalogSampleAttempt {
+  id        String   @id @default(uuid()) @db.Uuid
+  profileId String   @db.VarChar(80)
+  version   String   @db.VarChar(100)
+  status    String   @default("SUBMITTED_UNKNOWN") @db.VarChar(24)
+  errorCode String?  @db.VarChar(80)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([profileId, version])
+  @@map("effect_voice_catalog_sample_attempts")
+}
+
+model EffectPackagingRun {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  workflowRunId String @db.Uuid
+  templateId String @db.Uuid
+  idempotencyKey String @db.VarChar(500)
+  requestHash String @db.Char(64)
+  status String @default("QUEUED") @db.VarChar(20)
+  attemptToken String? @db.Uuid
+  attemptCount Int @default(0)
+  leaseExpiresAt DateTime?
+  createdAt DateTime @default(now())
+  startedAt DateTime?
+  completedAt DateTime?
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  items EffectPackagingItem[]
+  @@unique([projectId, id])
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, workflowRunId, templateId, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@map("effect_packaging_runs")
+}
+
+model EffectPackagingItem {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  runId String @db.Uuid
+  variantId String @db.Uuid
+  name String
+  shardIndex Int
+  sourceTimelineHash String @db.Char(64)
+  snapshot Json
+  status String @default("QUEUED") @db.VarChar(20)
+  stage String @default("SNAPSHOT") @db.VarChar(20)
+  checkpoint Json @default("{}")
+  errorMessage String?
+  startedAt DateTime?
+  completedAt DateTime?
+  updatedAt DateTime @updatedAt
+  run EffectPackagingRun @relation(fields: [projectId, runId], references: [projectId, id], onDelete: Cascade)
+  files EffectPackagingFile[]
+  @@unique([projectId, id])
+  @@unique([projectId, runId, variantId])
+  @@index([projectId, variantId])
+  @@map("effect_packaging_items")
+}
+
+model EffectPackagingFile {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  itemId String @db.Uuid
+  fileObjectId String @db.Uuid
+  role String @db.VarChar(80)
+  item EffectPackagingItem @relation(fields: [projectId, itemId], references: [projectId, id], onDelete: Cascade)
+  fileObject FileObject @relation(fields: [projectId, fileObjectId], references: [projectId, id], onDelete: Restrict)
+  @@unique([projectId, itemId, role])
+  @@index([projectId, fileObjectId])
+  @@map("effect_packaging_files")
+}
+
+model EffectFinalOutputRun {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  workflowRunId String @db.Uuid
+  templateId String @db.Uuid
+  idempotencyKey String @db.VarChar(500)
+  requestHash String @db.Char(64)
+  inputHash String @db.Char(64)
+  status String @default("QUEUED") @db.VarChar(20)
+  attemptToken String? @db.Uuid
+  leaseExpiresAt DateTime?
+  createdAt DateTime @default(now())
+  completedAt DateTime?
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  items EffectFinalOutputItem[]
+  @@unique([projectId, id])
+  @@unique([projectId, idempotencyKey])
+  @@unique([projectId, workflowRunId, templateId, inputHash])
+  @@index([status, leaseExpiresAt])
+  @@map("effect_final_output_runs")
+}
+
+model EffectFinalOutputItem {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  runId String @db.Uuid
+  variantId String @db.Uuid
+  name String
+  snapshot Json
+  status String @default("QUEUED") @db.VarChar(20)
+  progress Int @default(0)
+  fileObjectId String? @db.Uuid
+  assetId String? @db.Uuid
+  errorMessage String?
+  updatedAt DateTime @updatedAt
+  run EffectFinalOutputRun @relation(fields: [projectId, runId], references: [projectId, id], onDelete: Cascade)
+  fileObject FileObject? @relation(fields: [projectId, fileObjectId], references: [projectId, id], onDelete: Restrict)
+  @@unique([projectId, runId, variantId])
+  @@map("effect_final_output_items")
+}
+
+model CustomizedExtractionTask {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  workflowRunId String @db.Uuid
+  idempotencyKey String @db.VarChar(500)
+  inputHash String @db.Char(64)
+  inputSnapshot Json
+  status String @default("QUEUED") @db.VarChar(24)
+  progress Int @default(0)
+  currentNode String? @db.VarChar(120)
+  errorMessage String? @db.VarChar(1000)
+  attemptToken String? @db.Uuid
+  attemptCount Int @default(0)
+  leaseExpiresAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
+  steps CustomizedExtractionStep[]
+  artifacts CustomizedExtractionArtifact[]
+  fileHolds CustomizedExtractionFileHold[]
+  @@unique([projectId, id])
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, workflowRunId, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@map("customized_extraction_tasks")
+}
+model CustomizedExtractionStep {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  taskId String @db.Uuid
+  nodeId String @db.VarChar(120)
+  sourceId String @default("") @db.VarChar(255)
+  status String @default("PENDING") @db.VarChar(24)
+  output Json?
+  errorMessage String? @db.VarChar(1000)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  task CustomizedExtractionTask @relation(fields: [projectId, taskId], references: [projectId, id], onDelete: Cascade)
+  @@unique([projectId, taskId, nodeId, sourceId])
+  @@map("customized_extraction_steps")
+}
+model CustomizedExtractionResult {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  workflowRunId String @db.Uuid
+  taskId String @db.Uuid
+  sourceFingerprint String @db.Char(64)
+  generatedResult Json
+  draftResult Json
+  manualOverrides Json @default("{}")
+  revision Int @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
+  @@unique([projectId, id])
+  @@unique([projectId, workflowRunId])
+  @@map("customized_extraction_results")
+}
+model CustomizedExtractionArtifact {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  taskId String @db.Uuid
+  sourceId String @db.VarChar(255)
+  storageKey String @db.VarChar(500)
+  sizeBytes Int
+  createdAt DateTime @default(now())
+  task CustomizedExtractionTask @relation(fields: [projectId, taskId], references: [projectId, id], onDelete: Cascade)
+  @@unique([projectId, taskId, sourceId])
+  @@map("customized_extraction_artifacts")
+}
+model CustomizedExtractionFileHold {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  taskId String @db.Uuid
+  storageKey String @db.VarChar(500)
+  createdAt DateTime @default(now())
+  task CustomizedExtractionTask @relation(fields: [projectId, taskId], references: [projectId, id], onDelete: Cascade)
+  @@unique([projectId, taskId, storageKey])
+  @@map("customized_extraction_file_holds")
+}
+
+model CustomizedStoryboardTask {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  workflowRunId String @db.Uuid
+  idempotencyKey String @db.VarChar(200)
+  inputHash String @db.Char(64)
+  inputSnapshot Json
+  status String @default("QUEUED") @db.VarChar(24)
+  attemptToken String? @db.Uuid
+  attemptCount Int @default(0)
+  autoRetryScriptIds String[] @default([])
+  leaseExpiresAt DateTime?
+  errorMessage String? @db.VarChar(1000)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
+  steps CustomizedStoryboardStep[]
+  scripts CustomizedStoryboardScript[]
+  @@unique([projectId, id])
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, workflowRunId, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@map("customized_storyboard_tasks")
+}
+model CustomizedStoryboardStep {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  taskId String @db.Uuid
+  nodeId String @db.VarChar(40)
+  scriptId String @default("") @db.VarChar(40)
+  status String @default("PENDING") @db.VarChar(24)
+  output Json?
+  errorMessage String? @db.VarChar(1000)
+  updatedAt DateTime @updatedAt
+  task CustomizedStoryboardTask @relation(fields: [projectId, taskId], references: [projectId, id], onDelete: Cascade)
+  @@unique([projectId, taskId, nodeId, scriptId])
+  @@map("customized_storyboard_steps")
+}
+model CustomizedStoryboardScript {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  sourceRunId String @db.Uuid
+  workflowRunId String? @db.Uuid
+  taskId String? @db.Uuid
+  sourceSnapshot Json
+  status String @default("DRAFT") @db.VarChar(24)
+  origin String @default("MANUAL") @db.VarChar(24)
+  draft Json
+  generated Json?
+  revision Int @default(1)
+  editing Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun? @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
+  task CustomizedStoryboardTask? @relation(fields: [projectId, taskId], references: [projectId, id], onDelete: Cascade)
+  @@unique([projectId, id])
+  @@index([projectId, sourceRunId, createdAt])
+  @@map("customized_storyboard_scripts")
+}
+
+// Independent asset preparation and video workbench tasks.
+model CustomizedProductionTask {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @db.Uuid
+  workflowRunId String @db.Uuid
+  operation String @db.VarChar(24)
+  shotId String? @db.VarChar(200)
+  idempotencyKey String @db.VarChar(200)
+  status String @default("QUEUED") @db.VarChar(24)
+  inputSnapshot Json
+  steps Json
+  output Json?
+  attemptToken String? @db.Uuid
+  attemptCount Int @default(0)
+  leaseExpiresAt DateTime?
+  errorMessage String? @db.VarChar(1000)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, workflowRunId, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@map("customized_production_tasks")
+}

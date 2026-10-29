@@ -1,0 +1,226 @@
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_ARK_MODEL = "doubao-seed-2-1-turbo-260628"
+DEFAULT_ARK_DOCUMENT_MODEL = "doubao-seed-2-1-pro-260628"
+DEFAULT_ARK_SEMANTIC_MODEL = "doubao-seed-2-1-pro-260628"
+ARK_KEY_PLACEHOLDERS = {
+    "replace-with-your-ark-api-key",
+    "your-ark-api-key",
+    "<your-ark-api-key>",
+}
+
+
+class WorkerSettings(BaseSettings):
+    """Environment-owned settings; secrets are never rendered by repr/logging."""
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        case_sensitive=True,
+        extra="ignore",
+    )
+
+    internal_api_base_url: AnyHttpUrl = Field(alias="INTERNAL_API_BASE_URL")
+    effect_extraction_worker_token: SecretStr = Field(
+        alias="EFFECT_EXTRACTION_WORKER_TOKEN"
+    )
+    rabbitmq_url: SecretStr = Field(alias="RABBITMQ_URL")
+    effect_extraction_queue: str = Field(
+        default="effect.extraction.requested", alias="EFFECT_EXTRACTION_QUEUE"
+    )
+
+    extraction_ai_provider: Literal["mock", "ark"] = Field(
+        default="ark", alias="EXTRACTION_AI_PROVIDER"
+    )
+    ark_base_url: str = Field(
+        default="https://ark.cn-beijing.volces.com/api/v3", alias="ARK_BASE_URL"
+    )
+    ark_api_key: SecretStr | None = Field(default=None, alias="ARK_API_KEY")
+    ark_model: str = Field(default=DEFAULT_ARK_MODEL, alias="ARK_MODEL")
+    ark_document_model: str | None = Field(default=None, alias="ARK_DOCUMENT_MODEL")
+    ark_commerce_model: str | None = Field(default=None, alias="ARK_COMMERCE_MODEL")
+    ark_image_model: str | None = Field(default=None, alias="ARK_IMAGE_MODEL")
+    ark_semantic_model: str | None = Field(default=None, alias="ARK_SEMANTIC_MODEL")
+    ark_normalization_model: str | None = Field(
+        default=None, alias="ARK_NORMALIZATION_MODEL"
+    )
+    commerce_static_connect_timeout_seconds: float = Field(
+        default=5.0, alias="COMMERCE_STATIC_CONNECT_TIMEOUT_SECONDS", gt=0
+    )
+    commerce_static_read_timeout_seconds: float = Field(
+        default=15.0, alias="COMMERCE_STATIC_READ_TIMEOUT_SECONDS", gt=0
+    )
+    commerce_renderer_timeout_seconds: float = Field(
+        default=25.0, alias="COMMERCE_RENDERER_TIMEOUT_SECONDS", ge=1, le=60
+    )
+    commerce_renderer_max_concurrency: int = Field(
+        default=2, alias="COMMERCE_RENDERER_MAX_CONCURRENCY", ge=1, le=16
+    )
+    commerce_renderer_max_dom_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        alias="COMMERCE_RENDERER_MAX_DOM_BYTES",
+        ge=1024,
+        le=8 * 1024 * 1024,
+    )
+    commerce_renderer_settle_milliseconds: int = Field(
+        default=750,
+        alias="COMMERCE_RENDERER_SETTLE_MILLISECONDS",
+        ge=0,
+        le=5_000,
+    )
+    max_commerce_text_chars: int = Field(
+        default=80_000, alias="MAX_COMMERCE_TEXT_CHARS", ge=1_000, le=200_000
+    )
+
+    docling_artifacts_path: str | None = Field(
+        default=None, alias="DOCLING_ARTIFACTS_PATH"
+    )
+    docling_max_file_size: int = Field(
+        default=50 * 1024 * 1024, alias="DOCLING_MAX_FILE_SIZE", ge=1
+    )
+    docling_max_num_pages: int = Field(default=200, alias="DOCLING_MAX_NUM_PAGES", ge=1)
+    max_document_text_chars: int = Field(
+        default=60_000, alias="MAX_DOCUMENT_TEXT_CHARS", ge=1_000
+    )
+    document_chunk_text_chars: int = Field(
+        default=12_000,
+        alias="DOCUMENT_CHUNK_TEXT_CHARS",
+        ge=1_000,
+        le=30_000,
+    )
+    document_max_concurrency: int = Field(
+        default=2, alias="DOCUMENT_MAX_CONCURRENCY", ge=1, le=4
+    )
+    image_max_input_bytes: int = Field(
+        default=20 * 1024 * 1024, alias="IMAGE_MAX_INPUT_BYTES", ge=1
+    )
+    image_max_dimension: int = Field(default=1280, alias="IMAGE_MAX_DIMENSION", ge=256)
+    image_max_output_bytes: int = Field(
+        default=4 * 1024 * 1024, alias="IMAGE_MAX_OUTPUT_BYTES", ge=32_768
+    )
+    image_max_concurrency: int = Field(
+        default=2, alias="IMAGE_MAX_CONCURRENCY", ge=1, le=8
+    )
+    api_timeout_seconds: float = Field(
+        default=60.0, alias="INTERNAL_API_TIMEOUT_SECONDS", gt=0
+    )
+    ark_timeout_seconds: float = Field(default=120.0, alias="ARK_TIMEOUT_SECONDS", gt=0)
+    ark_document_timeout_seconds: float = Field(
+        default=180.0, alias="ARK_DOCUMENT_TIMEOUT_SECONDS", gt=0
+    )
+    ark_document_max_attempts: int = Field(
+        default=1, alias="ARK_DOCUMENT_MAX_ATTEMPTS", ge=1, le=2
+    )
+    ark_document_max_output_tokens: int = Field(
+        default=8192, alias="ARK_DOCUMENT_MAX_OUTPUT_TOKENS", ge=256, le=8192
+    )
+    ark_document_reasoning_effort: Literal["minimal", "low", "medium", "high"] = Field(
+        default="minimal", alias="ARK_DOCUMENT_REASONING_EFFORT"
+    )
+    ark_image_timeout_seconds: float = Field(
+        default=90.0, alias="ARK_IMAGE_TIMEOUT_SECONDS", gt=0
+    )
+    ark_image_max_attempts: int = Field(
+        default=2, alias="ARK_IMAGE_MAX_ATTEMPTS", ge=1, le=3
+    )
+    ark_image_max_output_tokens: int = Field(
+        default=4096, alias="ARK_IMAGE_MAX_OUTPUT_TOKENS", ge=256, le=16_384
+    )
+    ark_image_retry_max_output_tokens: int = Field(
+        default=6144,
+        alias="ARK_IMAGE_RETRY_MAX_OUTPUT_TOKENS",
+        ge=256,
+        le=16_384,
+    )
+    ark_image_detail: Literal["low", "high", "auto"] = Field(
+        default="low", alias="ARK_IMAGE_DETAIL"
+    )
+    ark_image_reasoning_effort: Literal["minimal", "low", "medium", "high"] = Field(
+        default="minimal", alias="ARK_IMAGE_REASONING_EFFORT"
+    )
+    ark_image_adaptive_high_detail: bool = Field(
+        default=True, alias="ARK_IMAGE_ADAPTIVE_HIGH_DETAIL"
+    )
+    ark_semantic_timeout_seconds: float = Field(
+        default=30.0, alias="ARK_SEMANTIC_TIMEOUT_SECONDS", gt=0
+    )
+    ark_semantic_max_attempts: int = Field(
+        default=1, alias="ARK_SEMANTIC_MAX_ATTEMPTS", ge=1, le=1
+    )
+    ark_semantic_max_output_tokens: int = Field(
+        default=3072, alias="ARK_SEMANTIC_MAX_OUTPUT_TOKENS", ge=256, le=4096
+    )
+    ark_semantic_reasoning_effort: Literal["minimal", "low", "medium", "high"] = Field(
+        default="minimal", alias="ARK_SEMANTIC_REASONING_EFFORT"
+    )
+    ark_semantic_user_review_reasoning_effort: Literal[
+        "minimal", "low", "medium", "high"
+    ] = Field(default="minimal", alias="ARK_SEMANTIC_USER_REVIEW_REASONING_EFFORT")
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    @model_validator(mode="after")
+    def validate_provider(self) -> WorkerSettings:
+        self.ark_model = self.ark_model.strip()
+        for field_name in (
+            "ark_document_model",
+            "ark_commerce_model",
+            "ark_image_model",
+            "ark_semantic_model",
+            "ark_normalization_model",
+        ):
+            value = getattr(self, field_name)
+            setattr(
+                self, field_name, value.strip() or None if value is not None else None
+            )
+        if self.extraction_ai_provider == "ark":
+            api_key = (
+                self.ark_api_key.get_secret_value().strip().lower()
+                if self.ark_api_key is not None
+                else ""
+            )
+            if not api_key or api_key in ARK_KEY_PLACEHOLDERS:
+                raise ValueError(
+                    "ARK_API_KEY is required when EXTRACTION_AI_PROVIDER=ark"
+                )
+            if not self.ark_model:
+                raise ValueError(
+                    "ARK_MODEL cannot be empty when EXTRACTION_AI_PROVIDER=ark"
+                )
+        if self.ark_image_retry_max_output_tokens < self.ark_image_max_output_tokens:
+            raise ValueError(
+                "ARK_IMAGE_RETRY_MAX_OUTPUT_TOKENS must be greater than or equal to "
+                "ARK_IMAGE_MAX_OUTPUT_TOKENS"
+            )
+        if not self.effect_extraction_queue.strip():
+            raise ValueError("EFFECT_EXTRACTION_QUEUE cannot be empty")
+        return self
+
+    @property
+    def resolved_document_model(self) -> str:
+        return self.ark_document_model or DEFAULT_ARK_DOCUMENT_MODEL
+
+    @property
+    def resolved_image_model(self) -> str:
+        return self.ark_image_model or self.ark_model
+
+    @property
+    def resolved_commerce_model(self) -> str:
+        return self.ark_commerce_model or self.ark_document_model or self.ark_model
+
+    @property
+    def resolved_normalization_model(self) -> str:
+        return self.ark_normalization_model or self.ark_model
+
+    @property
+    def resolved_semantic_model(self) -> str:
+        return self.ark_semantic_model or DEFAULT_ARK_SEMANTIC_MODEL
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> WorkerSettings:
+    return WorkerSettings()  # type: ignore[call-arg]

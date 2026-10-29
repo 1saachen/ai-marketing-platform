@@ -1,0 +1,765 @@
+<script setup lang="ts">
+import {
+  EFFECT_IMPORT_MATERIAL_TYPE_LABELS,
+  type EffectImportMaterial,
+  type EffectImportMode,
+  type EffectImportProduct,
+} from '@ai-marketing/contracts';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  FileText,
+  Image as ImageIcon,
+  Link2,
+  RefreshCw,
+  Trash2,
+  Upload,
+} from '@lucide/vue';
+import { computed, nextTick, ref, shallowRef } from 'vue';
+import ImportSourceCard from '../../../../platform/file/components/ImportSourceCard.vue';
+import ImportDropzone from '../../../../platform/file/components/ImportDropzone.vue';
+import ImportMaterialRow from '../../../../platform/file/components/ImportMaterialRow.vue';
+import EffectImportContentViewerDialog from './EffectImportDocumentReaderDialog.vue';
+import EffectImportImagePreview from './EffectImportImagePreview.vue';
+
+const props = withDefaults(
+  defineProps<{
+    batch?: boolean;
+    busyMaterialIds?: ReadonlySet<string>;
+    disabled?: boolean;
+    linkBusy?: boolean;
+    mode: EffectImportMode;
+    position?: number;
+    product: EffectImportProduct;
+    selected?: boolean;
+  }>(),
+  {
+    batch: false,
+    busyMaterialIds: () => new Set<string>(),
+    disabled: false,
+    linkBusy: false,
+    position: 1,
+    selected: false,
+  },
+);
+
+const emit = defineEmits<{
+  blur: [product: EffectImportProduct];
+  change: [product: EffectImportProduct, field: 'commerceUrl', value: string];
+  delete: [product: EffectImportProduct];
+  deleteLink: [product: EffectImportProduct];
+  deleteMaterial: [product: EffectImportProduct, material: EffectImportMaterial];
+  replace: [product: EffectImportProduct, material: EffectImportMaterial];
+  retry: [product: EffectImportProduct, material: EffectImportMaterial];
+  select: [product: EffectImportProduct, selected: boolean];
+  upload: [product: EffectImportProduct, files: File[]];
+  validateLink: [product: EffectImportProduct];
+}>();
+
+const unifiedUploadAccept = '.jpg,.jpeg,.png,.psd,.webp,.doc,.docx,.xls,.xlsx,.pdf,.txt,.md';
+const commerceInput = ref<HTMLInputElement | null>(null);
+const readingMaterial = ref<EffectImportMaterial | null>(null);
+const readingImage = shallowRef<HTMLImageElement | null>(null);
+let readingTrigger: HTMLButtonElement | null = null;
+const savedCommerceUrl = computed(() => props.product.commerceUrl?.trim() ?? '');
+const importedItemCount = computed(
+  () => props.product.materials.length + Number(Boolean(savedCommerceUrl.value)),
+);
+const uploadDisabled = computed(() => props.disabled);
+const completion = computed(() => {
+  const hasReadyImage = props.product.materials.some(
+    (item) => item.type === 'PRODUCT_IMAGE' && item.status === 'READY',
+  );
+  return Number(hasReadyImage) * 100;
+});
+const commitStatusLabel = computed(
+  () =>
+    ({
+      UNVALIDATED: '尚未校验',
+      COMMITTED: '工作副本已提交',
+      DRAFT_CHANGED: '存在未校验修改',
+      STALE: '工作副本待更新',
+    })[props.product.commitStatus],
+);
+const changeField = (field: 'commerceUrl', event: Event): void =>
+  emit('change', props.product, field, (event.target as HTMLInputElement).value);
+const formatBytes = (value: number | null): string =>
+  value === null
+    ? '—'
+    : value < 1048576
+      ? `${Math.max(1, Math.round(value / 1024))} KB`
+      : `${(value / 1048576).toFixed(1)} MB`;
+const extension = (material: EffectImportMaterial): string => {
+  const name = materialName(material);
+  return name.includes('.') ? name.split('.').pop()!.slice(0, 5).toUpperCase() : 'FILE';
+};
+const materialName = (material: EffectImportMaterial): string =>
+  material.originalFileName || material.expectedFileName || '待补传文件';
+const openDocument = (material: EffectImportMaterial, event: MouseEvent): void => {
+  readingTrigger = event.currentTarget as HTMLButtonElement;
+  const image = readingTrigger.closest('.material-file-row')?.querySelector('img');
+  const matchesMaterial =
+    material.type === 'PRODUCT_IMAGE' &&
+    image?.dataset.projectId === material.projectId &&
+    image?.dataset.productId === material.productId &&
+    image?.dataset.materialId === material.id &&
+    image?.dataset.materialUpdatedAt === material.updatedAt;
+  readingImage.value = matchesMaterial ? image : null;
+  readingMaterial.value = material;
+};
+const closeDocument = (): void => {
+  readingMaterial.value = null;
+  readingImage.value = null;
+  const trigger = readingTrigger;
+  readingTrigger = null;
+  void nextTick(() => trigger?.focus());
+};
+const replaceCommerceLink = (): void => {
+  commerceInput.value?.focus();
+  commerceInput.value?.select();
+};
+const statusText = (material: EffectImportMaterial): string =>
+  props.busyMaterialIds.has(material.id)
+    ? '处理中'
+    : { READY: '已就绪', FAILED: '失败', MISSING: '待补传', UPLOADING: '上传中' }[material.status];
+</script>
+
+<template>
+  <article class="product-editor" :class="{ batch, selected }">
+    <header v-if="batch" class="batch-card-head">
+      <input
+        type="checkbox"
+        :checked="selected"
+        :disabled="disabled"
+        :aria-label="`选择商品资料包 ${position}`"
+        @change="emit('select', product, ($event.target as HTMLInputElement).checked)"
+      />
+      <span class="batch-card-no">商品 {{ String(position).padStart(2, '0') }}</span>
+      <em class="completion-badge" :class="{ complete: completion === 100 }"
+        >完整度 {{ completion }}%</em
+      >
+      <small class="commit-status" :class="product.commitStatus.toLowerCase()">{{
+        commitStatusLabel
+      }}</small>
+      <button
+        class="icon-button danger"
+        type="button"
+        :disabled="disabled"
+        title="删除产品"
+        @click="emit('delete', product)"
+      >
+        <Trash2 :size="15" />
+      </button>
+    </header>
+
+    <ImportSourceCard
+      v-if="!batch"
+      title="上传产品资料"
+      description="支持商品主图、细节图、场景图与产品文本资料"
+    >
+      <template #icon><Upload :size="20" /></template>
+      <ImportDropzone
+        :accept="unifiedUploadAccept"
+        :disabled="uploadDisabled"
+        prompt="点击或将商品图片、产品文档拖拽到此处"
+        hint="支持同时选择图片和文档，系统会自动识别资料类型"
+        formats="JPG / PNG / PSD / WebP · Word / Excel / PDF / 纯文本"
+        @files="emit('upload', product, $event)"
+      />
+    </ImportSourceCard>
+    <ImportDropzone
+      v-else
+      compact
+      :accept="unifiedUploadAccept"
+      :disabled="uploadDisabled"
+      prompt="点击或拖拽上传图片和文档"
+      hint="支持混合选择多个文件，系统会自动识别类型"
+      @files="emit('upload', product, $event)"
+    />
+
+    <section class="commerce-parse" :class="{ 'source-card': !batch }">
+      <header v-if="!batch" class="panel-heading compact-heading">
+        <span class="panel-heading-icon blue"><Link2 :size="18" /></span>
+        <div>
+          <h3>电商链接解析</h3>
+          <p>当前仅校验链接格式并保存到资料包，暂不抓取页面内容</p>
+        </div>
+      </header>
+      <div class="commerce-input-row">
+        <Link2 :size="15" /><input
+          ref="commerceInput"
+          :value="product.commerceUrl ?? ''"
+          :disabled="disabled"
+          type="url"
+          placeholder="粘贴电商商品链接"
+          @input="changeField('commerceUrl', $event)"
+          @blur="emit('blur', product)"
+        /><button
+          type="button"
+          :disabled="disabled || linkBusy || !product.commerceUrl?.trim()"
+          :aria-busy="linkBusy"
+          @click="emit('validateLink', product)"
+        >
+          {{ linkBusy ? '正在保存…' : '解析链接' }}
+        </button>
+      </div>
+    </section>
+
+    <section class="imported-materials" :class="{ 'source-card': !batch }">
+      <header>
+        <div>
+          <strong>已导入素材</strong
+          ><small>{{ batch ? '当前商品资料' : '文件与链接将在服务端安全保存' }}</small>
+        </div>
+        <span>{{ importedItemCount }} 项资料</span>
+      </header>
+      <div v-if="!importedItemCount" class="materials-empty">
+        暂无已导入资料，可从上方上传文件或保存电商链接
+      </div>
+      <ImportMaterialRow
+        v-for="material in product.materials"
+        :key="material.id"
+        :name="materialName(material)"
+        :description="`${EFFECT_IMPORT_MATERIAL_TYPE_LABELS[material.type]} · ${formatBytes(material.sizeBytes)}${material.errorMessage ? ` · ${material.errorMessage}` : ''}`"
+        :class="material.status.toLowerCase()"
+      >
+        <template #preview>
+          <span v-if="material.type === 'PRODUCT_IMAGE'" class="material-thumbnail">
+            <EffectImportImagePreview :material="material" />
+          </span>
+          <span v-else class="file-extension">{{ extension(material) }}</span>
+        </template>
+        <template #actions>
+          <em
+            ><CheckCircle2 v-if="material.status === 'READY'" :size="13" /><AlertTriangle
+              v-else-if="material.status === 'FAILED'"
+              :size="13"
+            /><RefreshCw v-else :size="13" :class="{ spin: material.status === 'UPLOADING' }" />{{
+              statusText(material)
+            }}</em
+          >
+          <button
+            v-if="
+              (material.type === 'PRODUCT_DOCUMENT' || material.type === 'PRODUCT_IMAGE') &&
+              material.status === 'READY' &&
+              material.contentUrl
+            "
+            class="file-read"
+            type="button"
+            :disabled="busyMaterialIds.has(material.id)"
+            @click="openDocument(material, $event)"
+          >
+            <ImageIcon v-if="material.type === 'PRODUCT_IMAGE'" :size="13" />
+            <FileText v-else :size="13" />查看内容
+          </button>
+          <button
+            v-if="material.status === 'FAILED' && material.failureDisposition === 'RETRYABLE'"
+            type="button"
+            :disabled="disabled || busyMaterialIds.has(material.id)"
+            @click="emit('retry', product, material)"
+          >
+            重试
+          </button>
+          <button
+            type="button"
+            :disabled="uploadDisabled || busyMaterialIds.has(material.id)"
+            @click="emit('replace', product, material)"
+          >
+            重传
+          </button>
+          <button
+            class="file-delete"
+            type="button"
+            :disabled="disabled || busyMaterialIds.has(material.id)"
+            aria-label="删除资料"
+            @click="emit('deleteMaterial', product, material)"
+          >
+            <Trash2 :size="13" />
+          </button>
+        </template>
+      </ImportMaterialRow>
+      <div v-if="savedCommerceUrl" class="material-file-row commerce-link-row">
+        <span class="commerce-link-badge"><Link2 :size="18" /></span>
+        <span class="file-copy">
+          <strong>电商商品链接</strong>
+          <small :title="savedCommerceUrl">{{ savedCommerceUrl }}</small>
+        </span>
+        <em>
+          <RefreshCw v-if="linkBusy" class="spin" :size="13" />
+          <CheckCircle2 v-else :size="13" />
+          {{ linkBusy ? '保存中' : '已保存' }}
+        </em>
+        <button
+          type="button"
+          :disabled="disabled || linkBusy"
+          title="重新填写电商链接"
+          @click="replaceCommerceLink"
+        >
+          重传
+        </button>
+        <button
+          class="file-delete"
+          type="button"
+          :disabled="disabled || linkBusy"
+          aria-label="删除电商链接"
+          @click="emit('deleteLink', product)"
+        >
+          <Trash2 :size="13" />
+        </button>
+      </div>
+    </section>
+    <footer v-if="!batch" class="commit-footer">
+      <span class="commit-status" :class="product.commitStatus.toLowerCase()">{{
+        commitStatusLabel
+      }}</span>
+    </footer>
+    <EffectImportContentViewerDialog
+      v-if="readingMaterial"
+      :material="readingMaterial"
+      :mode="mode"
+      :preview-image="readingImage"
+      @close="closeDocument"
+    />
+  </article>
+</template>
+
+<style scoped>
+.product-editor {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 18px;
+}
+.product-editor.batch {
+  position: relative;
+  gap: 12px;
+  padding: 16px;
+  background: #f8fbff;
+  border: 1px solid #f0e3dc;
+  border-radius: 16px;
+}
+.commit-status {
+  color: #7b879c;
+  font-size: 12px;
+  font-style: normal;
+  white-space: nowrap;
+}
+.commit-status.committed {
+  color: #0b8f68;
+}
+.commit-status.draft_changed,
+.commit-status.stale {
+  color: #c46a20;
+}
+.product-editor.batch.selected {
+  border-color: #ffb9aa;
+  box-shadow: 0 0 0 1px #ffb9aa inset;
+}
+.source-card {
+  padding: 18px;
+  background: linear-gradient(180deg, #fff 0%, #fdfefe 100%);
+  border: 1px solid #e4eaf3;
+  border-radius: 18px;
+  box-shadow: 0 10px 28px #2945660d;
+}
+.panel-heading,
+.batch-card-head,
+.imported-materials > header,
+.commerce-input-row {
+  display: flex;
+  align-items: center;
+}
+.panel-heading {
+  margin-bottom: 14px;
+  align-items: flex-start;
+  gap: 11px;
+}
+.panel-heading-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  place-items: center;
+  color: #d84c4f;
+  background: #fff0ed;
+  border-radius: 13px;
+}
+.panel-heading-icon.blue {
+  color: #2563eb;
+  background: #eef3ff;
+}
+.panel-heading h3,
+.panel-heading p {
+  margin: 0;
+}
+.panel-heading h3 {
+  color: #263247;
+  font-size: 14px;
+}
+.panel-heading p {
+  margin-top: 4px;
+  color: #9198a7;
+  font-size: 12px;
+}
+.upload-source-card {
+  display: flex;
+  flex-direction: column;
+}
+.commerce-input-row input {
+  width: 100%;
+  box-sizing: border-box;
+  color: #263247;
+  background: #fff;
+  border: 1px solid #e2d9d4;
+  outline: none;
+}
+.commerce-input-row:focus-within {
+  border-color: #93b4ff;
+  box-shadow: 0 0 0 3px #2563eb10;
+}
+.source-dropzone {
+  position: relative;
+  display: flex;
+  min-height: 220px;
+  margin-top: 14px;
+  padding: 24px;
+  box-sizing: border-box;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  color: #667085;
+  background: linear-gradient(145deg, #fffafa 0%, #f8fbff 100%);
+  border: 1px dashed #efbcae;
+  border-radius: 15px;
+  text-align: center;
+  cursor: pointer;
+}
+.source-dropzone:hover {
+  background: linear-gradient(145deg, #fff7f4 0%, #f4f8ff 100%);
+  border-color: #ff9e8b;
+  box-shadow: 0 10px 24px #d84c4f0d;
+}
+.source-dropzone.disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+.source-dropzone.disabled:hover {
+  background: #fff;
+  border-color: #f1d6ce;
+}
+.source-dropzone input[type='file'] {
+  display: none !important;
+}
+.dropzone-plus {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 3px;
+  place-items: center;
+  color: #2563eb;
+  background: #fff;
+  border: 1px solid #f4d7ce;
+  border-radius: 50%;
+  box-shadow: 0 8px 18px #b94a3514;
+}
+.source-dropzone strong {
+  color: #40506a;
+  font-size: 13px;
+}
+.source-dropzone small {
+  color: #a4aab6;
+  font-size: 10px;
+}
+.compact-heading {
+  margin-bottom: 13px;
+}
+.commerce-input-row {
+  min-height: 44px;
+  padding-left: 12px;
+  gap: 8px;
+  color: #98a1b1;
+  background: #fff;
+  border: 1px solid #e2d9d4;
+  border-radius: 11px;
+  overflow: hidden;
+}
+.commerce-input-row input {
+  min-width: 0;
+  height: 40px;
+  flex: 1;
+  border: 0;
+  font-size: 12px;
+}
+.commerce-input-row button {
+  align-self: stretch;
+  min-width: 88px;
+  padding: 0 15px;
+  color: #fff;
+  background: #2563eb;
+  border: 0;
+  font-size: 11px;
+  font-weight: 800;
+}
+.commerce-input-row button:disabled {
+  background: #9db7e8;
+}
+.imported-materials > header {
+  margin-bottom: 12px;
+  justify-content: space-between;
+}
+.imported-materials > header strong,
+.imported-materials > header small {
+  display: block;
+}
+.imported-materials > header strong {
+  color: #263247;
+  font-size: 13px;
+}
+.imported-materials > header small {
+  margin-top: 3px;
+  color: #9aa1ae;
+  font-size: 10px;
+}
+.imported-materials > header > span {
+  padding: 4px 8px;
+  color: #8b6455;
+  background: #fff4ef;
+  border-radius: 999px;
+  font-size: 9px;
+}
+.materials-empty {
+  padding: 15px;
+  color: #a4aab6;
+  border: 1px dashed #f0e3dc;
+  border-radius: 12px;
+  flex: 1;
+  text-align: center;
+  font-size: 11px;
+}
+.material-file-row {
+  display: flex;
+  min-height: 54px;
+  margin-top: 8px;
+  padding: 7px 9px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 8px;
+  background: #fbfcfe;
+  border: 1px solid #e7ebf2;
+  border-radius: 12px;
+}
+.material-file-row:hover {
+  background: #fff;
+  border-color: #d7e0ee;
+  box-shadow: 0 5px 14px #2945660a;
+}
+.file-extension {
+  min-width: 38px;
+  padding: 4px 6px;
+  box-sizing: border-box;
+  color: #d84c4f;
+  background: #fff0ed;
+  border-radius: 8px;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 900;
+}
+.commerce-link-badge {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  box-sizing: border-box;
+  flex: 0 0 48px;
+  place-items: center;
+  color: #2563eb;
+  background: #eef3ff;
+  border: 1px solid #d9e5ff;
+  border-radius: 9px;
+}
+.commerce-link-row .file-copy small {
+  color: #66789c;
+}
+.material-thumbnail {
+  display: flex;
+  width: 48px;
+  height: 48px;
+  box-sizing: border-box;
+  flex: 0 0 48px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: #a4aab6;
+  background: #f8f5f3;
+  border: 1px solid #f0e3dc;
+  border-radius: 9px;
+}
+.material-thumbnail img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.material-thumbnail small {
+  padding: 4px;
+  text-align: center;
+  font-size: 8px;
+  line-height: 1.25;
+}
+.file-copy {
+  min-width: 0;
+  flex: 1;
+}
+.file-copy strong,
+.file-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-copy strong {
+  color: #263247;
+  font-size: 11px;
+}
+.file-copy small {
+  margin-top: 3px;
+  color: #9aa1ae;
+  font-size: 9px;
+}
+.material-file-row em {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #218564;
+  font-size: 9px;
+  font-style: normal;
+  white-space: nowrap;
+}
+.material-file-row.failed em {
+  color: #d84c4f;
+}
+.material-file-row button {
+  display: inline-flex;
+  min-height: 26px;
+  padding: 0 7px;
+  align-items: center;
+  gap: 4px;
+  color: #667085;
+  background: #fff;
+  border: 1px solid #e5ddd8;
+  border-radius: 7px;
+  font-size: 9px;
+}
+.material-file-row button.file-delete {
+  padding: 0 6px;
+  color: #a6acb7;
+  border-color: transparent;
+}
+.material-file-row button.file-read {
+  color: #2563eb;
+  border-color: #cfddfb;
+}
+.material-file-row button.file-read:hover {
+  background: #f4f7ff;
+  border-color: #a9c1f6;
+}
+.commit-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -8px;
+}
+.batch-card-head {
+  min-width: 0;
+  gap: 7px;
+}
+.batch-card-head > input {
+  accent-color: #2563eb;
+}
+.batch-card-no {
+  padding: 3px 8px;
+  flex: 0 0 auto;
+  color: #d84c4f;
+  background: #fff0ed;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.completion-badge {
+  padding: 3px 7px;
+  color: #8a611b;
+  background: #fff4da;
+  border-radius: 999px;
+  font-size: 9px;
+  font-style: normal;
+  white-space: nowrap;
+}
+.completion-badge.complete {
+  color: #218564;
+  background: #eaf8f2;
+}
+.icon-button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  place-items: center;
+  color: #8e96a5;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+}
+.icon-button.danger:hover {
+  color: #d84c4f;
+  background: #fff0ed;
+}
+.batch-identity {
+  grid-template-columns: 1.2fr 0.8fr;
+}
+.batch-dropzone {
+  min-height: 118px;
+  margin-top: 0;
+  padding: 12px;
+  background: #fff;
+  border-radius: 12px;
+}
+.batch-dropzone .dropzone-plus {
+  width: 36px;
+  height: 36px;
+}
+.batch .commerce-parse,
+.batch .imported-materials {
+  padding-top: 12px;
+  border-top: 1px dashed #f0e3dc;
+}
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.spin {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (max-width: 780px) {
+  .source-dropzone {
+    min-height: 190px;
+  }
+  .material-file-row {
+    flex-wrap: wrap;
+  }
+  .material-file-row .file-copy {
+    flex: 1 1 calc(100% - 64px);
+  }
+  .material-file-row > em {
+    margin-left: 56px;
+  }
+  .completion-badge {
+    display: none;
+  }
+}
+</style>

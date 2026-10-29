@@ -1,0 +1,217 @@
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
+
+// DTO and service classes are runtime values for validation and dependency injection.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import {
+  ApplyEffectTemplateMixVariantDto,
+  CreateEffectTemplateMixAiRunDto,
+  EffectTemplateMixRevisionDto,
+  EffectTemplateMixWorkspaceQueryDto,
+  SaveEffectTemplateMixDraftDto,
+  ValidateEffectTemplateMixDto,
+} from './dto/effect-template-mix.dto';
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { EffectTemplateMixService } from './effect-template-mix.service';
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { EffectTemplateMixCompletionService } from './effect-template-mix-completion.service';
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { EffectTemplateDeletionService } from './effect-template-deletion.service';
+
+@Controller('projects/:projectId/workflows/effect/template-mix')
+export class EffectTemplateMixController {
+  constructor(
+    private readonly service: EffectTemplateMixService,
+    private readonly completion: EffectTemplateMixCompletionService,
+    private readonly deletion: EffectTemplateDeletionService,
+  ) {}
+
+  @Post('templates/:templateId/delete')
+  deleteTemplate(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('templateId', new ParseUUIDPipe({ version: '4' })) templateId: string,
+    @Body() body: EffectTemplateMixRevisionDto,
+  ) {
+    return this.deletion.remove(projectId, body.workflowRunId, templateId, body.expectedRevision);
+  }
+
+  @Get()
+  workspace(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Query() query: EffectTemplateMixWorkspaceQueryDto,
+  ) {
+    return this.service.workspace(projectId, query.workflowRunId);
+  }
+
+  @Get('sources')
+  async sources(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Query() query: EffectTemplateMixWorkspaceQueryDto,
+  ) {
+    return this.service.materialSources(projectId, query.workflowRunId);
+  }
+
+  @Put('draft')
+  saveDraft(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Body() body: SaveEffectTemplateMixDraftDto,
+  ) {
+    if (body.compactResponse)
+      return this.service.saveDraft(
+        projectId,
+        body.workflowRunId,
+        body.expectedRevision,
+        body.draft,
+        true,
+      );
+    return this.service.saveDraft(projectId, body.workflowRunId, body.expectedRevision, body.draft);
+  }
+
+  @Post('templates/:templateId/variants')
+  createVariant(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('templateId', new ParseUUIDPipe({ version: '4' })) templateId: string,
+    @Body() body: EffectTemplateMixRevisionDto,
+  ) {
+    return this.service.createVariant(
+      projectId,
+      body.workflowRunId,
+      templateId,
+      body.expectedRevision,
+    );
+  }
+
+  @Post('templates/:templateId/empty-variants')
+  createEmptyVariant(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('templateId', new ParseUUIDPipe({ version: '4' })) templateId: string,
+    @Body() body: EffectTemplateMixRevisionDto,
+  ) {
+    return this.service.createEmptyVariant(
+      projectId,
+      body.workflowRunId,
+      templateId,
+      body.expectedRevision,
+    );
+  }
+
+  @Post('templates/:templateId/ai-fill-runs')
+  createAiRun(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('templateId', new ParseUUIDPipe({ version: '4' })) templateId: string,
+    @Body() body: CreateEffectTemplateMixAiRunDto,
+  ) {
+    return this.service.createAiRun(
+      projectId,
+      body.workflowRunId,
+      templateId,
+      body.expectedRevision,
+      body.idempotencyKey,
+      body.targetVariantId,
+      body.refreshAffectedSlots ?? false,
+      body.appendNewMaterials ?? false,
+      body.sourceOperationId,
+    );
+  }
+
+  @Get('ai-fill-runs/:runId')
+  aiRun(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+  ) {
+    return this.service.aiRun(projectId, runId);
+  }
+
+  @Post('ai-fill-runs/:runId/resume-append')
+  resumeAppend(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+  ) {
+    return this.completion.resumeAppend(projectId, runId);
+  }
+
+  @Post('ai-fill-runs/:runId/cancel')
+  cancelAppend(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+  ) {
+    return this.service.cancelAppend(projectId, runId);
+  }
+
+  @Post('ai-fill-runs/:runId/retry')
+  retryAppend(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+  ) {
+    return this.service.retryAppend(projectId, runId);
+  }
+
+  @Get('templates/:templateId/background-ai-run')
+  backgroundAiRun(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('templateId', new ParseUUIDPipe({ version: '4' })) templateId: string,
+    @Query() query: EffectTemplateMixWorkspaceQueryDto,
+  ) {
+    return this.service.backgroundAiRun(projectId, query.workflowRunId, templateId);
+  }
+
+  @Post('templates/:templateId/variants/:variantId/refill')
+  refillVariant(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('templateId', new ParseUUIDPipe({ version: '4' })) templateId: string,
+    @Param('variantId', new ParseUUIDPipe({ version: '4' })) variantId: string,
+    @Body() body: EffectTemplateMixRevisionDto,
+  ) {
+    return this.service.refillVariant(
+      projectId,
+      body.workflowRunId,
+      templateId,
+      variantId,
+      body.expectedRevision,
+    );
+  }
+
+  @Post('templates/:templateId/variants/:variantId/delete')
+  deleteVariant(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('templateId', new ParseUUIDPipe({ version: '4' })) templateId: string,
+    @Param('variantId', new ParseUUIDPipe({ version: '4' })) variantId: string,
+    @Body() body: EffectTemplateMixRevisionDto,
+  ) {
+    return this.service.deleteVariant(
+      projectId,
+      body.workflowRunId,
+      templateId,
+      variantId,
+      body.expectedRevision,
+    );
+  }
+
+  @Post('templates/:templateId/apply-variant')
+  applyVariant(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Param('templateId', new ParseUUIDPipe({ version: '4' })) templateId: string,
+    @Body() body: ApplyEffectTemplateMixVariantDto,
+  ) {
+    return this.service.applyVariant(
+      projectId,
+      body.workflowRunId,
+      templateId,
+      body.sourceVariantId,
+      body.syncOtherVariants,
+      body.expectedRevision,
+    );
+  }
+
+  @Post('validate')
+  validate(
+    @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
+    @Body() body: ValidateEffectTemplateMixDto,
+  ) {
+    return this.service.validate(
+      projectId,
+      body.workflowRunId,
+      body.expectedRevision,
+      body.templateId,
+    );
+  }
+}

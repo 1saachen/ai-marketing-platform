@@ -1,0 +1,123 @@
+import type {
+  EffectExtractionProductState as EffectExtractionProductDto,
+  EffectExtractionProductStatus,
+  EffectExtractionResult,
+} from '@ai-marketing/contracts';
+
+export type { EffectExtractionResult } from '@ai-marketing/contracts';
+
+export type EffectExtractionSaveState = 'CLEAN' | 'DIRTY' | 'SAVING' | 'SAVED' | 'SAVE_FAILED';
+
+export type EffectExtractionProductState = EffectExtractionProductDto & {
+  saveState: EffectExtractionSaveState;
+  saveErrorMessage: string | null;
+};
+
+export const EFFECT_EXTRACTION_STATUS_META: Record<
+  EffectExtractionProductStatus,
+  { label: string; tone: 'danger' | 'neutral' | 'running' | 'success' | 'warning' }
+> = {
+  NOT_GENERATED: { label: '未生成', tone: 'neutral' },
+  QUEUED: { label: '排队中', tone: 'running' },
+  PROCESSING: { label: '生成中', tone: 'running' },
+  COMPLETED: { label: '已完成', tone: 'success' },
+  FAILED: { label: '失败', tone: 'danger' },
+  STALE: { label: '待更新', tone: 'warning' },
+};
+
+export const cloneExtractionResult = (value: EffectExtractionResult): EffectExtractionResult => {
+  return {
+    ...value,
+    sellingPoints: [...value.sellingPoints],
+  };
+};
+
+export const cloneExtractionProductState = (
+  value: EffectExtractionProductState,
+): EffectExtractionProductState => ({
+  ...value,
+  imageRecognitionSummary: value.imageRecognitionSummary
+    ? { ...value.imageRecognitionSummary }
+    : null,
+  warnings: value.warnings.map((warning) => ({ ...warning })),
+  provenance: {
+    fieldOrigins: { ...value.provenance.fieldOrigins },
+    fieldSourceNames: Object.fromEntries(
+      Object.entries(value.provenance.fieldSourceNames ?? {}).map(([field, names]) => [
+        field,
+        [...(names ?? [])],
+      ]),
+    ),
+    itemOrigins: Object.fromEntries(
+      Object.entries(value.provenance.itemOrigins).map(([field, items]) => [
+        field,
+        items?.map((item) => ({
+          ...item,
+          sourceNames: [...(item.sourceNames ?? [])],
+          semanticNotices: item.semanticNotices?.map((notice) => ({
+            ...notice,
+            relatedValues: [...notice.relatedValues],
+          })),
+        })),
+      ]),
+    ),
+  },
+  result: value.result ? cloneExtractionResult(value.result) : null,
+});
+
+export const toExtractionProductState = (
+  value: EffectExtractionProductDto,
+): EffectExtractionProductState => ({
+  ...value,
+  imageRecognitionSummary: value.imageRecognitionSummary
+    ? { ...value.imageRecognitionSummary }
+    : null,
+  warnings: value.warnings.map((warning) => ({ ...warning })),
+  provenance: value.provenance
+    ? {
+        ...value.provenance,
+        fieldSourceNames: value.provenance.fieldSourceNames ?? {},
+        itemOrigins: Object.fromEntries(
+          Object.entries(value.provenance.itemOrigins).map(([field, items]) => [
+            field,
+            items?.map((item) => ({
+              ...item,
+              sourceNames: item.sourceNames ?? [],
+              semanticNotices: item.semanticNotices?.map((notice) => ({
+                ...notice,
+                relatedValues: [...notice.relatedValues],
+              })),
+            })),
+          ]),
+        ),
+      }
+    : { fieldOrigins: {}, fieldSourceNames: {}, itemOrigins: {} },
+  result: value.result ? cloneExtractionResult(value.result) : null,
+  saveState: value.result ? 'SAVED' : 'CLEAN',
+  saveErrorMessage: null,
+});
+
+export const isExtractionRunning = (state: EffectExtractionProductState | null): boolean =>
+  state?.status === 'QUEUED' || state?.status === 'PROCESSING';
+
+export const isExtractionReadyForNext = (state: EffectExtractionProductState | null): boolean =>
+  state?.status === 'COMPLETED';
+
+// 「重新 AI 提炼」在已确认版本后要先建隔离编辑分支，那会把活动 Run 换掉，节点页按 workflowRunId
+// 重挂载。这一次点击的意图因此必须放在模块级，等新实例挂载后自己接着跑；读取即删除，避免重复触发。
+const EFFECT_PENDING_EXTRACTION_TTL_MS = 30_000;
+const pendingExtractionRuns = new Map<string, { productId: string; requestedAt: number }>();
+
+export const requestPendingExtractionRun = (projectId: string, productId: string): void => {
+  if (!projectId || !productId) return;
+  pendingExtractionRuns.set(projectId, { productId, requestedAt: Date.now() });
+};
+
+export const takePendingExtractionRun = (projectId: string): string | null => {
+  const entry = pendingExtractionRuns.get(projectId);
+  if (!entry) return null;
+  pendingExtractionRuns.delete(projectId);
+  return Date.now() - entry.requestedAt <= EFFECT_PENDING_EXTRACTION_TTL_MS
+    ? entry.productId
+    : null;
+};

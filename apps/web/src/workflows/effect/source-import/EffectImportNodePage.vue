@@ -1,0 +1,3015 @@
+<script setup lang="ts">
+import WorkflowEditingBanner from '../../../platform/workflow/components/WorkflowEditingBanner.vue';
+import WorkflowNodeEditActions from '../../../platform/workflow/components/WorkflowNodeEditActions.vue';
+import WorkflowPageLoading from '../../../platform/workflow/components/WorkflowPageLoading.vue';
+import {
+  DEFAULT_EFFECT_VIDEO_CONFIG,
+  type BatchRetryEffectImportProductsData,
+  type EffectImportDraft,
+  type EffectWorkflowBranchTreeData,
+  type EffectImportMaterial,
+  type EffectImportMaterialMutationData,
+  type EffectImportMode,
+  type EffectImportProduct,
+  type EffectImportRemovedProduct,
+  type EffectImportUploadMaterialType,
+  type EffectImportWorkspace,
+  type WorkflowRun,
+  type EffectManifestFormat,
+  type EffectVideoConfig,
+  type PreviewEffectManifestData,
+} from '@ai-marketing/contracts';
+import { WorkflowNodeFooter } from '@ai-marketing/ui';
+import {
+  AlertCircle,
+  CloudUpload,
+  FileSpreadsheet,
+  FileText,
+  PackageOpen,
+  Plus,
+  RotateCcw,
+  RefreshCw,
+  Search,
+  Trash2,
+} from '@lucide/vue';
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+
+import { isAbortError } from '../../../api/http-client';
+import { projectContextKey } from '../../../platform/project/project-context';
+import { requestActionConfirmation } from '../../../shared/composables/action-confirmation';
+import {
+  activateEffectWorkflowBranch,
+  activateWorkflowNode,
+  beginEffectNodeEdit,
+  cancelEffectNodeEdit,
+  createEffectWorkflowBranch,
+  getActiveWorkflowRunOverview,
+  getEffectWorkflowBranchTree,
+  publishEffectNodeEdit,
+  putWorkflowNodeState,
+} from '../../../platform/workflow/api/workflow-working.api';
+import { workflowNodeBaseId } from '../../../platform/workflow/workflow-node-id';
+import EffectInfoExtractionNodePage from '../information-extraction/EffectInfoExtractionNodePage.vue';
+import { prefetchEffectExtractionWorkspace } from '../information-extraction/services/effect-info-extraction.service';
+import EffectPromptGenerationNodePage from '../prompt-generation/EffectPromptGenerationNodePage.vue';
+import { prefetchEffectPromptWorkspace } from '../prompt-generation/services/effect-prompt-generation.service';
+import EffectSegmentRenderNodePage from '../segment-render/EffectSegmentRenderNodePage.vue';
+import { prefetchEffectSegmentRenderWorkspace } from '../segment-render/services/effect-segment-render-workspace.service';
+import EffectTemplateMixNodePage from '../template-mix/EffectTemplateMixNodePage.vue';
+import EffectFinalOutputNodePage from '../final-output/EffectFinalOutputNodePage.vue';
+import { clearEffectWorkspacePrefetches } from '../shared/effect-workspace-prefetch';
+import { createEffectRunRefreshQueue } from '../shared/effect-run-refresh';
+import { useEffectCanvasFreshness } from '../shared/effect-canvas-freshness';
+import { EFFECT_NODE_LABELS } from '../shared/effect-node-labels';
+import type { EffectTemplateDeleted } from '../shared/effect-template-deletion';
+import {
+  effectBranchNavigationMatches,
+  effectTemplateStepNavigation,
+  consumeEffectNavigation,
+  type EffectBranchNavigation,
+} from '../shared/effect-branch-navigation';
+import { confirmDiscardEffectEdit } from '../shared/effect-edit-session';
+import {
+  advanceEffectImportDraft,
+  batchDeleteEffectImportProducts,
+  batchRetryEffectImportProducts,
+  cancelEffectManifest,
+  commitEffectManifest,
+  completeEffectImportUploadSession,
+  createEffectImportProduct,
+  createEffectImportUploadSession,
+  deleteEffectImportMaterial,
+  deleteEffectImportProduct,
+  downloadEffectManifestTemplate,
+  downloadEffectProductPackageTemplate,
+  getEffectImportDraft,
+  getEffectImportWorkspace,
+  listRemovedEffectImportProducts,
+  listEffectImportProducts,
+  previewEffectManifest,
+  replaceEffectImportMaterial,
+  restoreEffectImportProduct,
+  switchEffectImportMode,
+  updateEffectImportDraft,
+  updateEffectImportProduct,
+  uploadEffectImportSessionItem,
+  validateEffectImportDraft,
+  validateEffectImportLink,
+} from './api/effect-import.api';
+import BatchManifestImportDialog from './components/BatchManifestImportDialog.vue';
+import EffectWorkflowCanvas from './components/EffectWorkflowCanvas.vue';
+import WorkflowNavigationFeedback from '../../../platform/workflow/components/WorkflowNavigationFeedback.vue';
+import { createWorkflowNodeActivationQueue } from '../../../platform/workflow/workflow-node-activation';
+import EffectWorkflowBranchTree from './components/EffectWorkflowBranchTree.vue';
+import ProductImportEditor from './components/ProductImportEditor.vue';
+import {
+  cloneVideoConfig,
+  createEffectImportGenerationGate,
+  createIdempotencyKeyRegistry,
+  createProjectWriteQueue,
+  createVersionedDraftBuffer,
+  drainPendingEdits,
+  editableProductSnapshot,
+  isRevisionConflict,
+  resolveReloadSaveState,
+  resolveSuccessfulWriteSaveState,
+  synchronizeCollectionItemById,
+  type EffectImportSaveState,
+} from './effect-import-state';
+
+type PageStatus = 'error' | 'idle' | 'loading' | 'success';
+type EditableProductSnapshot = ReturnType<typeof editableProductSnapshot>;
+
+const projectContext = inject(projectContextKey);
+if (!projectContext) throw new Error('EffectImportNodePage must be used inside project context');
+
+const pageStatus = ref<PageStatus>('idle');
+const pageError = ref('');
+const workspace = ref<EffectImportWorkspace | null>(null);
+const draft = ref<EffectImportDraft | null>(null);
+const listedProducts = ref<EffectImportProduct[]>([]);
+const removedProducts = ref<EffectImportRemovedProduct[]>([]);
+const saveState = ref<EffectImportSaveState>('clean');
+const transitioning = ref(false);
+const pendingStep = ref<number | null>(null);
+const branchTreeOpen = ref(false);
+const branchTreeTemplateId = ref<string | null>(null);
+const branchTreeViewedRunId = ref<string | null>(null);
+const branchTree = ref<EffectWorkflowBranchTreeData | null>(null);
+const branchNavigation = ref<EffectBranchNavigation | null>(null);
+const branchTreeLoading = ref(false);
+const branchTreeError = ref('');
+const branchSwitching = ref(false);
+const activeWorkflowRun = ref<WorkflowRun | null>(null);
+const sourceEditing = ref(true);
+const sourceEditBusy = ref(false);
+const runContextSwitching = ref(false);
+let branchController: AbortController | null = null;
+let branchPrefetchController: AbortController | null = null;
+const uploadTargetInitializing = ref(false);
+const activeStep = ref(0);
+const canvasFreshness = useEffectCanvasFreshness(() => ({
+  projectId: projectContext.currentProject.value?.id ?? '',
+  workflowRunId: workspace.value?.workflowRunId ?? '',
+  publishedWorkflowRunId: activeWorkflowRun.value?.isTemporaryBranch
+    ? activeWorkflowRun.value.parentWorkflowRunId
+    : null,
+  activeStep: activeStep.value,
+  enabled: pageStatus.value === 'success',
+}));
+const canvasStaleCounts = canvasFreshness.staleCounts;
+watch(canvasFreshness.branchTree, (tree) => {
+  // The open version tree and canvas must use the same completed-update projection.
+  if (
+    branchTreeOpen.value &&
+    !branchSwitching.value &&
+    tree?.projectId === projectContext.currentProject.value?.id
+  )
+    branchTree.value = tree;
+});
+const infoExtractionNode = ref<{ flushPendingEdits: () => Promise<boolean> } | null>(null);
+const promptGenerationNode = ref<{ flushPendingEdits: () => Promise<boolean> } | null>(null);
+const segmentRenderNode = ref<{ flushPendingEdits: () => Promise<boolean> } | null>(null);
+const templateMixNode = ref<{
+  flushPendingEdits: () => Promise<boolean>;
+  getBranchTreeTemplateId: () => string | null;
+  getBranchTreeWorkflowRunId: () => string | null;
+  getCurrentTemplateId: () => string | null;
+  focusBranchTemplate: (templateId: string) => void;
+} | null>(null);
+const mixPreviewTarget = ref<{
+  projectId: string;
+  workflowRunId: string;
+  templateId: string;
+  variantId: string;
+} | null>(null);
+const effectWorkflowNodeIds = [
+  'SOURCE_IMPORT',
+  'INFORMATION_EXTRACTION',
+  'PROMPT_GENERATION',
+  'SEGMENT_RENDER',
+  'TEMPLATE_MIX',
+  'FINAL_OUTPUT',
+] as const;
+const effectWorkflowNodeLabels = effectWorkflowNodeIds.map((id) => EFFECT_NODE_LABELS[id]);
+const pendingStepLabel = computed(() =>
+  pendingStep.value === null ? null : (effectWorkflowNodeLabels[pendingStep.value] ?? '目标节点'),
+);
+const editingCurrentNode = computed(() =>
+  Boolean(
+    activeWorkflowRun.value?.isTemporaryBranch &&
+    activeWorkflowRun.value.editNodeId === effectWorkflowNodeIds[activeStep.value],
+  ),
+);
+const keyword = ref('');
+const selectedProductIds = ref(new Set<string>());
+const busyMaterialIds = ref(new Set<string>());
+const busyCommerceProductIds = ref(new Set<string>());
+const validatingDraft = ref(false);
+const notice = ref<{ kind: 'error' | 'success' | 'warning'; text: string } | null>(null);
+const branchSwitchToast = ref('');
+const manifestOpen = ref(false);
+const manifestBusy = ref(false);
+const manifestError = ref('');
+const manifestPreview = ref<PreviewEffectManifestData | null>(null);
+const replacementTarget = ref<{
+  material: EffectImportMaterial;
+  product: EffectImportProduct;
+} | null>(null);
+const replacementInput = ref<HTMLInputElement | null>(null);
+
+const writeQueue = createProjectWriteQueue();
+const generationGate = createEffectImportGenerationGate();
+const productDraftBuffer = createVersionedDraftBuffer<EditableProductSnapshot>();
+const globalDraftBuffer = createVersionedDraftBuffer<EffectVideoConfig>();
+const createClientIdempotencyKey = (): string =>
+  globalThis.crypto?.randomUUID?.() ??
+  `effect-import-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const manifestCommitKeys = createIdempotencyKeyRegistry(createClientIdempotencyKey);
+const loadedProjectId = ref('');
+let activeGeneration = 0;
+let projectSelectionSequence = 0;
+let transitionOperationCount = 0;
+let pageController: AbortController | null = null;
+let listController: AbortController | null = null;
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+let branchSwitchToastTimer: ReturnType<typeof setTimeout> | undefined;
+let configTimer: ReturnType<typeof setTimeout> | undefined;
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let adjacentPrefetchTimer: ReturnType<typeof setTimeout> | undefined;
+const productTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const nodeStateRevision = ref(0);
+let lastSavedNodeState = '';
+
+const currentProjectId = computed(() => projectContext.currentProject.value?.id ?? '');
+const currentMode = computed<EffectImportMode>(() => workspace.value?.currentMode ?? 'SINGLE');
+const products = computed(() =>
+  currentMode.value === 'BATCH' ? listedProducts.value : (draft.value?.products ?? []),
+);
+const singleProduct = computed(() => draft.value?.products[0] ?? null);
+const validationErrors = computed(
+  () => draft.value?.validationIssues.filter((issue) => issue.severity === 'ERROR') ?? [],
+);
+const validatedCurrentRevision = computed(
+  () =>
+    Boolean(draft.value) &&
+    draft.value?.validatedRevision === draft.value?.revision &&
+    validationErrors.value.length === 0,
+);
+const selectedCount = computed(() => selectedProductIds.value.size);
+const manifestCommitIdempotencyKey = computed(() =>
+  manifestPreview.value ? manifestCommitKeys.getOrCreate(manifestPreview.value.id) : '',
+);
+const saveStateLabel = computed(
+  () =>
+    ({
+      clean: '已自动保存',
+      conflict: '检测到草稿冲突，已重新加载',
+      dirty: '有未保存修改',
+      saveError: '保存失败',
+      saved: '已自动保存',
+      saving: '正在保存…',
+    })[saveState.value],
+);
+
+const showNotice = (text: string, kind: 'error' | 'success' | 'warning' = 'success'): void => {
+  notice.value = { text, kind };
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => (notice.value = null), 3600);
+};
+const showBranchSwitchToast = (text: string): void => {
+  branchSwitchToast.value = text;
+  clearTimeout(branchSwitchToastTimer);
+  branchSwitchToastTimer = setTimeout(() => (branchSwitchToast.value = ''), 2800);
+};
+
+const clearPendingTimers = (): void => {
+  clearTimeout(configTimer);
+  clearTimeout(searchTimer);
+  clearTimeout(adjacentPrefetchTimer);
+  adjacentPrefetchTimer = undefined;
+  productTimers.forEach(clearTimeout);
+  productTimers.clear();
+};
+
+const beginTransition = (): void => {
+  transitionOperationCount += 1;
+  transitioning.value = true;
+};
+
+const endTransition = (): void => {
+  transitionOperationCount = Math.max(0, transitionOperationCount - 1);
+  transitioning.value = transitionOperationCount > 0;
+};
+
+const nodeActivation = createWorkflowNodeActivationQueue<{
+  projectId: string;
+  workflowRunId: string;
+  nodeId: (typeof effectWorkflowNodeIds)[number];
+}>({
+  activate: async ({ projectId, workflowRunId, nodeId }) => {
+    await activateWorkflowNode(projectId, workflowRunId, nodeId);
+  },
+  isCurrent: ({ projectId, workflowRunId }) =>
+    loadedProjectId.value === projectId && workspace.value?.workflowRunId === workflowRunId,
+  onError: (error) =>
+    showNotice(
+      error instanceof Error
+        ? `页面已切换，节点状态后台同步失败：${error.message}`
+        : '页面已切换，但节点状态后台同步失败，请再次切换重试',
+      'warning',
+    ),
+});
+const enqueueWorkflowNodeActivation = (
+  projectId: string,
+  workflowRunId: string,
+  nodeId: (typeof effectWorkflowNodeIds)[number],
+): void => nodeActivation.enqueue({ projectId, workflowRunId, nodeId });
+
+const prefetchWorkflowStep = (step: number): Promise<unknown> | null => {
+  const projectId = loadedProjectId.value;
+  const workflowRunId = workspace.value?.workflowRunId ?? '';
+  const draftId = draft.value?.id ?? '';
+  const productId = products.value.find((product) => product.status === 'ACTIVE')?.id ?? '';
+  if (!projectId || !workflowRunId) return null;
+  if (step === 1 && draftId) return prefetchEffectExtractionWorkspace({ projectId, draftId });
+  if (step === 2) return prefetchEffectPromptWorkspace({ projectId, workflowRunId });
+  if (step === 3 && productId)
+    return prefetchEffectSegmentRenderWorkspace({ projectId, workflowRunId, productId });
+  return null;
+};
+
+const scheduleAdjacentWorkspacePrefetch = (): void => {
+  clearTimeout(adjacentPrefetchTimer);
+  const projectId = loadedProjectId.value;
+  const workflowRunId = workspace.value?.workflowRunId ?? '';
+  const draftId = draft.value?.id ?? '';
+  const step = activeStep.value;
+  const productId = products.value.find((product) => product.status === 'ACTIVE')?.id ?? '';
+  if (!projectId || !workflowRunId) return;
+
+  adjacentPrefetchTimer = setTimeout(() => {
+    adjacentPrefetchTimer = undefined;
+    if (
+      loadedProjectId.value !== projectId ||
+      workspace.value?.workflowRunId !== workflowRunId ||
+      activeStep.value !== step
+    )
+      return;
+
+    const requests: Promise<unknown>[] = [];
+    if ((step === 0 || step === 2) && draftId)
+      requests.push(prefetchEffectExtractionWorkspace({ projectId, draftId }));
+    if (step === 1 || step === 3)
+      requests.push(prefetchEffectPromptWorkspace({ projectId, workflowRunId }));
+    if ((step === 2 || step === 4) && productId)
+      requests.push(prefetchEffectSegmentRenderWorkspace({ projectId, workflowRunId, productId }));
+    requests.forEach((request) => void request.catch(() => undefined));
+  }, 180);
+};
+
+const hasPendingDraftEdits = (): boolean => globalDraftBuffer.has() || productDraftBuffer.has();
+
+const nodeStateSnapshot = () => ({
+  mode: currentMode.value,
+  globalConfig: draft.value?.globalConfig ?? DEFAULT_EFFECT_VIDEO_CONFIG,
+  products: (draft.value?.products ?? [])
+    .map((product) => ({
+      id: product.id,
+      name: product.name,
+      category: product.category,
+      commerceUrl: product.commerceUrl,
+      configOverride: product.configOverride,
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id)),
+});
+
+const saveWorkflowNodeState = async (keepalive = false): Promise<boolean> => {
+  if (!loadedProjectId.value || !workspace.value) return true;
+  const projectId = loadedProjectId.value;
+  const workflowRunId = workspace.value.workflowRunId;
+  const generation = activeGeneration;
+  const state = nodeStateSnapshot();
+  const serialized = JSON.stringify(state);
+  if (serialized === lastSavedNodeState) return true;
+  const persist = async (): Promise<boolean> => {
+    if (
+      !keepalive &&
+      (!isCurrentContext(projectId, generation) || workspace.value?.workflowRunId !== workflowRunId)
+    )
+      return false;
+    if (serialized === lastSavedNodeState) return true;
+    saveState.value = 'saving';
+    try {
+      const response = await putWorkflowNodeState(
+        projectId,
+        workflowRunId,
+        'SOURCE_IMPORT',
+        { expectedRevision: nodeStateRevision.value, state },
+        { keepalive, ...(!keepalive && pageController ? { signal: pageController.signal } : {}) },
+      );
+      if (
+        !isCurrentContext(projectId, generation) ||
+        workspace.value?.workflowRunId !== workflowRunId
+      )
+        return false;
+      nodeStateRevision.value = response.data.nodeState.revision;
+      lastSavedNodeState = serialized;
+      saveState.value = 'saved';
+      return true;
+    } catch (error) {
+      if (
+        !isCurrentContext(projectId, generation) ||
+        workspace.value?.workflowRunId !== workflowRunId
+      )
+        return false;
+      if (isAbortError(error)) return false;
+      saveState.value = 'saveError';
+      showNotice(error instanceof Error ? error.message : '节点草稿自动保存失败', 'error');
+      return false;
+    }
+  };
+  return keepalive ? persist() : writeQueue.enqueue(projectId, persist);
+};
+
+const isCurrentContext = (projectId: string, generation: number): boolean =>
+  loadedProjectId.value === projectId && generationGate.current(generation);
+
+const syncWorkspaceSummary = (): void => {
+  if (!workspace.value || !draft.value) return;
+  const summary = workspace.value.drafts[draft.value.mode];
+  Object.assign(summary, {
+    status: draft.value.status,
+    revision: draft.value.revision,
+    validatedRevision: draft.value.validatedRevision,
+    productCount: draft.value.productCount,
+    issueCount: draft.value.validationIssues.length,
+    completedAt: draft.value.completedAt,
+    updatedAt: draft.value.updatedAt,
+  });
+};
+
+const setDraft = (value: EffectImportDraft): void => {
+  draft.value = value;
+  if (value.mode === 'SINGLE' || !keyword.value) {
+    listedProducts.value = value.products;
+  }
+  syncWorkspaceSummary();
+};
+
+const markDraftMutation = (revision: number): void => {
+  if (!draft.value) return;
+  draft.value.revision = revision;
+  draft.value.validatedRevision = null;
+  draft.value.status = 'DRAFT';
+  draft.value.validationIssues = [];
+  draft.value.issueCount = 0;
+  draft.value.updatedAt = new Date().toISOString();
+  syncWorkspaceSummary();
+};
+
+const replaceProduct = (product: EffectImportProduct): void => {
+  if (!draft.value) return;
+  const previous =
+    draft.value.products.find((item) => item.id === product.id) ??
+    listedProducts.value.find((item) => item.id === product.id);
+  const nextProduct =
+    previous &&
+    product.commitStatus === 'UNVALIDATED' &&
+    (previous.sourcePackageRevision !== null || previous.effectiveVideoConfigRevision !== null)
+      ? {
+          ...product,
+          commitStatus: 'DRAFT_CHANGED' as const,
+          sourcePackageRevision: previous.sourcePackageRevision,
+          effectiveVideoConfigRevision: previous.effectiveVideoConfigRevision,
+        }
+      : product;
+  const [draftProducts, visibleProducts] = synchronizeCollectionItemById(
+    draft.value.products,
+    listedProducts.value,
+    nextProduct,
+  );
+  draft.value.products = draftProducts;
+  listedProducts.value = visibleProducts;
+};
+
+const syncEditableProductSnapshot = (
+  productId: string,
+  snapshot: EditableProductSnapshot,
+): void => {
+  const source =
+    listedProducts.value.find((item) => item.id === productId) ??
+    draft.value?.products.find((item) => item.id === productId);
+  if (source) replaceProduct({ ...source, ...snapshot });
+};
+
+const restorePendingDraftEdits = (): void => {
+  const globalPending = globalDraftBuffer.get('global');
+  if (globalPending && draft.value) {
+    draft.value.globalConfig = cloneVideoConfig(globalPending.value);
+    draft.value.validatedRevision = null;
+  }
+  productDraftBuffer.keys().forEach((productId) => {
+    const pending = productDraftBuffer.get(productId);
+    if (pending) syncEditableProductSnapshot(productId, pending.value);
+  });
+};
+
+const applyMaterialMutation = (
+  productId: string,
+  value: EffectImportMaterialMutationData,
+): void => {
+  const product =
+    (currentMode.value === 'BATCH' ? listedProducts.value : (draft.value?.products ?? [])).find(
+      (item) => item.id === productId,
+    ) ?? draft.value?.products.find((item) => item.id === productId);
+  if (!product) return;
+  const index = product.materials.findIndex((item) => item.id === value.material.id);
+  const materials =
+    index < 0
+      ? [value.material, ...product.materials]
+      : product.materials.map((item) => (item.id === value.material.id ? value.material : item));
+  replaceProduct({
+    ...product,
+    materials,
+    commitStatus:
+      product.commitStatus === 'UNVALIDATED' ? 'UNVALIDATED' : ('DRAFT_CHANGED' as const),
+  });
+  markDraftMutation(value.revision);
+};
+
+const reloadCurrentDraft = async (reason: 'conflict' | 'normal' = 'normal'): Promise<void> => {
+  const projectId = loadedProjectId.value;
+  const mode = currentMode.value;
+  const generation = activeGeneration;
+  if (!projectId || !pageController) return;
+  try {
+    const response = await getEffectImportDraft(projectId, mode, pageController.signal);
+    if (!isCurrentContext(projectId, generation)) return;
+    setDraft(response.data);
+    if (mode === 'BATCH') await refreshProductList();
+    await refreshRemovedProducts();
+    restorePendingDraftEdits();
+    saveState.value = resolveReloadSaveState(
+      reason,
+      globalDraftBuffer.has() || productDraftBuffer.has(),
+    );
+  } catch (error) {
+    if (!isAbortError(error))
+      showNotice(error instanceof Error ? error.message : '重新加载草稿失败', 'error');
+  }
+};
+
+const runWrite = async <T,>(
+  operation: (expectedRevision: number, signal: AbortSignal) => Promise<T>,
+  apply?: (result: T) => void,
+): Promise<T | null> => {
+  const projectId = loadedProjectId.value;
+  const generation = activeGeneration;
+  const controller = pageController;
+  if (!projectId || !draft.value || !controller) return null;
+  try {
+    return await writeQueue.enqueue(projectId, async () => {
+      if (!isCurrentContext(projectId, generation) || controller.signal.aborted) {
+        throw new DOMException('stale project request', 'AbortError');
+      }
+      saveState.value = 'saving';
+      const result = await operation(draft.value!.revision, controller.signal);
+      if (isCurrentContext(projectId, generation)) {
+        apply?.(result);
+        saveState.value = resolveSuccessfulWriteSaveState(hasPendingDraftEdits());
+      }
+      return result;
+    });
+  } catch (error) {
+    if (isAbortError(error)) return null;
+    if (isRevisionConflict(error)) {
+      saveState.value = 'conflict';
+      await reloadCurrentDraft('conflict');
+      showNotice('草稿已被更新，已载入服务端最新内容', 'warning');
+      return null;
+    }
+    saveState.value = 'saveError';
+    showNotice(error instanceof Error ? error.message : '保存失败', 'error');
+    return null;
+  }
+};
+
+const refreshProductList = async (): Promise<void> => {
+  const projectId = loadedProjectId.value;
+  const generation = activeGeneration;
+  if (!projectId || currentMode.value !== 'BATCH') return;
+  listController?.abort();
+  listController = new AbortController();
+  try {
+    const response = await listEffectImportProducts(
+      projectId,
+      'BATCH',
+      {
+        keyword: keyword.value || undefined,
+        page: 1,
+        pageSize: 100,
+      },
+      listController.signal,
+    );
+    if (!isCurrentContext(projectId, generation)) return;
+    listedProducts.value = response.data.items;
+    productDraftBuffer.keys().forEach((productId) => {
+      const pending = productDraftBuffer.get(productId);
+      if (pending) syncEditableProductSnapshot(productId, pending.value);
+    });
+    if (draft.value && response.data.revision > draft.value.revision) {
+      draft.value.revision = response.data.revision;
+    }
+  } catch (error) {
+    if (!isAbortError(error))
+      showNotice(error instanceof Error ? error.message : '加载产品列表失败', 'error');
+  }
+};
+
+const refreshRemovedProducts = async (): Promise<void> => {
+  const projectId = loadedProjectId.value;
+  const generation = activeGeneration;
+  const controller = pageController;
+  if (!projectId || !controller) {
+    removedProducts.value = [];
+    return;
+  }
+  try {
+    const response = await listRemovedEffectImportProducts(
+      projectId,
+      currentMode.value,
+      controller.signal,
+    );
+    if (!isCurrentContext(projectId, generation)) return;
+    removedProducts.value = response.data.items;
+  } catch (error) {
+    if (!isAbortError(error))
+      showNotice(error instanceof Error ? error.message : '加载最近删除产品失败', 'error');
+  }
+};
+
+const loadProject = async (
+  projectId: string,
+  destination?: EffectBranchNavigation,
+): Promise<void> => {
+  activeRunRefreshQueue.invalidate();
+  if (!destination) branchNavigation.value = null;
+  branchController?.abort();
+  branchPrefetchController?.abort();
+  branchTreeOpen.value = false;
+  branchTree.value = null;
+  clearPendingTimers();
+  clearEffectWorkspacePrefetches();
+  nodeActivation.invalidate();
+  globalDraftBuffer.reset();
+  productDraftBuffer.reset();
+  pageController?.abort();
+  listController?.abort();
+  generationGate.invalidate();
+  workspace.value = null;
+  activeWorkflowRun.value = null;
+  sourceEditing.value = true;
+  draft.value = null;
+  listedProducts.value = [];
+  removedProducts.value = [];
+  selectedProductIds.value = new Set();
+  activeStep.value = 0;
+  nodeStateRevision.value = 0;
+  lastSavedNodeState = '';
+  pageError.value = '';
+  if (!projectId) {
+    loadedProjectId.value = '';
+    pageStatus.value = 'idle';
+    return;
+  }
+  pageController = new AbortController();
+  loadedProjectId.value = projectId;
+  activeGeneration = generationGate.begin();
+  const generation = activeGeneration;
+  pageStatus.value = 'loading';
+  prefetchBranchTree(projectId);
+  try {
+    // The project workspace and current Run overview are independent reads. Start both before
+    // awaiting either so restoring a project does not pay their network latency in series.
+    const overviewPromise = getActiveWorkflowRunOverview(
+      projectId,
+      'EFFECT',
+      'EFFECT',
+      pageController.signal,
+    );
+    const workspaceResponse = await getEffectImportWorkspace(projectId, pageController.signal);
+    if (!isCurrentContext(projectId, generation)) return;
+    const loadedWorkspace = workspaceResponse.data.workspace;
+    let overviewData: Awaited<ReturnType<typeof getActiveWorkflowRunOverview>>['data'];
+    if (loadedWorkspace.currentMode === 'BATCH') {
+      const [normalized, overview] = await Promise.all([
+        switchEffectImportMode(
+          projectId,
+          { mode: 'SINGLE', expectedRevision: loadedWorkspace.revision },
+          pageController.signal,
+        ),
+        overviewPromise,
+      ]);
+      if (!isCurrentContext(projectId, generation)) return;
+      workspace.value = normalized.data.workspace;
+      setDraft(normalized.data.draft);
+      overviewData = overview.data;
+    } else {
+      workspace.value = loadedWorkspace;
+      const [draftResponse, overview] = await Promise.all([
+        getEffectImportDraft(projectId, 'SINGLE', pageController.signal),
+        overviewPromise,
+      ]);
+      if (!isCurrentContext(projectId, generation)) return;
+      setDraft(draftResponse.data);
+      overviewData = overview.data;
+    }
+    activeWorkflowRun.value = overviewData.run;
+    lastSavedNodeState = JSON.stringify(nodeStateSnapshot());
+    const run = activeWorkflowRun.value;
+    const loadedSourceDraft = draft.value as EffectImportDraft | null;
+    sourceEditing.value = run?.isTemporaryBranch
+      ? run.editNodeId === 'SOURCE_IMPORT'
+      : !(
+          loadedSourceDraft?.products.some((product) => product.sourcePackageRevision !== null) ??
+          false
+        );
+    const sourceNodeState = overviewData.nodeStates.find((item) => item.nodeId === 'SOURCE_IMPORT');
+    nodeStateRevision.value = sourceNodeState?.revision ?? 0;
+    const explicitDestination = effectBranchNavigationMatches(
+      destination,
+      projectId,
+      workspace.value.workflowRunId,
+    );
+    const restoredNodeId = explicitDestination
+      ? destination.nodeId
+      : workflowNodeBaseId(overviewData.run?.currentNodeId);
+    const restoredStep = restoredNodeId
+      ? effectWorkflowNodeIds.findIndex((nodeId) => nodeId === restoredNodeId)
+      : -1;
+    activeStep.value =
+      restoredStep >= 0
+        ? restoredStep
+        : workspace.value.currentNode === 'AI_INFO_EXTRACTION'
+          ? 1
+          : 0;
+    const activeNodeId = effectWorkflowNodeIds[activeStep.value];
+    if ((explicitDestination || restoredStep < 0) && activeNodeId)
+      enqueueWorkflowNodeActivation(projectId, workspace.value.workflowRunId, activeNodeId);
+    saveState.value = 'clean';
+    pageStatus.value = 'success';
+    scheduleAdjacentWorkspacePrefetch();
+    void refreshRemovedProducts()
+      .then(async () => {
+        if (isCurrentContext(projectId, generation)) await ensureUploadTarget();
+      })
+      .catch((error: unknown) => {
+        if (isCurrentContext(projectId, generation) && !isAbortError(error))
+          showNotice(error instanceof Error ? error.message : '准备素材上传区失败', 'error');
+      });
+  } catch (error) {
+    if (isAbortError(error)) return;
+    pageStatus.value = 'error';
+    pageError.value = error instanceof Error ? error.message : '资料包工作区加载失败';
+  }
+};
+
+/** Keep the current node visible while the active Run's isolated draft is prepared. */
+const activeRunRefreshQueue = createEffectRunRefreshQueue(
+  async (
+    { projectId, showCurtain, refreshBranchTree = true }: {
+      projectId: string; showCurtain: boolean; refreshBranchTree?: boolean;
+    },
+    isLatest,
+  ): Promise<void> => {
+    if (!isLatest() || currentProjectId.value !== projectId) return;
+    if (!projectId || loadedProjectId.value !== projectId || pageStatus.value !== 'success')
+      return loadProject(projectId);
+    if (showCurtain) runContextSwitching.value = true;
+    const previousStep = activeStep.value;
+    const previousScrollY = window.scrollY;
+    try {
+      // These reads share the already-completed edit transaction; do not pay
+      // the workspace latency before even starting the draft and overview.
+      const [workspaceResponse, initialDraftResponse, overview] = await Promise.all([
+        getEffectImportWorkspace(projectId),
+        getEffectImportDraft(projectId, 'SINGLE'),
+        getActiveWorkflowRunOverview(projectId, 'EFFECT', 'EFFECT'),
+      ]);
+      if (!isLatest() || currentProjectId.value !== projectId) return;
+      let nextWorkspace = workspaceResponse.data.workspace;
+      let draftResponse = initialDraftResponse;
+      if (nextWorkspace.currentMode === 'BATCH') {
+        const normalized = await switchEffectImportMode(projectId, {
+          mode: 'SINGLE',
+          expectedRevision: nextWorkspace.revision,
+        });
+        nextWorkspace = normalized.data.workspace;
+        draftResponse = { ...initialDraftResponse, data: normalized.data.draft };
+      }
+      if (!isLatest() || currentProjectId.value !== projectId) return;
+
+      if (overview.data.run?.id !== nextWorkspace.workflowRunId ||
+        nextWorkspace.drafts.SINGLE.id !== draftResponse.data.id)
+        throw new Error('工作区版本已变化，正在重新读取当前分支');
+      clearEffectWorkspacePrefetches();
+      const productId = draftResponse.data.products.find(
+        (product) => product.status === 'ACTIVE',
+      )?.id;
+      try {
+        if (previousStep === 1)
+          await prefetchEffectExtractionWorkspace({ projectId, draftId: draftResponse.data.id });
+        else if (previousStep === 2)
+          void prefetchEffectPromptWorkspace({
+            projectId,
+            workflowRunId: nextWorkspace.workflowRunId,
+          }).catch(() => undefined);
+        else if (previousStep === 3 && productId)
+          void prefetchEffectSegmentRenderWorkspace({
+            projectId,
+            workflowRunId: nextWorkspace.workflowRunId,
+            productId,
+          }).catch(() => undefined);
+      } catch {
+        // The node's own loader displays a recoverable error if its prefetch fails.
+      }
+      if (!isLatest() || currentProjectId.value !== projectId) return;
+
+      clearPendingTimers();
+      globalDraftBuffer.reset();
+      productDraftBuffer.reset();
+      pageController?.abort();
+      listController?.abort();
+      generationGate.invalidate();
+      pageController = new AbortController();
+      activeGeneration = generationGate.begin();
+      nodeActivation.invalidate();
+      workspace.value = nextWorkspace;
+      setDraft(draftResponse.data);
+      activeWorkflowRun.value = overview.data.run;
+      // Enter/cancel only moves a hidden edit session; the published tree has not
+      // changed. Avoid competing tree/source prefetches while the editor is loading.
+      if (refreshBranchTree) {
+        branchController?.abort();
+        branchPrefetchController?.abort();
+        branchTree.value = null;
+        prefetchBranchTree(projectId);
+      }
+      const nextSourceDraft = draftResponse.data;
+      sourceEditing.value = overview.data.run?.isTemporaryBranch
+        ? overview.data.run.editNodeId === 'SOURCE_IMPORT'
+        : !nextSourceDraft.products.some((product) => product.sourcePackageRevision !== null);
+      nodeStateRevision.value =
+        overview.data.nodeStates.find((item) => item.nodeId === 'SOURCE_IMPORT')?.revision ?? 0;
+      selectedProductIds.value = new Set();
+      saveState.value = 'clean';
+      lastSavedNodeState = JSON.stringify(nodeStateSnapshot());
+      if (refreshBranchTree) scheduleAdjacentWorkspacePrefetch();
+      await nextTick();
+      requestAnimationFrame(() => {
+        if (isLatest() && currentProjectId.value === projectId && activeStep.value === previousStep)
+          window.scrollTo({ top: previousScrollY, behavior: 'auto' });
+      });
+      if (previousStep === 0) void refreshRemovedProducts();
+    } catch (error) {
+      if (!isLatest() || currentProjectId.value !== projectId) return;
+      showNotice(
+        error instanceof Error ? error.message : '编辑工作区切换失败，正在重新加载',
+        'error',
+      );
+      if (currentProjectId.value === projectId) await loadProject(projectId);
+    } finally {
+      if (showCurtain) runContextSwitching.value = false;
+    }
+  },
+);
+
+const refreshActiveRunInPlace = (
+  projectId: string,
+  options: { showCurtain?: boolean; refreshBranchTree?: boolean } = {},
+): Promise<void> =>
+  activeRunRefreshQueue.request({
+    projectId,
+    showCurtain: options.showCurtain ?? true,
+    refreshBranchTree: options.refreshBranchTree ?? true,
+  });
+
+const handleSegmentRenderWorkflowRunChange = (
+  _workflowRunId: string,
+  settled?: () => void,
+): void => {
+  void refreshActiveRunInPlace(currentProjectId.value, { showCurtain: false }).finally(settled);
+};
+
+const handlePromptWorkflowRunChange = (
+  settled?: () => void,
+  options?: { refreshBranchTree: boolean },
+): void => {
+  void refreshActiveRunInPlace(currentProjectId.value, {
+    showCurtain: false,
+    refreshBranchTree: options?.refreshBranchTree ?? true,
+  }).finally(settled);
+};
+
+const handleTemplateMixWorkflowRunChange = async (detail?: {
+  kind: 'FILL' | 'PACKAGING';
+  workflowRunId: string;
+  fromRevision: number | null;
+  toRevision: number | null;
+}): Promise<void> => {
+  const projectId = currentProjectId.value;
+  const previousRunId = workspace.value?.workflowRunId;
+  // Fill publication is background synchronization, not a full-page navigation curtain.
+  await refreshActiveRunInPlace(projectId, { showCurtain: false });
+  if (detail && workspace.value?.workflowRunId !== detail.workflowRunId)
+    await refreshActiveRunInPlace(projectId, { showCurtain: false });
+  if (
+    !detail ||
+    currentProjectId.value !== projectId ||
+    !previousRunId ||
+    workspace.value?.workflowRunId === previousRunId ||
+    workspace.value?.workflowRunId !== detail.workflowRunId
+  )
+    return;
+  const stage = detail.kind === 'FILL' ? '智能填充' : '成片包装';
+  const from =
+    detail.fromRevision === null
+      ? `原${stage}分支`
+      : `${stage}版本${String(detail.fromRevision).padStart(2, '0')}`;
+  const to =
+    detail.toRevision === null
+      ? `新${stage}分支`
+      : `${stage}版本${String(detail.toRevision).padStart(2, '0')}`;
+  showBranchSwitchToast(`已从${from}切换至${to}`);
+};
+
+let templateDeletionRefresh: Promise<void> | null = null;
+const handleTemplateDeleted = async (receipt: EffectTemplateDeleted): Promise<void> => {
+  const projectId = currentProjectId.value;
+  if (receipt.projectId !== projectId) return;
+  if (branchNavigation.value?.templateId === receipt.templateId) branchNavigation.value = null;
+  if (mixPreviewTarget.value?.templateId === receipt.templateId) mixPreviewTarget.value = null;
+  branchController?.abort();
+  branchPrefetchController?.abort();
+  branchTree.value = null;
+  const currentRunId = workspace.value?.workflowRunId ?? '';
+  const currentRemoved =
+    receipt.removedWorkflowRunIds?.includes(currentRunId) ??
+    (currentRunId === receipt.sourceWorkflowRunId && currentRunId !== receipt.workflowRunId);
+  // Deletion is not new fill/packaging publication. No curtain or unrelated draft reload.
+  if (currentRemoved) {
+    const refresh = refreshActiveRunInPlace(projectId, { showCurtain: false });
+    templateDeletionRefresh = refresh;
+    try {
+      await refresh;
+    } finally {
+      if (templateDeletionRefresh === refresh) templateDeletionRefresh = null;
+    }
+  }
+  if (currentProjectId.value === projectId) prefetchBranchTree(projectId);
+};
+
+const flushGlobalConfig = async (persistNodeState = true): Promise<boolean> => {
+  clearTimeout(configTimer);
+  configTimer = undefined;
+  const pending = globalDraftBuffer.get('global');
+  if (!draft.value || !pending) return true;
+  const snapshot = cloneVideoConfig(pending.value);
+  const sentVersion = pending.version;
+  const result = await runWrite(
+    (expectedRevision, signal) =>
+      updateEffectImportDraft(
+        loadedProjectId.value,
+        currentMode.value,
+        { globalConfig: snapshot, expectedRevision },
+        signal,
+      ),
+    (response) => {
+      setDraft(response.data.draft);
+      const latest = globalDraftBuffer.get('global');
+      if (latest && latest.version !== sentVersion && draft.value) {
+        draft.value.globalConfig = cloneVideoConfig(latest.value);
+        draft.value.validatedRevision = null;
+      }
+    },
+  );
+  if (!result) return false;
+  globalDraftBuffer.acknowledge('global', sentVersion);
+  if (globalDraftBuffer.has('global')) {
+    const latest = globalDraftBuffer.get('global');
+    if (latest && draft.value) draft.value.globalConfig = cloneVideoConfig(latest.value);
+    saveState.value = 'dirty';
+  } else saveState.value = resolveSuccessfulWriteSaveState(hasPendingDraftEdits());
+  return persistNodeState ? saveWorkflowNodeState() : true;
+};
+
+const scheduleProductSave = (productId: string, snapshot: EditableProductSnapshot): void => {
+  productDraftBuffer.edit(productId, snapshot);
+  saveState.value = 'dirty';
+  if (draft.value) draft.value.validatedRevision = null;
+  clearTimeout(productTimers.get(productId));
+  productTimers.set(
+    productId,
+    setTimeout(() => void flushProduct(productId), 1000),
+  );
+};
+
+const updateProductField = (
+  product: EffectImportProduct,
+  field: 'category' | 'commerceUrl' | 'name',
+  value: string,
+): void => {
+  if (transitioning.value) return;
+  const snapshot = editableProductSnapshot(product);
+  if (field === 'commerceUrl') snapshot.commerceUrl = value || null;
+  else snapshot[field] = value;
+  syncEditableProductSnapshot(product.id, snapshot);
+  scheduleProductSave(product.id, snapshot);
+};
+
+const flushProduct = async (
+  productOrId: EffectImportProduct | string,
+  persistNodeState = true,
+): Promise<boolean> => {
+  const productId = typeof productOrId === 'string' ? productOrId : productOrId.id;
+  clearTimeout(productTimers.get(productId));
+  productTimers.delete(productId);
+  const pending = productDraftBuffer.get(productId);
+  if (!pending) return true;
+  const snapshot = pending.value;
+  const sentVersion = pending.version;
+  const result = await runWrite(
+    (expectedRevision, signal) =>
+      updateEffectImportProduct(
+        loadedProjectId.value,
+        currentMode.value,
+        productId,
+        { ...snapshot, expectedRevision },
+        signal,
+      ),
+    (response) => {
+      const latest = productDraftBuffer.get(productId);
+      replaceProduct({
+        ...response.data.product,
+        ...(latest?.value ?? snapshot),
+      });
+      markDraftMutation(response.data.revision);
+    },
+  );
+  if (!result) return false;
+  productDraftBuffer.acknowledge(productId, sentVersion);
+  const latest = productDraftBuffer.get(productId);
+  if (latest) {
+    syncEditableProductSnapshot(productId, latest.value);
+    saveState.value = 'dirty';
+  } else saveState.value = resolveSuccessfulWriteSaveState(hasPendingDraftEdits());
+  if (currentMode.value === 'BATCH' && keyword.value) {
+    await refreshProductList();
+  }
+  return persistNodeState ? saveWorkflowNodeState() : true;
+};
+
+async function flushPendingEdits(): Promise<boolean> {
+  // An accepted deletion already retired the old Run. Wait for its confirmed fallback
+  // context before attempting a navigation save; do not write through the tombstone.
+  if (templateDeletionRefresh) await templateDeletionRefresh;
+  const flushed = await drainPendingEdits(hasPendingDraftEdits, async () => {
+    if (globalDraftBuffer.has() && !(await flushGlobalConfig(false))) return false;
+    for (const productId of productDraftBuffer.keys()) {
+      if (!(await flushProduct(productId, false))) return false;
+    }
+    return true;
+  });
+  if (!flushed || !(await saveWorkflowNodeState())) return false;
+  if (activeStep.value === 1 && infoExtractionNode.value)
+    return infoExtractionNode.value.flushPendingEdits();
+  if (activeStep.value === 2 && promptGenerationNode.value)
+    return promptGenerationNode.value.flushPendingEdits();
+  if (activeStep.value === 3 && segmentRenderNode.value)
+    return segmentRenderNode.value.flushPendingEdits();
+  if (activeStep.value === 4 && templateMixNode.value)
+    return templateMixNode.value.flushPendingEdits();
+  return true;
+}
+
+const createProduct = async (): Promise<void> => {
+  await runWrite(
+    (expectedRevision, signal) =>
+      createEffectImportProduct(
+        loadedProjectId.value,
+        currentMode.value,
+        {
+          commerceUrl: null,
+          configOverride: {},
+          expectedRevision,
+        },
+        signal,
+      ),
+    (response) => {
+      replaceProduct(response.data.product);
+      if (draft.value) draft.value.productCount += 1;
+      markDraftMutation(response.data.revision);
+    },
+  );
+  if (currentMode.value === 'BATCH') await refreshProductList();
+};
+
+const ensureUploadTarget = async (): Promise<void> => {
+  if (!draft.value || uploadTargetInitializing.value) return;
+  const hasUploadTarget =
+    currentMode.value === 'SINGLE'
+      ? Boolean(singleProduct.value || removedProducts.value.length)
+      : Boolean(listedProducts.value.length || keyword.value || removedProducts.value.length);
+  if (hasUploadTarget) return;
+  uploadTargetInitializing.value = true;
+  try {
+    await createProduct();
+  } finally {
+    uploadTargetInitializing.value = false;
+  }
+};
+
+const deleteProduct = async (product: EffectImportProduct): Promise<void> => {
+  if (
+    !(await requestActionConfirmation({
+      eyebrow: '删除产品',
+      title: `将“${product.name || '未命名产品'}”移入最近删除？`,
+      description: '该产品会从当前资料导入列表移除，24 小时内仍可在“最近删除”中恢复。',
+      confirmLabel: '移入最近删除',
+      tone: 'danger',
+    }))
+  )
+    return;
+  await runWrite(
+    (expectedRevision, signal) =>
+      deleteEffectImportProduct(
+        loadedProjectId.value,
+        currentMode.value,
+        product.id,
+        expectedRevision,
+        signal,
+      ),
+    (response) => {
+      if (!draft.value) return;
+      draft.value.products = draft.value.products.filter((item) => item.id !== product.id);
+      listedProducts.value = listedProducts.value.filter((item) => item.id !== product.id);
+      draft.value.productCount = Math.max(0, draft.value.productCount - 1);
+      selectedProductIds.value = new Set(
+        [...selectedProductIds.value].filter((id) => id !== product.id),
+      );
+      productDraftBuffer.discard(product.id);
+      clearTimeout(productTimers.get(product.id));
+      productTimers.delete(product.id);
+      if (response.data.removedProduct) {
+        removedProducts.value = [
+          response.data.removedProduct,
+          ...removedProducts.value.filter((item) => item.id !== product.id),
+        ];
+      }
+      markDraftMutation(response.data.revision);
+    },
+  );
+  if (currentMode.value === 'BATCH' && !keyword.value && !listedProducts.value.length) {
+    await ensureUploadTarget();
+  }
+};
+
+const toggleSelected = (product: EffectImportProduct, selected: boolean): void => {
+  const next = new Set(selectedProductIds.value);
+  if (selected) next.add(product.id);
+  else next.delete(product.id);
+  selectedProductIds.value = next;
+};
+
+const batchDelete = async (): Promise<void> => {
+  const ids = [...selectedProductIds.value];
+  if (!ids.length) return;
+  if (
+    !(await requestActionConfirmation({
+      eyebrow: '批量删除产品',
+      title: `将已选的 ${ids.length} 个产品移入最近删除？`,
+      description: '这些产品会从当前资料导入列表移除，24 小时内仍可在“最近删除”中恢复。',
+      confirmLabel: `删除 ${ids.length} 个产品`,
+      tone: 'danger',
+    }))
+  )
+    return;
+  await runWrite(
+    (expectedRevision, signal) =>
+      batchDeleteEffectImportProducts(
+        loadedProjectId.value,
+        'BATCH',
+        { productIds: ids, expectedRevision },
+        signal,
+      ),
+    (response) => {
+      if (!draft.value) return;
+      const deleted = new Set(response.data.deletedProductIds);
+      draft.value.products = draft.value.products.filter((item) => !deleted.has(item.id));
+      listedProducts.value = listedProducts.value.filter((item) => !deleted.has(item.id));
+      draft.value.productCount = Math.max(0, draft.value.productCount - deleted.size);
+      deleted.forEach((id) => {
+        productDraftBuffer.discard(id);
+        clearTimeout(productTimers.get(id));
+        productTimers.delete(id);
+      });
+      selectedProductIds.value = new Set();
+      const removedIds = new Set(response.data.removedProducts.map((item) => item.id));
+      removedProducts.value = [
+        ...response.data.removedProducts,
+        ...removedProducts.value.filter((item) => !removedIds.has(item.id)),
+      ];
+      markDraftMutation(response.data.revision);
+    },
+  );
+  if (!keyword.value && !listedProducts.value.length) await ensureUploadTarget();
+};
+
+const restoreProduct = async (removedProduct: EffectImportRemovedProduct): Promise<void> => {
+  const result = await runWrite(
+    (expectedRevision, signal) =>
+      restoreEffectImportProduct(
+        loadedProjectId.value,
+        currentMode.value,
+        removedProduct.id,
+        expectedRevision,
+        signal,
+      ),
+    (response) => {
+      replaceProduct(response.data.product);
+      if (draft.value) draft.value.productCount += 1;
+      removedProducts.value = removedProducts.value.filter((item) => item.id !== removedProduct.id);
+      markDraftMutation(response.data.revision);
+    },
+  );
+  if (!result) return;
+  if (currentMode.value === 'BATCH') await refreshProductList();
+  showNotice(`已恢复“${result.data.product.name || '未命名产品'}”`, 'success');
+};
+
+const formatRestoreDeadline = (value: string): string =>
+  new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(value));
+
+const retryProducts = async (productIds: string[]): Promise<void> => {
+  if (!productIds.length) return;
+  let result: BatchRetryEffectImportProductsData | null = null;
+  await runWrite(
+    (expectedRevision, signal) =>
+      batchRetryEffectImportProducts(
+        loadedProjectId.value,
+        currentMode.value,
+        { productIds, expectedRevision },
+        signal,
+      ),
+    (response) => {
+      result = response.data;
+      markDraftMutation(response.data.revision);
+    },
+  );
+  if (result) {
+    const needsFile = (result as BatchRetryEffectImportProductsData).results.filter(
+      (item) => item.status === 'REQUIRES_NEW_FILE',
+    ).length;
+    showNotice(
+      needsFile ? `${needsFile} 项资料需要重新选择文件，其余失败项已重试` : '失败资料已提交重试',
+      needsFile ? 'warning' : 'success',
+    );
+    await reloadCurrentDraft();
+  }
+};
+
+const setMaterialBusy = (key: string, busy: boolean): void => {
+  const next = new Set(busyMaterialIds.value);
+  if (busy) next.add(key);
+  else next.delete(key);
+  busyMaterialIds.value = next;
+};
+
+const setCommerceLinkBusy = (productId: string, busy: boolean): void => {
+  const next = new Set(busyCommerceProductIds.value);
+  if (busy) next.add(productId);
+  else next.delete(productId);
+  busyCommerceProductIds.value = next;
+};
+
+const imageUploadExtensions = new Set(['jpg', 'jpeg', 'png', 'psd', 'webp']);
+const documentUploadExtensions = new Set(['doc', 'docx', 'xls', 'xlsx', 'pdf', 'txt', 'md']);
+const resolveUploadMaterialType = (file: File): EffectImportUploadMaterialType | null => {
+  const extension = file.name.split('.').pop()?.toLocaleLowerCase('en-US') ?? '';
+  if (imageUploadExtensions.has(extension)) return 'PRODUCT_IMAGE';
+  if (documentUploadExtensions.has(extension)) return 'PRODUCT_DOCUMENT';
+  return null;
+};
+
+const uploadMaterials = async (product: EffectImportProduct, files: File[]): Promise<void> => {
+  const unsupportedFiles = files.filter((file) => resolveUploadMaterialType(file) === null);
+  if (unsupportedFiles.length) {
+    showNotice(
+      `有 ${unsupportedFiles.length} 个文件格式不受支持，请选择图片、Word、Excel、PDF 或纯文本资料`,
+      'warning',
+    );
+    return;
+  }
+  if (!(await flushProduct(product.id))) return;
+  const busyKey = `${product.id}:files`;
+  const manifest = files.map((file) => ({
+    file,
+    clientFileId: crypto.randomUUID(),
+    type: resolveUploadMaterialType(file)!,
+  }));
+  const completionKey = crypto.randomUUID();
+  let uploadSessionId = '';
+  setMaterialBusy(busyKey, true);
+  try {
+    await runWrite(
+      async (expectedRevision, signal) => {
+        if (!uploadSessionId) {
+          const created = await createEffectImportUploadSession(
+            loadedProjectId.value,
+            currentMode.value,
+            product.id,
+            {
+              expectedRevision,
+              items: manifest.map(({ file, clientFileId, type }) => ({
+                clientFileId,
+                type,
+                originalFileName: file.name,
+                mimeType: file.type || 'application/octet-stream',
+                sizeBytes: file.size,
+              })),
+            },
+            signal,
+          );
+          uploadSessionId = created.data.id;
+          for (const item of manifest)
+            await uploadEffectImportSessionItem(
+              loadedProjectId.value,
+              uploadSessionId,
+              item.clientFileId,
+              item.file,
+              signal,
+            );
+        }
+        return completeEffectImportUploadSession(
+          loadedProjectId.value,
+          uploadSessionId,
+          { completionKey },
+          signal,
+        );
+      },
+      (response) => {
+        const current =
+          listedProducts.value.find((item) => item.id === product.id) ??
+          draft.value?.products.find((item) => item.id === product.id);
+        if (current)
+          replaceProduct({
+            ...current,
+            materials: [...response.data.materials, ...current.materials],
+          });
+        markDraftMutation(response.data.revision);
+      },
+    );
+  } finally {
+    setMaterialBusy(busyKey, false);
+  }
+};
+
+const requestReplacement = (product: EffectImportProduct, material: EffectImportMaterial): void => {
+  replacementTarget.value = { product, material };
+  replacementInput.value?.click();
+};
+
+const replaceMaterialFile = async (event: Event): Promise<void> => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  const target = replacementTarget.value;
+  replacementTarget.value = null;
+  if (!file || !target) return;
+  if (!(await flushProduct(target.product.id))) return;
+  setMaterialBusy(target.material.id, true);
+  await runWrite(
+    (expectedRevision, signal) =>
+      replaceEffectImportMaterial(
+        loadedProjectId.value,
+        currentMode.value,
+        target.product.id,
+        target.material.id,
+        file,
+        { expectedRevision },
+        signal,
+      ),
+    (response) => applyMaterialMutation(target.product.id, response.data),
+  );
+  setMaterialBusy(target.material.id, false);
+};
+
+const removeMaterial = async (
+  product: EffectImportProduct,
+  material: EffectImportMaterial,
+): Promise<void> => {
+  const materialName = material.originalFileName || material.expectedFileName || '未命名资料';
+  if (
+    !(await requestActionConfirmation({
+      eyebrow: '删除资料',
+      title: `删除“${materialName}”？`,
+      description: '该资料会从当前商品资料包中移除，尚未确认的导入内容也会随之更新。',
+      confirmLabel: '确认删除',
+      tone: 'danger',
+    }))
+  )
+    return;
+  setMaterialBusy(material.id, true);
+  await runWrite(
+    (expectedRevision, signal) =>
+      deleteEffectImportMaterial(
+        loadedProjectId.value,
+        currentMode.value,
+        product.id,
+        material.id,
+        expectedRevision,
+        signal,
+      ),
+    (response) => {
+      replaceProduct({
+        ...product,
+        materials: product.materials.filter((item) => item.id !== material.id),
+      });
+      markDraftMutation(response.data.revision);
+    },
+  );
+  setMaterialBusy(material.id, false);
+};
+
+const checkCommerceLink = async (product: EffectImportProduct): Promise<void> => {
+  const commerceUrl = product.commerceUrl?.trim();
+  if (!commerceUrl || !pageController || busyCommerceProductIds.value.has(product.id)) return;
+  setCommerceLinkBusy(product.id, true);
+  try {
+    const response = await validateEffectImportLink(
+      loadedProjectId.value,
+      currentMode.value,
+      product.id,
+      { commerceUrl },
+      pageController.signal,
+    );
+    if (response.data.valid && response.data.normalizedUrl) {
+      updateProductField(product, 'commerceUrl', response.data.normalizedUrl);
+      if (!(await flushProduct(product.id))) return;
+      showNotice('电商链接已保存到当前商品资料包，暂未解析页面内容');
+    } else showNotice(response.data.issue?.message ?? '电商链接格式不正确', 'error');
+  } catch (error) {
+    if (!isAbortError(error))
+      showNotice(error instanceof Error ? error.message : '电商链接保存失败', 'error');
+  } finally {
+    setCommerceLinkBusy(product.id, false);
+  }
+};
+
+const removeCommerceLink = async (product: EffectImportProduct): Promise<void> => {
+  if (!product.commerceUrl || busyCommerceProductIds.value.has(product.id)) return;
+  if (
+    !(await requestActionConfirmation({
+      eyebrow: '删除电商链接',
+      title: '删除当前商品的电商链接？',
+      description: '链接会从当前商品资料包中移除，已经填写的其他资料不会受到影响。',
+      confirmLabel: '确认删除',
+      tone: 'danger',
+    }))
+  )
+    return;
+  setCommerceLinkBusy(product.id, true);
+  try {
+    if (!(await flushProduct(product.id, false))) return;
+    const result = await runWrite(
+      (expectedRevision, signal) =>
+        updateEffectImportProduct(
+          loadedProjectId.value,
+          currentMode.value,
+          product.id,
+          { commerceUrl: null, expectedRevision },
+          signal,
+        ),
+      (response) => {
+        replaceProduct(response.data.product);
+        markDraftMutation(response.data.revision);
+      },
+    );
+    if (!result || !(await saveWorkflowNodeState())) return;
+    showNotice('电商链接已从当前商品资料包删除');
+  } finally {
+    setCommerceLinkBusy(product.id, false);
+  }
+};
+
+const startManifestPreview = async (
+  manifest: File,
+  files: File[],
+  idempotencyKey: string,
+): Promise<void> => {
+  manifestBusy.value = true;
+  manifestError.value = '';
+  const result = await runWrite((expectedRevision, signal) =>
+    previewEffectManifest(
+      loadedProjectId.value,
+      manifest,
+      files,
+      expectedRevision,
+      idempotencyKey,
+      signal,
+    ),
+  );
+  if (result) {
+    manifestCommitKeys.bind(result.data.id, idempotencyKey);
+    manifestPreview.value = result.data;
+  } else manifestError.value = '清单预览失败，请检查文件后重试';
+  manifestBusy.value = false;
+};
+
+const commitManifest = async (idempotencyKey: string): Promise<void> => {
+  if (!manifestPreview.value) return;
+  manifestBusy.value = true;
+  const importId = manifestPreview.value.id;
+  const stableIdempotencyKey = manifestCommitKeys.bind(importId, idempotencyKey);
+  const result = await runWrite(
+    (expectedRevision, signal) =>
+      commitEffectManifest(
+        loadedProjectId.value,
+        importId,
+        { expectedRevision, idempotencyKey: stableIdempotencyKey },
+        signal,
+      ),
+    (response) => markDraftMutation(response.data.revision),
+  );
+  manifestBusy.value = false;
+  if (!result) return;
+  manifestCommitKeys.forget(importId);
+  manifestPreview.value = null;
+  manifestOpen.value = false;
+  showNotice(`已从清单写入 ${result.data.createdProductCount} 个产品`);
+  await reloadCurrentDraft();
+};
+
+const cancelManifest = async (): Promise<void> => {
+  const preview = manifestPreview.value;
+  if (!preview) return;
+  const result = await runWrite(
+    (expectedRevision, signal) =>
+      cancelEffectManifest(loadedProjectId.value, preview.id, expectedRevision, signal),
+    (response) => markDraftMutation(response.data.revision),
+  );
+  if (result) {
+    manifestCommitKeys.forget(preview.id);
+    manifestPreview.value = null;
+  }
+};
+
+const downloadTemplate = async (format: EffectManifestFormat): Promise<void> => {
+  if (!loadedProjectId.value || !pageController) return;
+  try {
+    const result = await downloadEffectManifestTemplate(
+      loadedProjectId.value,
+      format,
+      pageController.signal,
+    );
+    const url = URL.createObjectURL(result.blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = result.fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    showNotice(`${format.toUpperCase()} 模板已下载`);
+  } catch (error) {
+    if (!isAbortError(error))
+      showNotice(error instanceof Error ? error.message : '模板下载失败', 'error');
+  }
+};
+
+const downloadProductPackageTemplate = async (): Promise<void> => {
+  if (!loadedProjectId.value || !pageController) return;
+  try {
+    const result = await downloadEffectProductPackageTemplate(
+      loadedProjectId.value,
+      pageController.signal,
+    );
+    const url = URL.createObjectURL(result.blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = result.fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    showNotice('Word 资料包模板已下载');
+  } catch (error) {
+    if (!isAbortError(error))
+      showNotice(error instanceof Error ? error.message : '资料包模板下载失败', 'error');
+  }
+};
+
+const validateDraft = async (): Promise<void> => {
+  if (transitioning.value || validatingDraft.value) return;
+  if (!(await flushPendingEdits())) {
+    showNotice('仍有修改保存失败，请保存后再校验', 'error');
+    return;
+  }
+  validatingDraft.value = true;
+  const response = await runWrite(
+    (expectedRevision, signal) =>
+      validateEffectImportDraft(
+        loadedProjectId.value,
+        currentMode.value,
+        { expectedRevision },
+        signal,
+      ),
+    (result) => setDraft(result.data.draft),
+  );
+  validatingDraft.value = false;
+  if (response?.data.validation.valid) {
+    try {
+      const published = await publishEffectNodeEdit(
+        loadedProjectId.value,
+        workspace.value!.workflowRunId,
+        'SOURCE_IMPORT',
+      );
+      showNotice(
+        published.data.createdBranch
+          ? '资料版本已保存，已创建新分支'
+          : response.data.artifacts.every((artifact) => artifact.unchanged)
+            ? '资料内容未变化，保持当前版本'
+            : '资料版本已保存',
+      );
+      await refreshActiveRunInPlace(loadedProjectId.value);
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : '资料版本发布失败，请重试', 'error');
+    }
+  } else if (response) {
+    showNotice(`发现 ${response.data.validation.issues.length} 项问题，请修复后重试`, 'warning');
+  }
+};
+
+const beginSourceEdit = async (): Promise<void> => {
+  const workflowRunId = workspace.value?.workflowRunId;
+  if (!loadedProjectId.value || !workflowRunId || sourceEditBusy.value || sourceEditing.value)
+    return;
+  sourceEditBusy.value = true;
+  try {
+    const result = await beginEffectNodeEdit(loadedProjectId.value, workflowRunId, 'SOURCE_IMPORT');
+    if (result.data.run.id !== workflowRunId) await refreshActiveRunInPlace(loadedProjectId.value);
+    else sourceEditing.value = true;
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '进入资料编辑失败', 'error');
+  } finally {
+    sourceEditBusy.value = false;
+  }
+};
+
+const cancelSourceEdit = async (): Promise<void> => {
+  const run = activeWorkflowRun.value;
+  if (!run?.isTemporaryBranch || run.editNodeId !== 'SOURCE_IMPORT' || sourceEditBusy.value) return;
+  if (!(await confirmDiscardEffectEdit())) return;
+  if (activeWorkflowRun.value?.id !== run.id || sourceEditBusy.value) return;
+  sourceEditBusy.value = true;
+  try {
+    await cancelEffectNodeEdit(loadedProjectId.value, run.id, 'SOURCE_IMPORT');
+    await refreshActiveRunInPlace(loadedProjectId.value);
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '取消资料编辑失败', 'error');
+  } finally {
+    sourceEditBusy.value = false;
+  }
+};
+
+const advanceDraft = async (): Promise<void> => {
+  if (!validatedCurrentRevision.value) return;
+  const response = await runWrite((expectedRevision, signal) =>
+    advanceEffectImportDraft(
+      loadedProjectId.value,
+      currentMode.value,
+      { expectedRevision },
+      signal,
+    ),
+  );
+  if (!response || !workspace.value) return;
+  workspace.value.currentNode = 'AI_INFO_EXTRACTION';
+  workspace.value.nodeStatuses.SOURCE_IMPORT = 'COMPLETED';
+  workspace.value.nodeStatuses.AI_INFO_EXTRACTION = 'AVAILABLE';
+  activeStep.value = 1;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  enqueueWorkflowNodeActivation(
+    loadedProjectId.value,
+    workspace.value.workflowRunId,
+    'INFORMATION_EXTRACTION',
+  );
+  scheduleAdjacentWorkspacePrefetch();
+};
+
+const selectWorkflowStep = async (step: number): Promise<void> => {
+  if (step < 0 || step > 5 || step === activeStep.value || transitioning.value) return;
+  // Start the target's read while the current node flushes its pending edits. The prefetch is
+  // read-only and scope-keyed; a failed flush still leaves the current page and business state intact.
+  const targetPrefetch = prefetchWorkflowStep(step);
+  if (targetPrefetch) void targetPrefetch.catch(() => undefined);
+  pendingStep.value = step;
+  beginTransition();
+  try {
+    if (!(await flushPendingEdits())) {
+      showNotice('节点草稿保存失败，已阻止切换', 'error');
+      return;
+    }
+    const workflowRunId = workspace.value?.workflowRunId;
+    const nodeId = effectWorkflowNodeIds[step];
+    if (!workflowRunId || !nodeId) return;
+    branchNavigation.value = effectTemplateStepNavigation(
+      loadedProjectId.value,
+      workflowRunId,
+      activeStep.value,
+      step,
+      activeStep.value === 4 ? (templateMixNode.value?.getCurrentTemplateId() ?? null) : null,
+    );
+    activeStep.value = step;
+    if (step !== 4) mixPreviewTarget.value = null;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    enqueueWorkflowNodeActivation(loadedProjectId.value, workflowRunId, nodeId);
+    scheduleAdjacentWorkspacePrefetch();
+  } finally {
+    pendingStep.value = null;
+    endTransition();
+  }
+};
+
+const returnToOutputTemplateMix = async (templateId?: string): Promise<void> => {
+  const projectId = currentProjectId.value;
+  const workflowRunId = workspace.value?.workflowRunId;
+  await selectWorkflowStep(4);
+  if (
+    templateId &&
+    projectId &&
+    workflowRunId &&
+    projectId === currentProjectId.value &&
+    workflowRunId === workspace.value?.workflowRunId &&
+    activeStep.value === 4
+  ) {
+    branchNavigation.value = {
+      projectId,
+      workflowRunId,
+      templateId,
+      nodeId: 'TEMPLATE_MIX',
+      mixStage: null,
+    };
+  }
+};
+
+const prefetchBranchTree = (projectId: string): void => {
+  branchPrefetchController?.abort();
+  const controller = new AbortController();
+  branchPrefetchController = controller;
+  void getEffectWorkflowBranchTree(projectId, controller.signal)
+    .then((result) => {
+      if (
+        branchPrefetchController === controller &&
+        !controller.signal.aborted &&
+        loadedProjectId.value === projectId &&
+        !branchTree.value
+      )
+        branchTree.value = result.data;
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (branchPrefetchController === controller) branchPrefetchController = null;
+    });
+};
+
+const loadBranchTree = async (): Promise<void> => {
+  if (!currentProjectId.value) return;
+  branchController?.abort();
+  const controller = new AbortController();
+  branchController = controller;
+  const projectId = currentProjectId.value;
+  branchTreeLoading.value = true;
+  branchTreeError.value = '';
+  try {
+    if (!(await flushPendingEdits())) {
+      if (branchController === controller && !controller.signal.aborted)
+        branchTreeError.value = '节点草稿保存失败，请重试后查看版本树';
+      return;
+    }
+    if (controller.signal.aborted || currentProjectId.value !== projectId) return;
+    const result = await getEffectWorkflowBranchTree(projectId, controller.signal);
+    if (branchController === controller && currentProjectId.value === projectId)
+      branchTree.value = result.data;
+  } catch (error) {
+    if (!isAbortError(error) && branchController === controller)
+      branchTreeError.value = error instanceof Error ? error.message : '加载版本分支失败';
+  } finally {
+    if (branchController === controller) branchTreeLoading.value = false;
+  }
+};
+const openBranchTree = (): void => {
+  branchTreeTemplateId.value =
+    activeStep.value === 4 ? (templateMixNode.value?.getBranchTreeTemplateId() ?? null) : null;
+  branchTreeViewedRunId.value =
+    activeStep.value === 4 ? (templateMixNode.value?.getBranchTreeWorkflowRunId() ?? null) : null;
+  branchTreeOpen.value = true;
+  void loadBranchTree();
+};
+const closeBranchTree = (): void => {
+  if (branchSwitching.value) return;
+  branchTreeOpen.value = false;
+  branchController?.abort();
+};
+const selectBranch = async (
+  destination: Omit<EffectBranchNavigation, 'projectId'>,
+): Promise<void> => {
+  if (!currentProjectId.value || branchSwitching.value || transitioning.value) return;
+  branchSwitching.value = true;
+  const projectId = currentProjectId.value;
+  const target: EffectBranchNavigation = { ...destination, projectId };
+  try {
+    if (!(await flushPendingEdits()) || hasPendingDraftEdits()) {
+      showNotice('节点草稿保存失败，已阻止节点跳转', 'error');
+      return;
+    }
+    if (currentProjectId.value !== projectId) return;
+    // Drain older page activations before changing the active branch.
+    await nodeActivation.drain();
+    if (currentProjectId.value !== projectId) return;
+    const switchedRun = workspace.value?.workflowRunId !== target.workflowRunId;
+    const selectingTemplatePath = Boolean(
+      target.templateId &&
+      (target.nodeId === 'FINAL_OUTPUT' ||
+        target.mixStage === 'FILL' ||
+        target.mixStage === 'PACKAGING'),
+    );
+    if (switchedRun || selectingTemplatePath)
+      await activateEffectWorkflowBranch(projectId, target.workflowRunId, undefined, {
+        templateId: selectingTemplatePath ? target.templateId : null,
+      });
+    if (currentProjectId.value !== projectId) return;
+    branchNavigation.value = target;
+    mixPreviewTarget.value = null;
+    branchTreeOpen.value = false;
+    branchController?.abort();
+    if (switchedRun) await loadProject(projectId, target);
+    else {
+      activeStep.value = effectWorkflowNodeIds.indexOf(target.nodeId);
+      enqueueWorkflowNodeActivation(projectId, target.workflowRunId, target.nodeId);
+      scheduleAdjacentWorkspacePrefetch();
+    }
+    if (
+      currentProjectId.value === projectId &&
+      workspace.value?.workflowRunId === target.workflowRunId
+    ) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      if (switchedRun) showBranchSwitchToast('已切换至所选版本分支及节点');
+    }
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '切换版本分支失败', 'error');
+  } finally {
+    branchSwitching.value = false;
+  }
+};
+
+const forkCurrentBranch = async (): Promise<void> => {
+  const projectId = currentProjectId.value;
+  const runId = branchTree.value?.activeWorkflowRunId;
+  if (!projectId || !runId || branchSwitching.value) return;
+  if (activeWorkflowRun.value?.isTemporaryBranch) {
+    showNotice('请先保存或取消当前编辑，再新建分支', 'warning');
+    return;
+  }
+  branchSwitching.value = true;
+  try {
+    if (!(await flushPendingEdits()) || hasPendingDraftEdits()) {
+      showNotice('节点草稿保存失败，已阻止新建分支', 'error');
+      return;
+    }
+    await createEffectWorkflowBranch(projectId, runId, crypto.randomUUID());
+    branchTreeOpen.value = false;
+    branchController?.abort();
+    await loadProject(projectId);
+    showNotice('已从当前已确认内容新建分支');
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '新建分支失败', 'error');
+  } finally {
+    branchSwitching.value = false;
+  }
+};
+
+const previewFinalOutputItem = async (selection: {
+  workflowRunId: string;
+  templateId: string;
+  variantId: string;
+}): Promise<void> => {
+  const workflowRunId = workspace.value?.workflowRunId;
+  if (!currentProjectId.value || !workflowRunId) return;
+  // Opening a pending film is editor navigation, never a project/history branch switch.
+  // The workbench scopes its own reads and saves to this exact source Run.
+  mixPreviewTarget.value = {
+    projectId: currentProjectId.value,
+    ...selection,
+  };
+  await selectWorkflowStep(4);
+  if (activeStep.value !== 4) mixPreviewTarget.value = null;
+};
+
+const handleFinalOutputWorkflowRunChange = async (selection?: {
+  workflowRunId: string;
+  templateId: string;
+}): Promise<void> => {
+  const projectId = currentProjectId.value;
+  const previousRunId = workspace.value?.workflowRunId;
+  if (!projectId) return;
+  if (selection)
+    branchNavigation.value = {
+      projectId,
+      ...selection,
+      nodeId: 'FINAL_OUTPUT',
+      mixStage: null,
+    };
+  await refreshActiveRunInPlace(projectId, { showCurtain: false });
+  if (
+    selection &&
+    currentProjectId.value === projectId &&
+    workspace.value?.workflowRunId !== selection.workflowRunId
+  )
+    await refreshActiveRunInPlace(projectId, { showCurtain: false });
+  if (
+    selection &&
+    currentProjectId.value === projectId &&
+    previousRunId &&
+    previousRunId !== selection.workflowRunId &&
+    workspace.value?.workflowRunId === selection.workflowRunId
+  )
+    showBranchSwitchToast('成片导出完成，已自动切换至新成片分支');
+};
+
+const enterPromptBoundary = (): void => void selectWorkflowStep(2);
+
+const resumeWorkflowNode = async (nodeId: string): Promise<boolean> => {
+  const stepByNode: Record<string, number> = {
+    SOURCE_IMPORT: 0,
+    INFORMATION_EXTRACTION: 1,
+    PROMPT_GENERATION: 2,
+    SEGMENT_RENDER: 3,
+    TEMPLATE_MIX: 4,
+    FINAL_OUTPUT: 5,
+  };
+  const step = stepByNode[nodeId];
+  if (step === undefined) return false;
+  await selectWorkflowStep(step);
+  return activeStep.value === step;
+};
+
+const handleProjectSelection = async (projectId: string): Promise<void> => {
+  const sequence = ++projectSelectionSequence;
+  const previousProjectId = loadedProjectId.value;
+  if (projectId === previousProjectId && pageStatus.value !== 'idle') return;
+  activeRunRefreshQueue.invalidate();
+  beginTransition();
+  try {
+    if (previousProjectId && projectId !== previousProjectId) {
+      const saved = await flushPendingEdits();
+      if (sequence !== projectSelectionSequence) return;
+      if (!saved || hasPendingDraftEdits()) {
+        showNotice('当前项目仍有未保存修改，已阻止项目切换', 'error');
+        projectContext.selectProject(previousProjectId);
+        return;
+      }
+    }
+    if (sequence === projectSelectionSequence) await loadProject(projectId);
+  } finally {
+    endTransition();
+  }
+};
+
+watch(currentProjectId, (projectId) => void handleProjectSelection(projectId), { immediate: true });
+watch(
+  () =>
+    products.value
+      .filter((product) => product.status === 'ACTIVE')
+      .map((product) => `${product.id}:${product.updatedAt}`)
+      .join('|'),
+  () => scheduleAdjacentWorkspacePrefetch(),
+);
+watch(keyword, () => {
+  if (currentMode.value !== 'BATCH') return;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => void refreshProductList(), 300);
+});
+
+const warnBeforeUnload = (event: BeforeUnloadEvent): void => {
+  if (!hasPendingDraftEdits() && saveState.value !== 'saveError') return;
+  event.preventDefault();
+  void saveWorkflowNodeState(true);
+};
+
+onMounted(() => window.addEventListener('beforeunload', warnBeforeUnload));
+
+defineExpose({
+  flushPendingEdits,
+  resumeWorkflowNode,
+  workflowRunId: computed(() => workspace.value?.workflowRunId ?? ''),
+});
+
+onBeforeUnmount(() => {
+  activeRunRefreshQueue.invalidate();
+  branchController?.abort();
+  branchPrefetchController?.abort();
+  window.removeEventListener('beforeunload', warnBeforeUnload);
+  clearPendingTimers();
+  clearTimeout(noticeTimer);
+  clearTimeout(branchSwitchToastTimer);
+  clearEffectWorkspacePrefetches();
+  nodeActivation.invalidate();
+  pageController?.abort();
+  listController?.abort();
+  generationGate.invalidate();
+});
+</script>
+
+<template>
+  <div class="effect-import-page" :class="{ 'effect-import-page--editing': editingCurrentNode }">
+    <Transition name="notice">
+      <div v-if="notice" class="effect-notice" :class="notice.kind" role="status">
+        {{ notice.text }}
+      </div>
+    </Transition>
+    <WorkflowNavigationFeedback
+      :pending-step-label="pendingStepLabel"
+      :context-switching="runContextSwitching"
+      :branch-toast="branchSwitchToast"
+    />
+
+    <section v-if="pageStatus === 'idle'" class="page-state">
+      <PackageOpen :size="34" />
+      <h2>请选择一个项目</h2>
+      <p>资料包草稿将按当前项目严格隔离保存。</p>
+    </section>
+    <WorkflowPageLoading
+      v-else-if="pageStatus === 'loading'"
+      icon="import"
+      description="正在读取当前项目的产品资料和导入草稿…"
+    />
+    <section v-else-if="pageStatus === 'error'" class="page-state error">
+      <AlertCircle :size="34" />
+      <h2>资料包工作区加载失败</h2>
+      <p>{{ pageError }}</p>
+      <button type="button" @click="loadProject(currentProjectId)">
+        <RefreshCw :size="14" />重新加载
+      </button>
+    </section>
+
+    <template v-else>
+      <EffectWorkflowCanvas
+        :active-step="activeStep"
+        :stale-counts="canvasStaleCounts"
+        @select="selectWorkflowStep"
+        @branches="openBranchTree"
+      />
+      <WorkflowEditingBanner
+        v-if="editingCurrentNode"
+        :node-label="effectWorkflowNodeLabels[activeStep] ?? ''"
+        :description="
+          activeStep === 2 || activeStep === 3
+            ? '修改先保存在隔离草稿；保存修改会更新当前分支，取消编辑会放弃本次修改。'
+            : '修改会先保存在当前编辑副本；保存版本后才会发布，取消编辑会放弃本次修改。'
+        "
+      />
+      <EffectWorkflowBranchTree
+        v-if="branchTreeOpen"
+        :project-name="projectContext.currentProject.value?.name ?? '当前项目'"
+        :tree="branchTree"
+        :loading="branchTreeLoading"
+        :error="branchTreeError"
+        :switching="branchSwitching"
+        :fork-disabled="Boolean(activeWorkflowRun?.isTemporaryBranch)"
+        :active-template-id="branchTreeTemplateId"
+        :viewed-workflow-run-id="branchTreeViewedRunId"
+        @close="closeBranchTree"
+        @retry="loadBranchTree"
+        @select="selectBranch"
+        @fork="forkCurrentBranch"
+      />
+
+      <KeepAlive :max="4">
+        <EffectInfoExtractionNodePage
+          v-if="activeStep === 1"
+          :key="`extraction:${currentProjectId}:${workspace?.workflowRunId ?? ''}`"
+          ref="infoExtractionNode"
+          :project-id="currentProjectId"
+          :workflow-run-id="workspace?.workflowRunId ?? ''"
+          :draft-id="draft?.id ?? ''"
+          :mode="currentMode"
+          :products="draft?.products ?? []"
+          :temporary-branch="Boolean(activeWorkflowRun?.isTemporaryBranch)"
+          :active-edit-node-id="activeWorkflowRun?.editNodeId ?? null"
+          @back="selectWorkflowStep(0)"
+          @next="enterPromptBoundary"
+          @workflow-run-change="refreshActiveRunInPlace(currentProjectId)"
+        />
+
+        <EffectPromptGenerationNodePage
+          v-else-if="activeStep === 2"
+          :key="`prompt:${currentProjectId}`"
+          ref="promptGenerationNode"
+          :project-id="currentProjectId"
+          :workflow-run-id="workspace?.workflowRunId ?? ''"
+          :products="products"
+          :editing="Boolean(activeWorkflowRun?.isTemporaryBranch && activeWorkflowRun.editNodeId === 'PROMPT_GENERATION')"
+          @back="selectWorkflowStep(1)"
+          @next="selectWorkflowStep(3)"
+          @branch-activated="handlePromptWorkflowRunChange"
+          @workflow-run-change="refreshActiveRunInPlace(currentProjectId)"
+        />
+
+        <EffectSegmentRenderNodePage
+          v-else-if="activeStep === 3"
+          :key="`render:${currentProjectId}`"
+          ref="segmentRenderNode"
+          :project-id="currentProjectId"
+          :workflow-run-id="workspace?.workflowRunId ?? ''"
+          :products="products"
+          :editing="
+            Boolean(
+              activeWorkflowRun?.isTemporaryBranch &&
+              activeWorkflowRun.editNodeId === 'SEGMENT_RENDER',
+            )
+          "
+          @back="selectWorkflowStep(2)"
+          @next="selectWorkflowStep(4)"
+          @workflow-run-change="handleSegmentRenderWorkflowRunChange"
+        />
+
+        <EffectTemplateMixNodePage
+          v-else-if="activeStep === 4"
+          :key="`mix:${currentProjectId}`"
+          ref="templateMixNode"
+          :project-id="currentProjectId"
+          :workflow-run-id="workspace?.workflowRunId ?? ''"
+          :published-workflow-run-id="
+            activeWorkflowRun?.isTemporaryBranch ? activeWorkflowRun.parentWorkflowRunId : null
+          "
+          :products="products"
+          :branch-navigation="branchNavigation"
+          :preview-target="mixPreviewTarget"
+          @back="selectWorkflowStep(3)"
+          @next="selectWorkflowStep(5)"
+          @workflow-run-change="handleTemplateMixWorkflowRunChange"
+          @template-deleted="handleTemplateDeleted"
+          @mix-freshness="canvasFreshness.acceptMix"
+          @navigation-consumed="
+            branchNavigation = consumeEffectNavigation(branchNavigation, $event)
+          "
+          @preview-consumed="mixPreviewTarget = consumeEffectNavigation(mixPreviewTarget, $event)"
+          @notice="showNotice"
+        />
+        <EffectFinalOutputNodePage
+          v-else-if="activeStep === 5"
+          :key="`output:${currentProjectId}`"
+          :project-id="currentProjectId"
+          :workflow-run-id="workspace?.workflowRunId ?? ''"
+          :branch-navigation="branchNavigation"
+          @back="returnToOutputTemplateMix"
+          @preview="previewFinalOutputItem"
+          @workflow-run-change="handleFinalOutputWorkflowRunChange"
+          @freshness="canvasFreshness.acceptOutputs"
+        />
+      </KeepAlive>
+
+      <template v-if="activeStep === 0">
+        <section class="import-workspace-card">
+          <section class="node-heading">
+            <span>01</span>
+            <div>
+              <h1>资料导入</h1>
+              <p>整理产品图片、文本资料与电商链接</p>
+            </div>
+            <div class="node-heading__actions">
+              <WorkflowNodeEditActions
+                :editing="sourceEditing"
+                :temporary="
+                  Boolean(
+                    activeWorkflowRun?.isTemporaryBranch &&
+                    activeWorkflowRun.editNodeId === 'SOURCE_IMPORT',
+                  )
+                "
+                :disabled="sourceEditBusy || transitioning"
+                :save-disabled="saveState === 'saving' || !draft?.productCount"
+                :saving="validatingDraft"
+                @begin="beginSourceEdit"
+                @cancel="cancelSourceEdit"
+                @save="validateDraft"
+              />
+              <button type="button" @click="downloadProductPackageTemplate">
+                <FileText :size="14" />下载资料包模板
+              </button>
+              <div class="save-indicator" :class="saveState">
+                <CloudUpload :size="14" />{{ saveStateLabel }}
+              </div>
+            </div>
+          </section>
+
+          <section v-if="removedProducts.length" class="recently-removed" aria-live="polite">
+            <div class="recently-removed__heading">
+              <span><RotateCcw :size="15" /></span>
+              <div>
+                <strong>最近删除</strong>
+                <small>24 小时内可恢复，工作副本和关联文件仍保留</small>
+              </div>
+              <button
+                v-if="currentMode === 'SINGLE' && !singleProduct"
+                type="button"
+                :disabled="transitioning || !sourceEditing"
+                @click="createProduct"
+              >
+                <Plus :size="13" />放弃恢复，新建产品
+              </button>
+            </div>
+            <div class="recently-removed__items">
+              <article v-for="item in removedProducts" :key="item.id">
+                <span>
+                  <strong>{{ item.name || '未命名产品' }}</strong>
+                  <small>{{ formatRestoreDeadline(item.purgeAfter) }} 前可恢复</small>
+                </span>
+                <button
+                  type="button"
+                  :disabled="
+                    transitioning ||
+                    !sourceEditing ||
+                    (currentMode === 'SINGLE' && Boolean(singleProduct))
+                  "
+                  :title="
+                    currentMode === 'SINGLE' && singleProduct
+                      ? '单产品模式已有活动产品，无法同时恢复'
+                      : '恢复产品'
+                  "
+                  @click="restoreProduct(item)"
+                >
+                  <RotateCcw :size="13" />恢复
+                </button>
+              </article>
+            </div>
+          </section>
+
+          <div
+            class="import-layout"
+            :class="{ 'batch-mode': currentMode === 'BATCH' }"
+            :inert="transitioning"
+            :aria-busy="transitioning"
+          >
+            <template v-if="currentMode === 'SINGLE'">
+              <section class="import-source-column">
+                <div v-if="!singleProduct" class="upload-target-preparing" role="status">
+                  <PackageOpen v-if="removedProducts.length" :size="24" />
+                  <PackageOpen v-else :size="24" />
+                  <span>{{
+                    removedProducts.length
+                      ? '可恢复最近删除的产品，或新建产品'
+                      : '正在准备素材上传区…'
+                  }}</span>
+                </div>
+                <ProductImportEditor
+                  v-else
+                  :mode="currentMode"
+                  :product="singleProduct"
+                  :busy-material-ids="busyMaterialIds"
+                  :link-busy="busyCommerceProductIds.has(singleProduct.id)"
+                  :disabled="transitioning || !sourceEditing"
+                  @change="updateProductField"
+                  @blur="flushProduct"
+                  @upload="uploadMaterials"
+                  @replace="requestReplacement"
+                  @delete-material="removeMaterial"
+                  @delete-link="removeCommerceLink"
+                  @retry="(product) => retryProducts([product.id])"
+                  @validate-link="checkCommerceLink"
+                />
+              </section>
+            </template>
+
+            <template v-else>
+              <section class="batch-panel">
+                <header class="batch-panel-head">
+                  <div>
+                    <h3>商品卡片列表</h3>
+                    <p>每个商品独立填写产品名称，并维护资料与电商链接</p>
+                  </div>
+                  <div class="batch-toolbar">
+                    <label class="batch-search"
+                      ><Search :size="14" /><input
+                        v-model="keyword"
+                        type="search"
+                        placeholder="搜索产品名称、电商链接或资料文件"
+                    /></label>
+                    <button type="button" :disabled="!sourceEditing" @click="manifestOpen = true">
+                      <FileSpreadsheet :size="14" />清单导入
+                    </button>
+                    <button
+                      class="primary"
+                      type="button"
+                      :disabled="!sourceEditing"
+                      @click="createProduct"
+                    >
+                      <Plus :size="14" />新增商品
+                    </button>
+                  </div>
+                </header>
+                <section class="batch-actions">
+                  <span>当前 {{ products.length }} 个产品 · 已选 {{ selectedCount }} 个</span>
+                  <button
+                    type="button"
+                    :disabled="!sourceEditing || !selectedCount"
+                    @click="retryProducts([...selectedProductIds])"
+                  >
+                    <RefreshCw :size="13" />失败重试
+                  </button>
+                  <button
+                    class="danger"
+                    type="button"
+                    :disabled="!sourceEditing || !selectedCount"
+                    @click="batchDelete"
+                  >
+                    <Trash2 :size="13" />批量删除
+                  </button>
+                </section>
+                <div v-if="!products.length && keyword" class="batch-search-empty">
+                  没有匹配的商品，请调整搜索条件。
+                </div>
+                <div v-else-if="!products.length" class="upload-target-preparing" role="status">
+                  <PackageOpen v-if="removedProducts.length" :size="24" />
+                  <PackageOpen v-else :size="24" />
+                  <span>{{
+                    removedProducts.length ? '可从上方恢复最近删除的产品' : '正在准备素材上传区…'
+                  }}</span>
+                </div>
+                <div v-else class="batch-product-list">
+                  <ProductImportEditor
+                    v-for="product in products"
+                    :key="product.id"
+                    batch
+                    :mode="currentMode"
+                    :position="products.indexOf(product) + 1"
+                    :product="product"
+                    :disabled="transitioning || !sourceEditing"
+                    :selected="selectedProductIds.has(product.id)"
+                    :busy-material-ids="busyMaterialIds"
+                    :link-busy="busyCommerceProductIds.has(product.id)"
+                    @select="toggleSelected"
+                    @change="updateProductField"
+                    @blur="flushProduct"
+                    @delete="deleteProduct"
+                    @upload="uploadMaterials"
+                    @replace="requestReplacement"
+                    @delete-material="removeMaterial"
+                    @delete-link="removeCommerceLink"
+                    @retry="(item) => retryProducts([item.id])"
+                    @validate-link="checkCommerceLink"
+                  />
+                </div>
+              </section>
+            </template>
+          </div>
+
+          <section v-if="validationErrors.length" class="validation-panel">
+            <header>
+              <AlertCircle :size="16" /><span
+                >校验未通过，共 {{ validationErrors.length }} 项需要处理</span
+              >
+            </header>
+            <div>
+              <p
+                v-for="(issue, index) in validationErrors.slice(0, 8)"
+                :key="`${issue.code}-${index}`"
+              >
+                {{ issue.productId ? '产品资料：' : '' }}{{ issue.message }}
+              </p>
+            </div>
+          </section>
+
+          <WorkflowNodeFooter
+            :show-validate="false"
+            :next-disabled="transitioning || !validatedCurrentRevision || saveState === 'saving'"
+            next-label="下一步：信息提炼"
+            @next="advanceDraft"
+          />
+        </section>
+      </template>
+    </template>
+
+    <input
+      ref="replacementInput"
+      class="visually-hidden"
+      type="file"
+      @change="replaceMaterialFile"
+    />
+    <BatchManifestImportDialog
+      :open="manifestOpen"
+      :busy="manifestBusy"
+      :error="manifestError"
+      :preview="manifestPreview"
+      :commit-idempotency-key="manifestCommitIdempotencyKey"
+      @close="manifestOpen = false"
+      @cancel="cancelManifest"
+      @download="downloadTemplate"
+      @preview="startManifestPreview"
+      @commit="commitManifest"
+    />
+  </div>
+</template>
+
+<style scoped>
+.effect-import-page {
+  --effect-blue: #2563eb;
+  min-height: 100%;
+  margin: 18px;
+  padding: 26px 28px 30px;
+  color: #17233a;
+  background: #fff;
+  border: 1px solid #dbe4f6;
+  border-radius: 26px;
+  box-shadow: 0 12px 34px #7a4e3b12;
+}
+.effect-import-page--editing {
+  background: linear-gradient(180deg, #fffaf1 0, #fff 260px);
+  border-color: #edc881;
+  box-shadow:
+    0 0 0 3px #f2c9752b,
+    0 12px 34px #7a4e3b12;
+}
+.effect-notice {
+  position: fixed;
+  top: 145px;
+  right: 24px;
+  z-index: 1100;
+  max-width: 420px;
+  padding: 11px 15px;
+  color: #245643;
+  background: #effaf5;
+  border: 1px solid #b7e3d3;
+  border-radius: 10px;
+  box-shadow: 0 12px 30px #1a2a4430;
+  font-size: 11px;
+  font-weight: 800;
+}
+.effect-notice.warning {
+  color: #926123;
+  background: #fff9eb;
+  border-color: #f3d69a;
+}
+.effect-notice.error {
+  color: #a84148;
+  background: #fff3f2;
+  border-color: #f3c6c4;
+}
+.notice-enter-active,
+.notice-leave-active {
+  transition: 0.2s ease;
+}
+.notice-enter-from,
+.notice-leave-to {
+  opacity: 0;
+  transform: translateY(-7px);
+}
+.page-state {
+  min-height: 430px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  color: #7f8da2;
+  text-align: center;
+}
+.page-state > svg {
+  color: #2563eb;
+}
+.page-state h2 {
+  margin: 13px 0 5px;
+  color: #34445c;
+  font-size: 18px;
+}
+.page-state p {
+  margin: 0;
+  font-size: 11px;
+}
+.page-state button {
+  display: inline-flex;
+  height: 35px;
+  margin-top: 15px;
+  padding: 0 13px;
+  align-items: center;
+  gap: 6px;
+  color: #fff;
+  background: #2563eb;
+  border: 0;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 800;
+}
+.page-state.error > svg {
+  color: #d65355;
+}
+.import-workspace-card {
+  margin-top: 18px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.node-heading {
+  display: flex;
+  min-height: 56px;
+  margin-bottom: 14px;
+  padding: 0 2px 14px;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #e9eef6;
+  border-radius: 0;
+  box-shadow: none;
+}
+.node-heading > span {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  place-items: center;
+  color: #d93946;
+  background: #fff0ed;
+  border-radius: 14px;
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+.node-heading h1,
+.node-heading p {
+  margin: 0;
+}
+.node-heading h1 {
+  color: #263247;
+  font-size: 16px;
+}
+.node-heading p {
+  margin-top: 3px;
+  color: #8792a4;
+  font-size: 11px;
+}
+.save-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #708098;
+  font-size: 9px;
+  font-weight: 800;
+}
+.save-indicator.saving {
+  color: #2563eb;
+}
+.save-indicator.saveError {
+  color: #d65355;
+}
+.save-indicator.dirty {
+  color: #b47a26;
+}
+.node-heading__actions {
+  display: flex;
+  margin-left: auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.node-heading__actions > button {
+  display: inline-flex;
+  height: 36px;
+  padding: 0 13px;
+  align-items: center;
+  gap: 6px;
+  color: #3f5f8c;
+  background: #fff;
+  border: 1px solid #cbd8ea;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.recently-removed {
+  margin: -4px 0 16px;
+  padding: 10px 12px;
+  color: #53667f;
+  background: #f7faff;
+  border: 1px solid #dce7f6;
+  border-radius: 12px;
+}
+.recently-removed__heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.recently-removed__heading > span {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  color: #2563eb;
+  background: #eaf1ff;
+  border-radius: 8px;
+}
+.recently-removed__heading > div {
+  display: grid;
+  margin-right: auto;
+  gap: 2px;
+}
+.recently-removed strong {
+  color: #243852;
+  font-size: 10px;
+}
+.recently-removed small {
+  color: #8290a3;
+  font-size: 9px;
+}
+.recently-removed button {
+  display: inline-flex;
+  height: 28px;
+  padding: 0 9px;
+  align-items: center;
+  gap: 5px;
+  color: #2563eb;
+  background: #fff;
+  border: 1px solid #bdd0f1;
+  border-radius: 7px;
+  font-size: 9px;
+  font-weight: 800;
+}
+.recently-removed button:disabled {
+  color: #9aa7b8;
+  background: #f3f5f8;
+  border-color: #dce2ea;
+  cursor: not-allowed;
+}
+.recently-removed__items {
+  display: flex;
+  margin-top: 8px;
+  padding-top: 8px;
+  gap: 7px;
+  overflow-x: auto;
+  border-top: 1px solid #e3ebf7;
+}
+.recently-removed__items article {
+  display: flex;
+  min-width: 190px;
+  padding: 7px 8px;
+  align-items: center;
+  gap: 10px;
+  background: #fff;
+  border: 1px solid #e1e8f2;
+  border-radius: 9px;
+}
+.recently-removed__items article > span {
+  display: grid;
+  min-width: 0;
+  margin-right: auto;
+  gap: 2px;
+}
+.recently-removed__items article strong,
+.recently-removed__items article small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.18fr) minmax(360px, 0.82fr);
+  gap: 16px;
+  align-items: stretch;
+}
+.import-layout.batch-mode {
+  grid-template-columns: 1fr;
+}
+.import-source-column {
+  min-width: 0;
+}
+.import-layout:not(.batch-mode) > .import-source-column {
+  display: contents;
+}
+.import-layout:not(.batch-mode) > .import-source-column > :deep(.product-editor:not(.batch)) {
+  display: contents;
+}
+.import-layout:not(.batch-mode) :deep(.upload-source-card) {
+  min-height: 500px;
+  height: 100%;
+  box-sizing: border-box;
+  align-self: stretch;
+  grid-column: 1;
+  grid-row: 1 / span 2;
+}
+.import-layout:not(.batch-mode) :deep(.commerce-parse) {
+  grid-column: 2;
+  grid-row: 1;
+}
+.import-layout:not(.batch-mode) :deep(.imported-materials) {
+  min-height: 0;
+  grid-column: 2;
+  grid-row: 2;
+}
+.import-layout:not(.batch-mode) :deep(.commit-footer) {
+  grid-column: 1 / -1;
+  grid-row: 3;
+}
+.upload-target-preparing {
+  display: flex;
+  min-height: 240px;
+  padding: 30px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: #8090a6;
+  background: #fff;
+  border: 1px dashed #bfcde0;
+  border-radius: 18px;
+  text-align: center;
+}
+.upload-target-preparing svg {
+  color: #2563eb;
+}
+.upload-target-preparing span {
+  font-size: 11px;
+  font-weight: 700;
+}
+.batch-search-empty {
+  padding: 52px 20px;
+  color: #8090a6;
+  background: #fff;
+  border: 1px dashed #bfcde0;
+  border-radius: 18px;
+  font-size: 11px;
+  text-align: center;
+}
+.batch-toolbar {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  align-items: center;
+  gap: 7px;
+  background: transparent;
+  border: 0;
+}
+.batch-search {
+  position: relative;
+  display: flex;
+  min-width: 150px;
+  flex: 1;
+  align-items: center;
+}
+.batch-search svg {
+  position: absolute;
+  left: 9px;
+  color: #8794a6;
+}
+.batch-search input {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px 0 29px;
+  border: 1px solid #d7dfeb;
+  border-radius: 8px;
+  outline: 0;
+  font-size: 10px;
+}
+.batch-toolbar > button,
+.batch-actions button {
+  display: inline-flex;
+  height: 36px;
+  padding: 0 10px;
+  align-items: center;
+  gap: 5px;
+  color: #42628f;
+  background: #fff;
+  border: 1px solid #cfdbec;
+  border-radius: 8px;
+  white-space: nowrap;
+  font-size: 9px;
+  font-weight: 800;
+}
+.batch-toolbar > button.primary {
+  color: #fff;
+  background: #2563eb;
+  border-color: #2563eb;
+}
+.batch-actions {
+  display: flex;
+  min-height: 40px;
+  margin-bottom: 9px;
+  padding: 6px 9px;
+  align-items: center;
+  gap: 7px;
+  color: #7e8b9e;
+  background: #f7faff;
+  border: 1px solid #dce6f5;
+  border-radius: 10px;
+  font-size: 9px;
+}
+.batch-actions span {
+  margin-right: auto;
+}
+.batch-actions button {
+  height: 27px;
+}
+.batch-actions button.danger {
+  color: #d65355;
+  border-color: #efc9c9;
+}
+.batch-product-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.batch-panel {
+  padding: 20px;
+  background: #fff;
+  border: 1px solid #f0e3dc;
+  border-radius: 20px;
+}
+.batch-panel-head {
+  display: flex;
+  margin-bottom: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.batch-panel-head h3,
+.batch-panel-head p {
+  margin: 0;
+}
+.batch-panel-head h3 {
+  color: #263247;
+  font-size: 15px;
+}
+.batch-panel-head p {
+  margin-top: 4px;
+  color: #9198a7;
+  font-size: 12px;
+}
+.batch-global-config {
+  position: static !important;
+  width: 100%;
+  box-sizing: border-box;
+}
+.validation-panel {
+  margin-top: 14px;
+  padding: 12px 14px;
+  color: #9f4c46;
+  background: #fff7f5;
+  border: 1px solid #ffd4cb;
+  border-radius: 12px;
+}
+.validation-panel header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 800;
+}
+.validation-panel div {
+  display: grid;
+  margin-top: 7px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+}
+.validation-panel p {
+  margin: 0;
+  font-size: 9px;
+}
+.batch-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+.ai-placeholder {
+  display: flex;
+  min-height: 460px;
+  padding: 50px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  background: #fff;
+  border: 1px solid #dbe4f2;
+  border-radius: 18px;
+  text-align: center;
+}
+.ai-placeholder > span {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  color: #2563eb;
+  background: #eaf2ff;
+  border-radius: 18px;
+}
+.ai-placeholder > small {
+  margin-top: 16px;
+  color: #2563eb;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+.ai-placeholder h2 {
+  margin: 7px 0 6px;
+  color: #2f3f57;
+  font-size: 20px;
+}
+.ai-placeholder p {
+  max-width: 520px;
+  margin: 0;
+  color: #8490a4;
+  font-size: 11px;
+  line-height: 1.8;
+}
+.ai-placeholder button {
+  display: inline-flex;
+  height: 35px;
+  margin-top: 18px;
+  padding: 0 12px;
+  align-items: center;
+  gap: 5px;
+  color: #2563eb;
+  background: #f2f6ff;
+  border: 1px solid #b9cff6;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.visually-hidden {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+@media (max-width: 1180px) {
+  .import-layout {
+    grid-template-columns: 1fr;
+  }
+  .import-layout:not(.batch-mode) :deep(.upload-source-card),
+  .import-layout:not(.batch-mode) :deep(.commerce-parse),
+  .import-layout:not(.batch-mode) :deep(.imported-materials),
+  .import-layout:not(.batch-mode) :deep(.commit-footer) {
+    min-height: auto;
+    grid-column: 1;
+    grid-row: auto;
+  }
+  .node-heading {
+    flex-wrap: wrap;
+  }
+  .batch-product-list {
+    grid-template-columns: 1fr;
+  }
+  .batch-panel-head {
+    flex-direction: column;
+  }
+}
+@media (max-width: 680px) {
+  .effect-import-page {
+    margin: 8px;
+    padding: 14px;
+    border-radius: 20px;
+  }
+  .import-workspace-card {
+    padding: 14px;
+    border-radius: 18px;
+  }
+  .node-heading > div:nth-child(2) {
+    width: calc(100% - 60px);
+  }
+  .node-heading__actions {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+  .node-heading p {
+    display: none;
+  }
+  .batch-toolbar {
+    flex-wrap: wrap;
+  }
+  .batch-search {
+    width: 100%;
+    flex-basis: 100%;
+  }
+  .validation-panel div {
+    grid-template-columns: 1fr;
+  }
+  .effect-notice {
+    top: 126px;
+    right: 14px;
+    left: 14px;
+  }
+  .import-mode-segment button small {
+    display: none;
+  }
+}
+</style>

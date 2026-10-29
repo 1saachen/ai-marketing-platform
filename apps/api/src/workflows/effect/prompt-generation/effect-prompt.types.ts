@@ -1,0 +1,107 @@
+import type {
+  EffectPromptBatchResult,
+  EffectPromptBatchSettings,
+  EffectPromptItem,
+  EffectPromptManualOverrides,
+  EffectPromptOperation,
+  EffectPromptSharedPrompt,
+} from '@ai-marketing/contracts';
+
+export type EffectPromptProductImageReference = {
+  fileObjectId: string;
+  originalFileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+};
+
+export type EffectPromptInputSnapshot = {
+  projectId: string;
+  workflowRunId: string;
+  productId: string;
+  operation: EffectPromptOperation;
+  targetItemId: string | null;
+  settings: EffectPromptBatchSettings;
+  insightArtifact: {
+    id: string;
+    revision: number;
+    contentHash: string;
+    result: unknown;
+  };
+  /**
+   * Immutable references to the PRODUCT_IMAGE files consumed by the confirmed
+   * marketing insight. Storage locations and signed URLs never enter the Run
+   * snapshot; the active Worker lease resolves bytes through an internal API.
+   */
+  productImages?: EffectPromptProductImageReference[];
+  /** API-owned hash of the insight plus immutable product-image references. */
+  factVisualStrategySourceHash?: string;
+  retainedManualItems: EffectPromptItem[];
+  /** Freezes the selector implementation so an in-flight Run cannot change on resume. */
+  selectionPolicy: 'MMR_CONTENT';
+  /** Fixed items that influence semantic novelty but are never selected or removed. */
+  similarityAnchors?: EffectPromptItem[];
+  /** Carries user-authored batch-level content into regeneration without copying it to items. */
+  sharedPrompt?: EffectPromptSharedPrompt | null;
+  /** Present for ITEM_REGENERATE so the API can preserve stable identity and order. */
+  targetItem?: EffectPromptItem | undefined;
+  targetItemIndex?: number | undefined;
+  /** Requested duration for the regenerated candidates; absent on historical runs. */
+  regenerationTargetDurationSeconds?: number | undefined;
+  /** Effective dimensions used by ITEM_REGENERATE, including the old-client fallback. */
+  replacementDimensions?: EffectPromptItem['dimensions'] | undefined;
+  /** Trimmed, low-priority user direction. Empty input is persisted as null. */
+  regenerationInstruction?: string | null | undefined;
+  regenerationMode?:
+    | 'FULL_REGENERATE'
+    | 'AUTO_DIVERSE'
+    | 'PRESERVE_PRODUCT_RELATION'
+    | 'NEW_CREATIVE'
+    | 'CUSTOM'
+    | null
+    | undefined;
+  regenerationReasons?: Array<
+    | 'PRODUCT_RELATION_WEAK'
+    | 'CREATIVE_ORDINARY'
+    | 'TOO_SIMILAR'
+    | 'SCENE_UNSUITABLE'
+    | 'ACTION_UNREASONABLE'
+    | 'CAMERA_TOO_COMPLEX'
+    | 'CUSTOM'
+  >;
+  preservedDimensions?: Array<keyof EffectPromptItem['dimensions']>;
+  /** Stable identity of the draft used to start an item operation. */
+  baseResultId?: string | null;
+  baseResultRevision: number | null;
+};
+
+export type EffectPromptStageInput = {
+  status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'PARTIAL' | 'SKIPPED' | 'FAILED';
+  summary: string;
+  warnings: string[];
+  metadata: unknown;
+};
+
+export type EffectPromptShardInput = {
+  status: EffectPromptStageInput['status'];
+  combinationPlan: unknown;
+  items: unknown;
+  creativePlan?: unknown;
+  creativeItems?: unknown;
+  classificationPlan?: unknown;
+  evaluations?: unknown;
+  warnings: string[];
+  errorCode?: string | null;
+  errorMessage?: string | null;
+};
+
+export type EffectPromptCompleteInput = {
+  result: EffectPromptBatchResult;
+  executionMode: 'ARK' | 'MOCK';
+};
+
+export const emptyManualOverrides = (): EffectPromptManualOverrides => ({
+  edited: {},
+  added: [],
+  deleted: [],
+});

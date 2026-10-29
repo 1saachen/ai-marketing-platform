@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from .api_client import HttpInternalApi
+from .browser_renderer import PlaywrightCommerceRenderer
+from .commerce import HttpxCommerceFetcher
+from .config import WorkerSettings, get_settings
+from .consumer import ExtractionConsumer
+from .docling_parser import LocalDoclingParser
+from .graph import build_graph
+from .image_processing import ImageProcessor
+from .pipeline import ExtractionPipeline
+from .providers import AiProvider, ArkResponsesProvider, MockAiProvider
+
+
+def _provider(settings: WorkerSettings) -> AiProvider:
+    if settings.extraction_ai_provider == "mock":
+        return MockAiProvider()
+    assert settings.ark_api_key is not None
+    return ArkResponsesProvider(
+        base_url=str(settings.ark_base_url),
+        api_key=settings.ark_api_key.get_secret_value(),
+        model=settings.ark_model,
+        document_model=settings.resolved_document_model,
+        commerce_model=settings.resolved_commerce_model,
+        image_model=settings.resolved_image_model,
+        semantic_model=settings.resolved_semantic_model,
+        normalization_model=settings.resolved_normalization_model,
+        timeout=settings.ark_timeout_seconds,
+        document_timeout=settings.ark_document_timeout_seconds,
+        document_max_attempts=settings.ark_document_max_attempts,
+        document_max_output_tokens=settings.ark_document_max_output_tokens,
+        document_reasoning_effort=settings.ark_document_reasoning_effort,
+        image_timeout=settings.ark_image_timeout_seconds,
+        image_max_attempts=settings.ark_image_max_attempts,
+        image_max_output_tokens=settings.ark_image_max_output_tokens,
+        image_retry_max_output_tokens=settings.ark_image_retry_max_output_tokens,
+        image_detail=settings.ark_image_detail,
+        image_reasoning_effort=settings.ark_image_reasoning_effort,
+        image_adaptive_high_detail=settings.ark_image_adaptive_high_detail,
+        semantic_timeout=settings.ark_semantic_timeout_seconds,
+        semantic_max_attempts=settings.ark_semantic_max_attempts,
+        semantic_max_output_tokens=settings.ark_semantic_max_output_tokens,
+        semantic_reasoning_effort=settings.ark_semantic_reasoning_effort,
+        semantic_user_review_reasoning_effort=(
+            settings.ark_semantic_user_review_reasoning_effort
+        ),
+    )
+
+
+async def serve(settings: WorkerSettings) -> None:
+    api = HttpInternalApi(
+        str(settings.internal_api_base_url),
+        settings.effect_extraction_worker_token.get_secret_value(),
+        timeout=settings.api_timeout_seconds,
+    )
+    provider = _provider(settings)
+    commerce_renderer = PlaywrightCommerceRenderer(
+        max_concurrency=settings.commerce_renderer_max_concurrency,
+        timeout_seconds=settings.commerce_renderer_timeout_seconds,
+        max_dom_bytes=settings.commerce_renderer_max_dom_bytes,
+        settle_milliseconds=settings.commerce_renderer_settle_milliseconds,
+    )
+    consumer: ExtractionConsumer | None = None
+    try:
+        await commerce_renderer.start()
+        pipeline = ExtractionPipeline(
+            api=api,
+            provider=provider,
+            document_parser=LocalDoclingParser(
+                artifacts_path=settings.docling_artifacts_path,
+                max_file_size=settings.docling_max_file_size,
+                max_num_pages=settings.docling_max_num_pages,
+            ),
+            image_processor=ImageProcessor(
+                max_input_bytes=settings.image_max_input_bytes,
+                max_dimension=settings.image_max_dimension,
+                max_output_bytes=settings.image_max_output_bytes,
+            ),
+            max_document_text_chars=settings.max_document_text_chars,
+            document_chunk_text_chars=settings.document_chunk_text_chars,
+            document_max_concurrency=settings.document_max_concurrency,
+            image_max_concurrency=settings.image_max_concurrency,
+            commerce_fetcher=HttpxCommerceFetcher(
+                renderer=commerce_renderer,
+                connect_timeout=settings.commerce_static_connect_timeout_seconds,
+                read_timeout=settings.commerce_static_read_timeout_seconds,
+            ),
+            max_commerce_text_chars=settings.max_commerce_text_chars,
+        )
+        consumer = ExtractionConsumer(
+            rabbitmq_url=settings.rabbitmq_url.get_secret_value(),
+            queue_name=settings.effect_extraction_queue,
+            api=api,
+            pipeline=pipeline,
+            graph=build_graph(pipeline),
+        )
+        await consumer.run()
+    finally:
+        if consumer is not None:
+            await consumer.close()
+        await commerce_renderer.close()
+        await api.aclose()
+        close = getattr(provider, "aclose", None)
+        if close is not None:
+            await close()
+
+
+def main() -> None:
+    settings = get_settings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    asyncio.run(serve(settings))
+
+
+if __name__ == "__main__":
+    main()

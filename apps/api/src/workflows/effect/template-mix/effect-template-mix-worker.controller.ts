@@ -1,0 +1,163 @@
+import { AuthAccess } from '../../../platform/auth/auth-access.decorator';
+import { pipeline } from 'node:stream/promises';
+import type { ServerResponse } from 'node:http';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Inject,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Put,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import { RawResponse } from '../../../common/raw-response.decorator';
+import { fileContentDisposition } from '../../../platform/file/content-disposition';
+// Worker body DTOs must remain runtime values for Nest validation metadata.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import {
+  EffectTemplateMixWorkerClassificationDto,
+  EffectTemplateMixWorkerCompleteDto,
+  EffectTemplateMixWorkerFailDto,
+  EffectTemplateMixWorkerProgressDto,
+  EffectTemplateMixWorkerProjectDto,
+  EffectTemplateMixWorkerSamplingDto,
+} from './dto/effect-template-mix.dto';
+import { EffectTemplateMixService } from './effect-template-mix.service';
+import { EffectTemplateMixWorkerGuard } from './effect-template-mix-worker.guard';
+import { EffectTemplateMixCompletionService } from './effect-template-mix-completion.service';
+
+@Controller('internal/workers/effect-template-mix')
+@AuthAccess('independent')
+@UseGuards(EffectTemplateMixWorkerGuard)
+export class EffectTemplateMixWorkerController {
+  constructor(
+    @Inject(EffectTemplateMixService) private readonly service: EffectTemplateMixService,
+    @Inject(EffectTemplateMixCompletionService)
+    private readonly completion: EffectTemplateMixCompletionService,
+  ) {}
+
+  @Post('runs/:runId/claim')
+  claim(
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+    @Body() body: EffectTemplateMixWorkerProjectDto,
+  ) {
+    return this.completion.claim(body.projectId, runId);
+  }
+
+  @Put('runs/:runId/progress')
+  progress(
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+    @Headers('x-attempt-token') attemptToken: string,
+    @Body() body: EffectTemplateMixWorkerProgressDto,
+  ) {
+    return this.service.updateAiProgress(
+      body.projectId,
+      runId,
+      attemptToken,
+      body.stage,
+      body.progress,
+    );
+  }
+
+  @Post('runs/:runId/classifications')
+  classify(
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+    @Headers('x-attempt-token') attemptToken: string,
+    @Body() body: EffectTemplateMixWorkerClassificationDto,
+  ) {
+    return this.service.classifyAiRun(
+      body.projectId,
+      runId,
+      attemptToken,
+      body.classifications,
+      body.incrementalPlan,
+    );
+  }
+
+  @Put('runs/:runId/classifications/checkpoint')
+  checkpointClassifications(
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+    @Headers('x-attempt-token') attemptToken: string,
+    @Body() body: EffectTemplateMixWorkerClassificationDto,
+  ) {
+    return this.service.checkpointAiClassifications(
+      body.projectId,
+      runId,
+      attemptToken,
+      body.classifications,
+    );
+  }
+
+  @Put('runs/:runId/sampling/checkpoint')
+  checkpointSampling(
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+    @Headers('x-attempt-token') attemptToken: string,
+    @Body() body: EffectTemplateMixWorkerSamplingDto,
+  ) {
+    return this.service.checkpointAiSampling(body.projectId, runId, attemptToken, {
+      ...(body.samples ? { samples: body.samples } : {}),
+      ...(body.materialIds ? { materialIds: body.materialIds } : {}),
+    });
+  }
+
+  @Put('runs/:runId/trims/checkpoint')
+  checkpointTrims(
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+    @Headers('x-attempt-token') attemptToken: string,
+    @Body() body: EffectTemplateMixWorkerCompleteDto,
+  ) {
+    return this.service.checkpointAiTrims(body.projectId, runId, attemptToken, body.trims);
+  }
+
+  @Post('runs/:runId/complete')
+  complete(
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+    @Headers('x-attempt-token') attemptToken: string,
+    @Body() body: EffectTemplateMixWorkerCompleteDto,
+  ) {
+    return this.completion.complete(body.projectId, runId, attemptToken, body.trims);
+  }
+
+  @Post('runs/:runId/fail')
+  fail(
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+    @Headers('x-attempt-token') attemptToken: string,
+    @Body() body: EffectTemplateMixWorkerFailDto,
+  ) {
+    return this.service.failAiRun(
+      body.projectId,
+      runId,
+      attemptToken,
+      body.errorCode,
+      body.errorMessage,
+      body.retryable,
+    );
+  }
+
+  @Get('runs/:runId/materials/:materialId/content')
+  @RawResponse()
+  async material(
+    @Param('runId', new ParseUUIDPipe({ version: '4' })) runId: string,
+    @Param('materialId', new ParseUUIDPipe({ version: '4' })) materialId: string,
+    @Headers('x-attempt-token') attemptToken: string,
+    @Query() query: EffectTemplateMixWorkerProjectDto,
+    @Res() response: ServerResponse,
+  ): Promise<void> {
+    const source = await this.service.aiVideo(query.projectId, runId, materialId, attemptToken);
+    response.statusCode = 200;
+    response.setHeader('content-type', source.mimeType);
+    response.setHeader('content-length', String(source.contentLength));
+    response.setHeader(
+      'content-disposition',
+      fileContentDisposition('attachment', source.originalFileName),
+    );
+    response.setHeader('x-content-type-options', 'nosniff');
+    response.setHeader('cache-control', 'private, no-store');
+    await pipeline(source.stream, response);
+  }
+}

@@ -1,0 +1,136 @@
+import { describe, expect, it } from 'vitest';
+
+import pageSource from './EffectTemplateMixNodePage.vue?raw';
+import timelineSource from './EffectTemplateMixTimeline.vue?raw';
+
+describe('template mix compositor playback clock', () => {
+  it('prepares audio and video together but starts the clock only after the selected video can play', () => {
+    const start = pageSource
+      .split('const togglePlay =')[1]!
+      .split('const onTimelinePlayerReady')[0]!;
+    expect(start).not.toContain('await audioReady');
+    expect(start.indexOf('syncPlayerToPlayhead(false)')).toBeLessThan(
+      start.indexOf('await Promise.all'),
+    );
+    expect(start).toContain('Promise.all([videoReady, audioReady])');
+    const nativePlay = start.indexOf('const nativePlay = video.play()');
+    expect(nativePlay).toBeGreaterThan(-1);
+    expect(nativePlay).toBeLessThan(start.indexOf('startPlaybackClock()'));
+    expect(start).toContain('waitForNativePlayback(nativePlay, currentStart)');
+    expect(start).toContain('previewStartupReady(ready, soundReady, audioRequired)');
+    expect(start).toContain('startPlaybackAudio(playhead.value, videoReady)');
+    expect(start).toContain('preparePlaybackAudio()');
+    expect(start).toContain('Promise.all([frameReady, audioPrepared, heldAudio])');
+    expect(start).toContain('cancelAnimationFrame(pendingSeekSyncFrame)');
+    expect(start).toContain('if (!ready || !currentStart()) return');
+    expect(start).toContain(
+      'if (!playing.value || !requiredPlayers().includes(video)) video.pause()',
+    );
+  });
+  it('retries late decoded handoffs every frame without republishing the editor playhead', () => {
+    const retry = pageSource
+      .split('// A late decoder must hand off')[1]!
+      .split('playbackAnimationFrame =')[0]!;
+    expect(retry).toContain(
+      'video.paused || displayedTimelineSlotId.value !== activePlaybackSlotId',
+    );
+    expect(retry).toContain('syncPlayingVideoFrame()');
+    expect(retry).not.toContain('playhead.value =');
+    expect(pageSource).toContain('...upcoming.map(({ id }) => id)');
+  });
+  it('holds all transports when the native decoder buffers instead of letting captions skip ahead', () => {
+    const waiting = pageSource
+      .split('const onTimelinePlayerWaiting =')[1]!
+      .split('const onTimelinePlayerReady =')[0]!;
+    expect(pageSource).toContain('@waiting="onTimelinePlayerWaiting(slot.id, $event)"');
+    expect(waiting).toContain('currentPlaybackClockSeconds()');
+    expect(waiting).toContain('stopPlaybackClock(false)');
+    expect(waiting).toContain('holdPlaybackAudio()');
+    expect(waiting).toContain('startPreparedPlayback(true, heldAudio)');
+    expect(pageSource).toContain('videos.every(video => video.readyState >= 3');
+    expect(pageSource).toContain('const expected = transitionPreviewAt(playhead.value) ? 2 : 1');
+    expect(pageSource).toContain('playing.value && !playbackStarting');
+    expect(pageSource).not.toContain('if (video.paused) holdTimelinePlayback(slot.id, video)');
+    expect(pageSource).toContain('startPreparedTimelineVideo(slot.id, video)');
+    expect(pageSource).toContain('preparedVideoHandoff.stalled(activeVideo)');
+    expect(pageSource).toContain(
+      'if (!playbackStarting) playbackAnimationFrame = requestAnimationFrame(updatePlaybackFrame)',
+    );
+  });
+  it('advances all transition animations on the shared clock between UI ticks', () => {
+    expect(pageSource).toContain('animate(outgoing, frames.outgoing)');
+    expect(pageSource).toContain('animate(incoming, frames.incoming)');
+    expect(pageSource).toContain('animate(overlay, frames.overlay)');
+    expect(pageSource).toContain('animation.pause()');
+    expect(pageSource).toContain(
+      'animation.currentTime = Math.max(0, next - transition.start) * 1000',
+    );
+    expect(pageSource).not.toContain("transition.transition !== '叠化'");
+  });
+  it('warms the next clip without reloads and reuses positioned frames at natural boundaries', () => {
+    expect(pageSource).toContain('prepareTimelineVideo(video, timelineVideoSeeks, targetTime');
+    const timelinePreparation = pageSource.slice(
+      pageSource.indexOf('const syncTimelineVideo ='),
+      pageSource.indexOf('const closeMaterialPreview ='),
+    );
+    expect(timelinePreparation.includes('video.load()')).toBe(false);
+    expect(pageSource).not.toContain("entering ? 'drift' : 'once'");
+    expect(pageSource).toContain('const needsSlotSeek = !positionedTimelinePlayers.has(video)');
+    expect(pageSource).toContain('if (incomingRange) primeUpcomingTimelinePlayer(incomingRange)');
+    expect(pageSource).toContain('timelineSourceTime(slot.id, playbackTime)');
+    expect(pageSource).toContain('resume && timelineVideoSeeks.isSettled(video) && video.paused');
+  });
+  it('moves the timeline needle through a linear browser animation', () => {
+    expect(timelineSource).toContain('const startPlaybackNeedle');
+    expect(timelineSource).toContain('playheadElement.value');
+    expect(timelineSource).toContain('element.animate(');
+    expect(timelineSource).toContain("easing: 'linear'");
+    expect(timelineSource).toContain('startPlaybackNeedle,');
+    expect(timelineSource).toContain('stopPlaybackNeedle,');
+  });
+
+  it('animates the player progress separately from Vue playhead renders', () => {
+    expect(pageSource).toContain('const startPlayerScrubberMotion');
+    expect(pageSource).toContain('fill.animate(');
+    expect(pageSource).toContain('thumb.animate(');
+    expect(pageSource).not.toContain('setPlayerScrubber(next)');
+    expect(pageSource).toContain('lastUiPlaybackMilliseconds = performance.now()');
+    expect(pageSource).toContain('v-memo="[');
+  });
+
+  it('freezes playback on pointer-down and invalidates pending resume work', () => {
+    expect(pageSource).toContain('@pointerdown="onPreviewPlaybackPointerDown"');
+    expect(pageSource).toContain('const pausedAt = currentPlaybackClockSeconds()');
+    expect(pageSource).toContain('seekSyncRequestId++');
+    expect(pageSource).toContain('playing.value = false');
+  });
+
+  it('updates the player timecode on every animation frame without a full Vue render', () => {
+    expect(pageSource).toContain('const playerTimecode = ref<HTMLSpanElement | null>(null)');
+    expect(pageSource).toContain(
+      'playerTimecode.value.textContent = formatPlayerTimecode(seconds)',
+    );
+    expect(pageSource).toContain('syncPlayerTimecode(next)');
+    expect(pageSource).toContain('ref="playerTimecode"');
+  });
+
+  it('keeps Space playback available when the player scrubber has focus', () => {
+    const scrubberSpaceHandler = pageSource.indexOf('const onPlayerSpaceKeydown =');
+    const genericInputGuard = pageSource.indexOf(
+      'target?.matches(\'input, textarea, select, [contenteditable="true"]\')',
+    );
+    expect(scrubberSpaceHandler).toBeGreaterThan(-1);
+    expect(genericInputGuard).toBeGreaterThan(scrubberSpaceHandler);
+    expect(pageSource).toContain('!event.repeat && !playerSpacePressed');
+    expect(pageSource).toContain("window.addEventListener('keydown', onPlayerSpaceKeydown, true);");
+  });
+
+  it('steps left and right by one whole frame and clamps at the preview ends', () => {
+    expect(pageSource).toContain(
+      'const lastFrame = Math.max(0, Math.ceil(previewDuration.value * TIMELINE_FPS) - 1)',
+    );
+    expect(pageSource).toContain('Math.round(previewCurrentTime.value * TIMELINE_FPS)');
+    expect(pageSource).toContain('currentFrame + direction');
+    expect(pageSource).toContain('/ TIMELINE_FPS);');
+  });
+});

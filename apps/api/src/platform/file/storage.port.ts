@@ -1,0 +1,60 @@
+import type { Readable } from 'node:stream';
+
+export type StoragePutInput = {
+  projectId: string;
+  stream: Readable;
+  sizeBytes: number;
+  contentType?: string;
+  keyContext: {
+    projectName: string;
+    workflow: string;
+    lifecycle: 'staging' | 'assets' | 'manifest';
+    productId?: string;
+    productName?: string;
+    category: string;
+    originalFileName: string;
+  };
+};
+
+export type SharedStoragePutInput = {
+  collection: string;
+  assetId: string;
+  version: string;
+  extension: string;
+  stream: Readable;
+  sizeBytes: number;
+  contentType?: string;
+};
+
+export type StoredObject = {
+  key: string;
+  sizeBytes: number;
+};
+
+export type StorageRange = {
+  start: number;
+  end: number;
+};
+
+export type StoredStream = {
+  stream: Readable;
+  sizeBytes: number;
+  start: number;
+  end: number;
+  contentLength: number;
+};
+
+export interface StoragePort {
+  put(input: StoragePutInput): Promise<StoredObject>;
+  putShared(input: SharedStoragePutInput): Promise<StoredObject>;
+  open(key: string, range?: StorageRange): Promise<StoredStream>;
+  delete(key: string): Promise<void>;
+  /** Internal provider access only, after validating the frozen file and worker lease. */
+  signedReadUrl?(
+    key: string,
+    expiresSeconds: number,
+    expectedSizeBytes: number,
+  ): Promise<string | null>;
+}
+
+export const STORAGE_PORT = Symbol('StoragePort');

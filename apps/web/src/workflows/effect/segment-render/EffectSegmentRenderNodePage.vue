@@ -1,0 +1,5722 @@
+<script setup lang="ts">
+import WorkflowPageLoading from '../../../platform/workflow/components/WorkflowPageLoading.vue';
+import type {
+  EffectImportProduct,
+  EffectPromptFragmentType,
+  EffectSegmentRenderBatch,
+  EffectSegmentRenderExportFormat,
+  EffectSegmentRenderSettings,
+  EffectSegmentRenderPromptInput,
+  EffectSegmentRenderPromptSettings,
+} from '@ai-marketing/contracts';
+import {
+  DEFAULT_EFFECT_SEGMENT_RENDER_SETTINGS,
+  EFFECT_PROMPT_FRAGMENT_TYPE_LABELS,
+  EFFECT_PROMPT_FRAGMENT_TYPES,
+  EFFECT_PROMPT_DIMENSIONS,
+  EFFECT_SEGMENT_IMPORT_DIMENSION_LIMITS,
+  resolveEffectImportedRenderSettings,
+  effectPromptRenderSettingsIssues,
+} from '@ai-marketing/contracts';
+import { WorkflowNodeFooter, WorkflowRunProgress } from '@ai-marketing/ui';
+import {
+  AlertCircle,
+  Check,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  FileVideo2,
+  FolderInput,
+  LoaderCircle,
+  Pause,
+  Pencil,
+  Play,
+  RefreshCw,
+  Search,
+  Settings2,
+  Sparkles,
+  Trash2,
+  Upload,
+  X,
+} from '@lucide/vue';
+import {
+  computed,
+  nextTick,
+  onActivated,
+  onBeforeUnmount,
+  onMounted,
+  onDeactivated,
+  ref,
+  watch,
+  type Directive,
+} from 'vue';
+
+import { requestActionConfirmation } from '../../../shared/composables/action-confirmation';
+import { confirmDiscardEffectEdit } from '../shared/effect-edit-session';
+import { flushEffectNodeNavigation } from '../shared/effect-node-navigation';
+import {
+  beginEffectWorkflowNodeEdit,
+  cancelEffectWorkflowNodeEdit,
+  listWorkingArtifacts,
+} from '../../../platform/workflow/api/workflow-working.api';
+import { EFFECT_PROMPT_PAGE_SIZE_OPTIONS } from '../prompt-generation/effect-prompt-generation-state';
+import EffectUpwardCreatableSelect from '../source-import/components/EffectUpwardCreatableSelect.vue';
+import EffectSegmentRenderSourcePrompt from './components/EffectSegmentRenderSourcePrompt.vue';
+import EffectPromptRenderConfigurationDialog from './components/EffectPromptRenderConfigurationDialog.vue';
+import { effectSegmentRenderModels as capabilityOptions, type RenderModelOption } from './effect-segment-render-models';
+import {
+  decideEffectSegmentRenderRepair,
+  deleteEffectSegmentRenderMaterials,
+  effectSegmentRenderTaskContentUrl,
+  exportEffectSegmentRenderMaterials,
+  getEffectSegmentRenderTaskContent,
+  getEffectSegmentRenderWorkspace,
+  regenerateEffectSegmentRenderTasks,
+  refreshEffectSegmentRenderBatch,
+  saveEffectSegmentRenderSettings,
+  startEffectSegmentRenderBatch,
+  startEffectSegmentRenderRepair,
+  validateEffectSegmentRenderBatch,
+} from './api/effect-segment-render.api';
+import {
+  EFFECT_SEGMENT_RENDER_PAGE_SIZE,
+  effectSegmentRenderAdditionalPurposes,
+  effectSegmentRenderCardTitle,
+  effectSegmentRenderCurrentProductId,
+  effectSegmentRenderPage,
+  effectSegmentRepairUnavailableReason,
+  effectSegmentRenderPageCount,
+  effectSegmentRenderCreativeCoreMap,
+  effectSegmentRenderPromptDetailsMap,
+  effectSegmentRenderSummary,
+  effectSegmentRenderWorkspaceFromApi,
+  effectSegmentRenderWorkspaceWithBatch,
+  filterEffectSegmentRenderTasks,
+  isEffectSegmentRenderExportable,
+  isEffectSegmentRenderBusy,
+  type EffectSegmentRenderStatus,
+  type EffectSegmentRenderPromptDetails,
+  type EffectSegmentRenderTask,
+  type EffectSegmentRenderWorkspace,
+} from './effect-segment-render-state';
+import { loadEffectSegmentRenderWorkspaceSnapshot } from './services/effect-segment-render-workspace.service';
+import { effectSegmentRenderProgress } from './effect-segment-render-progress';
+import {
+  createEffectSegmentImportBatch,
+  importRecognitionBusy,
+  importRecognitionLabel,
+  importColumnLocked,
+  importColumnReady,
+  importColumnError,
+  type ImportColumn,
+} from './effect-segment-import-batch';
+import {
+  importVideoResolution,
+  importVideoAspectRatio,
+  importVideoFrameRate,
+  importVideoDuration,
+  importVideoPreviewStyle,
+} from './effect-segment-import-media-info';
+
+const props = defineProps<{
+  projectId: string;
+  workflowRunId: string;
+  products: EffectImportProduct[];
+  editing?: boolean;
+}>();
+
+const emit = defineEmits<{ back: []; next: []; 'workflow-run-change': [workflowRunId: string, settled?: () => void] }>();
+
+type PageStatus = 'empty' | 'error' | 'loading' | 'success';
+type Operation = 'prepare' | 'batch' | 'delete' | 'export' | 'import' | 'repair' | 'retry' | 'settings' | null;
+type FragmentFilter = 'ABNORMAL' | 'ALL' | EffectPromptFragmentType;
+type TransferPanel = 'export' | 'import' | null;
+type ExportScope = 'ALL_TASKS' | 'FILTERED' | 'SELECTED';
+type RepairBoundary = 'end' | 'start';
+type Notice = { kind: 'error' | 'success' | 'warning'; text: string };
+
+const pageStatus = ref<PageStatus>('loading');
+const loadError = ref('');
+const workspace = ref<EffectSegmentRenderWorkspace | null>(null);
+const currentProductId = ref('');
+const keyword = ref('');
+const fragmentFilter = ref<FragmentFilter>('ALL');
+const includeCompatiblePurposes = ref(false);
+const page = ref(1);
+const pageSize = ref<number>(EFFECT_SEGMENT_RENDER_PAGE_SIZE);
+const operation = ref<Operation>(null);
+const editRequestPending = ref(false);
+const runSynchronizing = ref(false);
+let runSynchronization: Promise<void> | null = null;
+let synchronizationGeneration = 0;
+let expectedSynchronizedRunId: string | null = null;
+const workspaceSynchronizing = ref(false);
+const editTransitioning = computed(() => editRequestPending.value || runSynchronizing.value || workspaceSynchronizing.value);
+const synchronizeWorkflowRun = (workflowRunId: string): Promise<void> => {
+  const generation = ++synchronizationGeneration;
+  expectedSynchronizedRunId = workflowRunId;
+  runSynchronizing.value = true;
+  const pending = new Promise<void>((resolve) => {
+    emit('workflow-run-change', workflowRunId, () => {
+      if (generation === synchronizationGeneration) {
+        runSynchronizing.value = false;
+        expectedSynchronizedRunId = null;
+      }
+      resolve();
+      if (nodeActive) void pollBatch();
+    });
+  });
+  runSynchronization = pending;
+  void pending.finally(() => {
+    if (runSynchronization === pending) runSynchronization = null;
+  });
+  return pending;
+};
+const notice = ref<Notice | null>(null);
+const transferPanel = ref<TransferPanel>(null);
+const selectionMode = ref(false);
+const selectedTaskIds = ref<Set<string>>(new Set());
+const imports = createEffectSegmentImportBatch({
+  revision: () => workspace.value?.batchRevision,
+  imported: (batch, count) => {
+    applyBatch(batch);
+    showNotice(`已新增 ${count} 个视频素材，保存修改后可用于混剪`);
+    void nextTick(() => transferCloseButton.value?.focus());
+  },
+});
+const importColumns = imports.columns;
+const importError = imports.error;
+const importConfirming = imports.confirming;
+const selectImportPrimary = (column: ImportColumn, purpose: EffectPromptFragmentType): void => {
+  if (!column.draft) return;
+  column.draft.primaryPurpose = purpose;
+  column.draft.compatiblePurposes = [
+    ...new Set([purpose, ...(column.draft.compatiblePurposes ?? [])]),
+  ];
+};
+const handleImportPreviewMetadata = (column: ImportColumn, event: Event): void => {
+  const video = event.currentTarget;
+  if (video instanceof HTMLVideoElement && video.src === column.previewUrl)
+    column.previewSize = readVideoSize(video);
+};
+const handleImportPreviewError = (column: ImportColumn, event: Event): void => {
+  const video = event.currentTarget;
+  if (video instanceof HTMLVideoElement && video.src === column.previewUrl)
+    column.previewError = true;
+};
+const importInput = ref<HTMLInputElement | null>(null);
+const transferCloseButton = ref<HTMLButtonElement | null>(null);
+const exportScope = ref<ExportScope>('ALL_TASKS');
+const exportFormats = ref<EffectSegmentRenderExportFormat[]>(['VIDEO_PACKAGE', 'MANIFEST_JSON']);
+const renderSettings = ref<EffectSegmentRenderSettings>({
+  ...DEFAULT_EFFECT_SEGMENT_RENDER_SETTINGS,
+});
+const renderSettingsRevision = ref<number | null>(null);
+const promptConfiguration = ref<{ inputs: EffectSegmentRenderPromptInput[]; defaults: EffectSegmentRenderSettings } | null>(null);
+let resolvePromptConfiguration: ((settings: EffectSegmentRenderPromptSettings[] | null) => void) | null = null;
+const settlePromptConfiguration = (settings: EffectSegmentRenderPromptSettings[] | null): void => {
+  const resolve = resolvePromptConfiguration;
+  resolvePromptConfiguration = null;
+  promptConfiguration.value = null;
+  resolve?.(settings);
+};
+const creativeCoreByPromptId = ref<Record<string, string>>({});
+const promptDetailsByPromptId = ref<Record<string, EffectSegmentRenderPromptDetails>>({});
+const creativeCoreSourceKey = ref('');
+
+const selectedCapability = computed(
+  () =>
+    capabilityOptions.find(({ value }) => value === renderSettings.value.capabilityKey) ??
+    capabilityOptions[1]!,
+);
+const ratioOptions = computed(() =>
+  selectedCapability.value.ratios.map((value) => ({
+    value,
+    label: value === 'adaptive' ? '自适应' : value,
+  })),
+);
+const resolutionOptions = computed(() =>
+  selectedCapability.value.resolutions.map((value) => ({
+    value,
+    label: value,
+  })),
+);
+
+type EffectSegmentRenderVideoSize = { width: number; height: number };
+
+const effectSegmentRenderFrameStyle = (
+  maxHeightVh: number,
+  videoSize?: EffectSegmentRenderVideoSize | null,
+) => {
+  const configuredRatio = renderSettings.value.ratio;
+  const [widthPart, heightPart] = (configuredRatio === 'adaptive' ? '16:9' : configuredRatio)
+    .split(':')
+    .map(Number);
+  // 画幅设置只作用于新建任务，历史素材可能是在别的画幅下渲染的，所以拿到视频自身的宽高就用它定画框，
+  // 只在元数据到达前用当前设置的画幅占位，否则编辑态与非编辑态会给出不一样的预览画框。
+  const width = videoSize?.width || widthPart || 16;
+  const height = videoSize?.height || heightPart || 9;
+  const widthToHeight = width / height;
+  return {
+    aspectRatio: `${width} / ${height}`,
+    width: `min(100%, calc(${maxHeightVh}vh * ${widthToHeight}))`,
+  };
+};
+
+const previewVideoSize = ref<EffectSegmentRenderVideoSize | null>(null);
+const repairVideoSize = ref<EffectSegmentRenderVideoSize | null>(null);
+
+const previewFrameStyle = computed(() => effectSegmentRenderFrameStyle(62, previewVideoSize.value));
+const repairFrameStyle = computed(() => effectSegmentRenderFrameStyle(44, repairVideoSize.value));
+
+const previewTask = ref<EffectSegmentRenderTask | null>(null);
+const previewVariant = ref<'ACTIVE' | 'REPAIR'>('ACTIVE');
+const previewUrl = ref('');
+const previewLoading = ref(false);
+const previewError = ref('');
+const previewVideoReady = ref(false);
+const cardVideoReadyKeys = ref<Set<string>>(new Set());
+const cardVideoPosterUrls = ref<Map<string, string>>(new Map());
+const requestedTaskVideoKeys = ref<Set<string>>(new Set());
+const failedServerPosterKeys = ref<Set<string>>(new Set());
+const promptTask = ref<EffectSegmentRenderTask | null>(null);
+const repairTask = ref<EffectSegmentRenderTask | null>(null);
+const repairStartSeconds = ref(0);
+const repairEndSeconds = ref(1);
+const repairInstruction = ref('');
+const repairVideo = ref<HTMLVideoElement | null>(null);
+const repairRangePlaying = ref(false);
+const repairCurrentSeconds = ref(0);
+const repairActiveBoundary = ref<RepairBoundary>('start');
+const previewCloseButton = ref<HTMLButtonElement | null>(null);
+const promptCloseButton = ref<HTMLButtonElement | null>(null);
+const repairCloseButton = ref<HTMLButtonElement | null>(null);
+
+const repairSelectionStyle = computed(() => {
+  const duration = repairTask.value?.durationSeconds ?? 0;
+  if (duration <= 0) return { left: '0%', right: '100%' };
+  return {
+    left: `${(repairStartSeconds.value / duration) * 100}%`,
+    right: `${Math.max(0, ((duration - repairEndSeconds.value) / duration) * 100)}%`,
+  };
+});
+
+let dialogTrigger: HTMLElement | null = null;
+let loadController: AbortController | null = null;
+let operationController: AbortController | null = null;
+let pollController: AbortController | null = null;
+let previewController: AbortController | null = null;
+let pollTimer: ReturnType<typeof setTimeout> | undefined;
+let pollEpoch = 0;
+let loadGeneration = 0;
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+let nodeActive = true;
+let activatedOnce = false;
+let skipNextProductLoad = false;
+let taskVideoObserver: IntersectionObserver | null = null;
+let workspaceRevalidationTimer: ReturnType<typeof setTimeout> | undefined;
+
+const TASK_VIDEO_POSTER_MAX_WIDTH = 480;
+const TASK_VIDEO_POSTER_CAPTURE_SECONDS = 0.5;
+const TASK_VIDEO_FALLBACK_CONCURRENCY = 3;
+const taskVideoLoadQueue: string[] = [];
+const activeTaskVideoLoads = new Set<string>();
+const taskVideoPosterCaptures = new Set<string>();
+
+const activeProducts = computed(() =>
+  props.products.filter((product) => product.status === 'ACTIVE'),
+);
+const activeProductSignature = computed(() =>
+  activeProducts.value.map((product) => `${product.id}:${product.name}`).join('|'),
+);
+const currentProduct = computed(
+  () => activeProducts.value.find((product) => product.id === currentProductId.value) ?? null,
+);
+const tasks = computed(() => workspace.value?.tasks ?? []);
+const summary = computed(() => effectSegmentRenderSummary(tasks.value));
+const promptTasks = computed(() =>
+  tasks.value.filter((task) => task.source === 'PROMPT' && !task.independentImport),
+);
+const completedTasks = computed(() => tasks.value.filter(isEffectSegmentRenderExportable));
+const hasBatch = computed(
+  () => Boolean(workspace.value) && workspace.value?.batchStatus !== 'NOT_STARTED',
+);
+const hasConfirmedRender = computed(
+  () =>
+    workspace.value?.workingArtifactRevision !== null &&
+    workspace.value?.workingArtifactRevision !== undefined,
+);
+const canEditMaterials = computed(() => !editTransitioning.value && !workspace.value?.autoCommitPending && Boolean(props.editing || !hasConfirmedRender.value));
+const batchActive = computed(
+  () => workspace.value?.batchStatus === 'QUEUED' || workspace.value?.batchStatus === 'RUNNING',
+);
+const creatingTaskCount = ref<number | null>(null);
+const creatingLocalUpdate = ref(false);
+const updatingProgress = computed(() => creatingLocalUpdate.value || workspace.value?.autoCommitPending ||
+  Boolean(workspace.value?.progressSynchronizedCount || workspace.value?.progressRemovedCount));
+const renderProgress = computed(() => effectSegmentRenderProgress(workspace.value, creatingTaskCount.value));
+const batchProgress = computed(() => renderProgress.value.progress);
+const batchProgressDetail = computed(() => creatingTaskCount.value !== null && creatingLocalUpdate.value
+  ? `正在创建更新，已完成 0/${creatingTaskCount.value} 项` : renderProgress.value.detail);
+const promptCount = computed(() => workspace.value?.promptCount ?? 0);
+const missingPromptCount = computed(() =>
+  workspace.value?.pendingPromptIds?.length ?? Math.max(0, promptCount.value - promptTasks.value.length),
+);
+const isPurposeFilter = (value: FragmentFilter): value is EffectPromptFragmentType =>
+  EFFECT_PROMPT_FRAGMENT_TYPES.includes(value as EffectPromptFragmentType);
+const renderSourceKey = computed(() => {
+  const current = workspace.value;
+  if (!current?.sourcePromptArtifactId || current.sourcePromptRevision === null) return '';
+  return `${current.sourcePromptArtifactId}:${current.sourcePromptRevision}`;
+});
+const cardCreativeCoreByPromptId = computed<Readonly<Record<string, string>>>(() =>
+  renderSourceKey.value && renderSourceKey.value === creativeCoreSourceKey.value
+    ? creativeCoreByPromptId.value
+    : {},
+);
+const cardPromptDetailsByPromptId = computed<
+  Readonly<Record<string, EffectSegmentRenderPromptDetails>>
+>(() =>
+  renderSourceKey.value && renderSourceKey.value === creativeCoreSourceKey.value
+    ? promptDetailsByPromptId.value
+    : {},
+);
+const filteredTasks = computed(() =>
+  filterEffectSegmentRenderTasks(
+    tasks.value,
+    keyword.value,
+    cardCreativeCoreByPromptId.value,
+  ).filter((task) => {
+    if (fragmentFilter.value === 'ALL') return true;
+    if (fragmentFilter.value === 'ABNORMAL') return task.status === 'FAILED';
+    return (
+      task.fragmentType === fragmentFilter.value ||
+      (includeCompatiblePurposes.value &&
+        task.compatibleFragmentTypes.includes(fragmentFilter.value))
+    );
+  }),
+);
+const totalPages = computed(() =>
+  effectSegmentRenderPageCount(filteredTasks.value.length, pageSize.value),
+);
+const pagedTasks = computed(() =>
+  effectSegmentRenderPage(filteredTasks.value, page.value, pageSize.value),
+);
+const selectedTasks = computed(() =>
+  completedTasks.value.filter((task) => selectedTaskIds.value.has(task.id)),
+);
+const selectableFilteredTasks = computed(() =>
+  filteredTasks.value.filter(isEffectSegmentRenderExportable),
+);
+const allFilteredSelected = computed(
+  () =>
+    selectableFilteredTasks.value.length > 0 &&
+    selectableFilteredTasks.value.every((task) => selectedTaskIds.value.has(task.id)),
+);
+const showDeleteMaterials = computed(
+  () => Boolean(props.editing && selectionMode.value),
+);
+const exportRangeTasks = computed(() => {
+  if (exportScope.value === 'SELECTED') return selectedTasks.value;
+  if (exportScope.value === 'FILTERED') return filteredTasks.value;
+  return tasks.value;
+});
+
+const canPreviewTask = (task: EffectSegmentRenderTask): boolean => Boolean(task.output);
+const canRetryTask = (task: EffectSegmentRenderTask): boolean =>
+  !isEffectSegmentRenderBusy(task.status) &&
+  task.updateKind !== 'REMOVE' &&
+  !task.repair &&
+  !(task.needsUpdate && workspace.value?.refreshScope === 'FULL');
+
+const creativeCoreForTask = (task: EffectSegmentRenderTask): string =>
+  effectSegmentRenderCardTitle(task, cardCreativeCoreByPromptId.value[task.promptId]);
+
+const detailsForTask = (task: EffectSegmentRenderTask) => {
+  const confirmedDetails = cardPromptDetailsByPromptId.value[task.promptId];
+  if (!task.independentImport && confirmedDetails) {
+    return confirmedDetails;
+  }
+  if (!task.creativeCore && !Object.values(task.dimensions ?? {}).some(Boolean)) return null;
+  return {
+    creativeCore: task.creativeCore || '未填写',
+    dimensions: Object.fromEntries(
+      EFFECT_PROMPT_DIMENSIONS.map(({ key }) => [key, task.dimensions?.[key] || '未填写']),
+    ) as EffectSegmentRenderPromptDetails['dimensions'],
+  };
+};
+const promptTaskDetails = computed(() =>
+  promptTask.value ? detailsForTask(promptTask.value) : null,
+);
+
+const previewTaskDetails = computed(() =>
+  previewTask.value ? detailsForTask(previewTask.value) : null,
+);
+
+const taskVideoUrl = (task: EffectSegmentRenderTask): string => {
+  const batchId = workspace.value?.batchId;
+  if (!batchId || !task.output) return '';
+  return effectSegmentRenderTaskContentUrl(
+    props.projectId,
+    batchId,
+    task.id,
+    'ACTIVE',
+    'VIDEO',
+    task.output.version,
+  );
+};
+
+const taskVideoKey = (task: EffectSegmentRenderTask): string =>
+  `${task.id}:${task.output?.version ?? task.activeVersion}`;
+
+const isTaskVideoReady = (task: EffectSegmentRenderTask): boolean =>
+  cardVideoReadyKeys.value.has(taskVideoKey(task));
+
+const taskVideoPosterUrl = (task: EffectSegmentRenderTask): string => {
+  const key = taskVideoKey(task);
+  const fallbackPoster = cardVideoPosterUrls.value.get(key);
+  if (fallbackPoster) return fallbackPoster;
+  const batchId = workspace.value?.batchId;
+  if (!batchId || !task.output?.poster || failedServerPosterKeys.value.has(key)) return '';
+  return effectSegmentRenderTaskContentUrl(
+    props.projectId,
+    batchId,
+    task.id,
+    'ACTIVE',
+    'POSTER',
+    task.output.poster.version,
+  );
+};
+
+const shouldLoadTaskVideo = (task: EffectSegmentRenderTask): boolean =>
+  requestedTaskVideoKeys.value.has(taskVideoKey(task));
+
+const setTaskVideoRequested = (key: string, requested: boolean): void => {
+  const next = new Set(requestedTaskVideoKeys.value);
+  if (requested) next.add(key);
+  else next.delete(key);
+  requestedTaskVideoKeys.value = next;
+};
+
+const drainTaskVideoLoadQueue = (): void => {
+  while (activeTaskVideoLoads.size < TASK_VIDEO_FALLBACK_CONCURRENCY && taskVideoLoadQueue.length) {
+    const key = taskVideoLoadQueue.shift();
+    if (!key || cardVideoPosterUrls.value.has(key) || cardVideoReadyKeys.value.has(key)) continue;
+    activeTaskVideoLoads.add(key);
+    setTaskVideoRequested(key, true);
+  }
+};
+
+const finishTaskVideoLoad = (key: string): void => {
+  activeTaskVideoLoads.delete(key);
+  setTaskVideoRequested(key, false);
+  drainTaskVideoLoadQueue();
+};
+
+const cancelTaskVideoLoad = (key: string): void => {
+  if (!key) return;
+  const queuedIndex = taskVideoLoadQueue.indexOf(key);
+  if (queuedIndex >= 0) taskVideoLoadQueue.splice(queuedIndex, 1);
+  if (activeTaskVideoLoads.has(key)) finishTaskVideoLoad(key);
+};
+
+const requestTaskVideo = (key: string): void => {
+  if (!key || cardVideoPosterUrls.value.has(key) || cardVideoReadyKeys.value.has(key)) return;
+  if (
+    requestedTaskVideoKeys.value.has(key) ||
+    activeTaskVideoLoads.has(key) ||
+    taskVideoLoadQueue.includes(key)
+  )
+    return;
+  taskVideoLoadQueue.push(key);
+  drainTaskVideoLoadQueue();
+};
+
+const ensureTaskVideoObserver = (): IntersectionObserver | null => {
+  if (taskVideoObserver) return taskVideoObserver;
+  if (typeof IntersectionObserver === 'undefined') return null;
+  taskVideoObserver = new IntersectionObserver(
+    (entries, observer) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const key = (entry.target as HTMLElement).dataset.taskVideoKey;
+        if (key) requestTaskVideo(key);
+        observer.unobserve(entry.target);
+      });
+    },
+    { rootMargin: '240px 0px', threshold: 0.01 },
+  );
+  return taskVideoObserver;
+};
+
+const vTaskVideoVisible: Directive<HTMLElement, string> = {
+  mounted(element, binding) {
+    element.dataset.taskVideoKey = binding.value;
+    const observer = ensureTaskVideoObserver();
+    if (observer) observer.observe(element);
+    else requestTaskVideo(binding.value);
+  },
+  updated(element, binding) {
+    if (binding.value === binding.oldValue) return;
+    taskVideoObserver?.unobserve(element);
+    element.dataset.taskVideoKey = binding.value;
+    const observer = ensureTaskVideoObserver();
+    if (observer) observer.observe(element);
+    else requestTaskVideo(binding.value);
+  },
+  unmounted(element) {
+    taskVideoObserver?.unobserve(element);
+    cancelTaskVideoLoad(element.dataset.taskVideoKey ?? '');
+  },
+};
+
+const markTaskVideoReady = (task: EffectSegmentRenderTask): void => {
+  const key = taskVideoKey(task);
+  const next = new Set(cardVideoReadyKeys.value);
+  next.add(key);
+  cardVideoReadyKeys.value = next;
+};
+
+const captureTaskVideoPoster = (task: EffectSegmentRenderTask, event: Event): void => {
+  const video = event.currentTarget;
+  if (!(video instanceof HTMLVideoElement) || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)
+    return;
+  markTaskVideoReady(task);
+  const key = taskVideoKey(task);
+  if (cardVideoPosterUrls.value.has(key) || taskVideoPosterCaptures.has(key)) return;
+  if (video.videoWidth < 1 || video.videoHeight < 1) {
+    finishTaskVideoLoad(key);
+    return;
+  }
+  taskVideoPosterCaptures.add(key);
+  try {
+    const scale = Math.min(1, TASK_VIDEO_POSTER_MAX_WIDTH / video.videoWidth);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const context = canvas.getContext('2d');
+    if (!context) {
+      taskVideoPosterCaptures.delete(key);
+      finishTaskVideoLoad(key);
+      return;
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          const posters = new Map(cardVideoPosterUrls.value);
+          posters.set(key, URL.createObjectURL(blob));
+          cardVideoPosterUrls.value = posters;
+        }
+        taskVideoPosterCaptures.delete(key);
+        finishTaskVideoLoad(key);
+      },
+      'image/jpeg',
+      0.76,
+    );
+  } catch {
+    // The decoded video can still be shown when a browser blocks canvas extraction.
+    taskVideoPosterCaptures.delete(key);
+    finishTaskVideoLoad(key);
+  }
+};
+
+const handleTaskVideoLoadError = (task: EffectSegmentRenderTask): void => {
+  finishTaskVideoLoad(taskVideoKey(task));
+};
+
+const handleTaskPosterError = (task: EffectSegmentRenderTask): void => {
+  const next = new Set(failedServerPosterKeys.value);
+  next.add(taskVideoKey(task));
+  failedServerPosterKeys.value = next;
+};
+
+const revealVideoPosterFrame = (task: EffectSegmentRenderTask, event: Event): void => {
+  const video = event.currentTarget;
+  if (!(video instanceof HTMLVideoElement) || !Number.isFinite(video.duration)) return;
+  const targetTime = Math.min(TASK_VIDEO_POSTER_CAPTURE_SECONDS, video.duration / 2);
+  if (Math.abs(video.currentTime - targetTime) < 0.01) {
+    captureTaskVideoPoster(task, event);
+    return;
+  }
+  video.currentTime = targetTime;
+};
+
+const currentProductReady = computed(
+  () =>
+    hasBatch.value &&
+    workspace.value?.batchStatus === 'COMPLETED' &&
+    missingPromptCount.value === 0 &&
+    summary.value.running === 0 &&
+    summary.value.failed === 0 &&
+    tasks.value.every((task) => !task.repair) &&
+    (!workspace.value?.stale || workspace.value?.canSaveFrozenResults) &&
+    operation.value === null,
+);
+const canStartBatch = computed(
+  () =>
+    Boolean(workspace.value?.promptReady && workspace.value.promptArtifactRevision) &&
+    (promptCount.value > 0 || workspace.value?.refreshScope === 'SELECTIVE') &&
+    !batchActive.value && !editTransitioning.value,
+);
+const tasksNeedingUpdate = computed(() => tasks.value.filter((task) => task.needsUpdate));
+const incrementalTaskCount = computed(
+  () => tasksNeedingUpdate.value.length + (workspace.value?.pendingPromptIds?.length ?? 0),
+);
+const startButtonLabel = computed(() => {
+  if (operation.value === 'batch') return '正在创建任务…';
+  if (batchActive.value) return `${updatingProgress.value ? '更新中' : '渲染中'} ${renderProgress.value.completed}/${renderProgress.value.total}`;
+  if (!workspace.value?.promptReady) return '等待上游 Prompt 生成可用版本';
+  if (workspace.value?.stale && workspace.value.refreshScope === 'SELECTIVE')
+    return `局部更新（${incrementalTaskCount.value}）`;
+  if (workspace.value?.stale) return '重新渲染';
+  if (hasBatch.value) return '重新渲染';
+  return `开始批量渲染（${promptCount.value}）`;
+});
+const currentCapabilityLabel = computed(
+  () =>
+    capabilityOptions.find((option) => option.value === renderSettings.value.capabilityKey)
+      ?.label ?? renderSettings.value.capabilityKey,
+);
+
+const isAbortError = (error: unknown): boolean =>
+  error instanceof DOMException ? error.name === 'AbortError' : false;
+
+const safeMessage = (error: unknown, fallback: string): string => {
+  const message = error instanceof Error ? error.message : fallback;
+  return message
+    .replace(/(?:https?|tos|s3):\/\/\S+/giu, '[链接已隐藏]')
+    .replace(/[a-z]:\\(?:[^\\\s]+\\)+[^\s]+/giu, '[路径已隐藏]')
+    .slice(0, 300);
+};
+
+const showNotice = (text: string, kind: Notice['kind'] = 'success'): void => {
+  notice.value = { text, kind };
+  if (noticeTimer) clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => (notice.value = null), 3000);
+};
+
+const stopPolling = (): void => {
+  pollEpoch += 1;
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = undefined;
+  pollController?.abort();
+  pollController = null;
+};
+
+const needsPolling = (nextWorkspace: EffectSegmentRenderWorkspace): boolean =>
+  nextWorkspace.batchStatus === 'QUEUED' ||
+  nextWorkspace.batchStatus === 'RUNNING' ||
+  nextWorkspace.tasks.some(
+    (task) => task.repair?.status === 'QUEUED' || task.repair?.status === 'RENDERING',
+  );
+
+const pollBatch = async (): Promise<void> => {
+  const current = workspace.value;
+  if (!current?.batchId || !nodeActive || pollController || current.workflowRunId !== props.workflowRunId ||
+    current.productId !== currentProductId.value || workspaceSynchronizing.value || runSynchronizing.value) return;
+  if (operation.value || document.visibilityState === 'hidden') {
+    schedulePolling(current);
+    return;
+  }
+  const productId = current.productId;
+  const batchId = current.batchId;
+  const workflowRunId = props.workflowRunId;
+  const epoch = pollEpoch;
+  const controller = new AbortController();
+  pollController = controller;
+  try {
+    // A shared pool may belong to an ancestor, while saved Prompt edits belong to this Run.
+    // Poll the workspace projection; the owner's raw batch cannot represent this net difference.
+    const response = await getEffectSegmentRenderWorkspace(props.projectId, workflowRunId, productId, controller.signal);
+    if (
+      controller.signal.aborted ||
+      epoch !== pollEpoch ||
+      productId !== currentProductId.value ||
+      workflowRunId !== props.workflowRunId ||
+      response.data.workflowRunId !== props.workflowRunId
+    )
+      return;
+    const next = effectSegmentRenderWorkspaceFromApi(response.data);
+    if ((next.batchId === batchId && (next.batchRevision ?? 0) < (current.batchRevision ?? 0)) ||
+      (next.promptArtifactRevision ?? 0) < (current.promptArtifactRevision ?? 0)) return;
+    applyWorkspace(next);
+  } catch (error) {
+    if (!isAbortError(error) && !controller.signal.aborted && epoch === pollEpoch &&
+      workflowRunId === props.workflowRunId && productId === currentProductId.value) {
+      showNotice(safeMessage(error, '刷新视频渲染进度失败，将自动重试'), 'warning');
+      pollTimer = setTimeout(() => { pollTimer = undefined; void pollBatch(); }, 5000);
+    }
+  } finally {
+    if (pollController === controller) {
+      pollController = null;
+      // Ignoring a stale response must not end the polling chain. In particular,
+      // a prefetch or a late response may carry an older Prompt revision.
+      if (nodeActive && !controller.signal.aborted &&
+        workflowRunId === props.workflowRunId && productId === currentProductId.value &&
+        workspace.value?.batchId === batchId && !pollTimer)
+        schedulePolling(workspace.value);
+    }
+  }
+};
+
+const schedulePolling = (nextWorkspace: EffectSegmentRenderWorkspace): void => {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = undefined;
+  if (nodeActive && nextWorkspace.batchId)
+    pollTimer = setTimeout(() => { pollTimer = undefined; void pollBatch(); }, needsPolling(nextWorkspace) ? 3000 : 10000);
+};
+
+const applyWorkspace = (nextWorkspace: EffectSegmentRenderWorkspace): void => {
+  if (nextWorkspace.productId !== currentProductId.value) return;
+  pollEpoch += 1;
+  const previousStatus = workspace.value?.batchStatus;
+  const previousCommitStatus = workspace.value?.commitStatus;
+  workspace.value = nextWorkspace;
+  if (
+    (previousStatus === 'QUEUED' || previousStatus === 'RUNNING') &&
+    nextWorkspace.batchStatus === 'PARTIAL'
+  )
+    showNotice('批量渲染完成，异常片段已标记，请人工重生成', 'warning');
+  else if (
+    (previousStatus === 'QUEUED' || previousStatus === 'RUNNING' || previousStatus === 'PARTIAL') &&
+    nextWorkspace.batchStatus === 'COMPLETED'
+  )
+    showNotice(nextWorkspace.committedWorkflowRunId || nextWorkspace.commitStatus === 'COMMITTED'
+      ? '视频片段已完成并保存到素材池'
+      : nextWorkspace.autoCommitPending ? '视频片段已完成，正在校验保存'
+      : '视频片段已完成，请保存修改');
+  if (nextWorkspace.committedWorkflowRunId && nextWorkspace.committedWorkflowRunId !== props.workflowRunId)
+    void synchronizeWorkflowRun(nextWorkspace.committedWorkflowRunId);
+  else if (
+    props.editing &&
+    previousCommitStatus !== 'COMMITTED' &&
+    nextWorkspace.commitStatus === 'COMMITTED'
+  )
+    void synchronizeWorkflowRun(props.workflowRunId);
+  schedulePolling(nextWorkspace);
+};
+
+const applyBatch = (batch: EffectSegmentRenderBatch): void => {
+  const current = workspace.value;
+  if (
+    !current ||
+    batch.workflowRunId !== props.workflowRunId ||
+    batch.productId !== currentProductId.value
+  )
+    return;
+  if (batch.id === current.batchId && (batch.revision < (current.batchRevision ?? 0) ||
+    (batch.latestPromptRevision != null && current.promptArtifactRevision != null &&
+      batch.latestPromptRevision < current.promptArtifactRevision))) return;
+  applyWorkspace(effectSegmentRenderWorkspaceWithBatch(current, batch));
+};
+
+const clearPreview = (): void => {
+  previewController?.abort();
+  previewController = null;
+  repairRangePlaying.value = false;
+  repairCurrentSeconds.value = 0;
+  if (previewUrl.value.startsWith('blob:')) URL.revokeObjectURL(previewUrl.value);
+  previewUrl.value = '';
+  previewLoading.value = false;
+  previewError.value = '';
+  previewVideoReady.value = false;
+  previewVideoSize.value = null;
+  repairVideoSize.value = null;
+};
+
+const readVideoSize = (element: HTMLVideoElement): EffectSegmentRenderVideoSize | null =>
+  element.videoWidth > 0 && element.videoHeight > 0
+    ? { width: element.videoWidth, height: element.videoHeight }
+    : null;
+
+const handlePreviewVideoMetadata = (event: Event): void => {
+  if (event.currentTarget instanceof HTMLVideoElement)
+    previewVideoSize.value = readVideoSize(event.currentTarget);
+};
+
+const handleRepairVideoMetadata = (event: Event): void => {
+  if (event.currentTarget instanceof HTMLVideoElement)
+    repairVideoSize.value = readVideoSize(event.currentTarget);
+};
+
+const closeAllDialogs = (restoreFocus = false): void => {
+  settlePromptConfiguration(null);
+  clearPreview();
+  previewTask.value = null;
+  previewVariant.value = 'ACTIVE';
+  promptTask.value = null;
+  repairTask.value = null;
+  if (!restoreFocus) {
+    dialogTrigger = null;
+    return;
+  }
+  const trigger = dialogTrigger;
+  dialogTrigger = null;
+  void nextTick(() => trigger?.isConnected && trigger.focus());
+};
+
+const closeTransferPanel = (restoreFocus = false): void => {
+  if (importConfirming.value && nodeActive) return;
+  imports.hide();
+  transferPanel.value = null;
+  if (!restoreFocus) return;
+  const trigger = dialogTrigger;
+  dialogTrigger = null;
+  void nextTick(() => trigger?.isConnected && trigger.focus());
+};
+
+const cancelImport = (): void => {
+  if (importConfirming.value) return;
+  imports.dispose();
+  closeTransferPanel(true);
+};
+
+const loadCurrentWorkspace = async (showLoading = true): Promise<void> => {
+  if (!nodeActive) return;
+  // KeepAlive skips the watcher while away. A mix/fill branch can remap product IDs
+  // during that time, so activation must resolve the current scope before reading.
+  const nextProductId = effectSegmentRenderCurrentProductId(props.products, currentProductId.value);
+  if (nextProductId !== currentProductId.value) {
+    skipNextProductLoad = true;
+    currentProductId.value = nextProductId;
+  }
+  const product = currentProduct.value;
+  const generation = ++loadGeneration;
+  loadController?.abort();
+  operationController?.abort();
+  operationController = null;
+  stopPolling();
+  operation.value = null;
+  if (showLoading) creatingTaskCount.value = null;
+  const scopeChanged = workspace.value?.workflowRunId !== props.workflowRunId ||
+    workspace.value?.productId !== product?.id;
+  workspaceSynchronizing.value = showLoading || scopeChanged;
+  if (!showLoading && scopeChanged) {
+    closeAllDialogs(false);
+    closeTransferPanel(false);
+    imports.dispose();
+    selectedTaskIds.value = new Set();
+  }
+  if (showLoading) {
+    closeAllDialogs(false);
+    closeTransferPanel(false);
+    imports.dispose();
+    selectionMode.value = false;
+    selectedTaskIds.value = new Set();
+    page.value = 1;
+    keyword.value = '';
+    fragmentFilter.value = 'ALL';
+    includeCompatiblePurposes.value = false;
+  }
+  if (showLoading) {
+    creativeCoreByPromptId.value = {};
+    promptDetailsByPromptId.value = {};
+    creativeCoreSourceKey.value = '';
+  }
+  if (showLoading) cardVideoReadyKeys.value = new Set();
+  if (!product || !props.projectId || !props.workflowRunId) {
+    workspace.value = null;
+    pageStatus.value = 'empty';
+    workspaceSynchronizing.value = false;
+    return;
+  }
+  if (showLoading || !workspace.value) pageStatus.value = 'loading';
+  loadError.value = '';
+  const controller = new AbortController();
+  loadController = controller;
+  try {
+    const [snapshot, artifactResponse] = await Promise.all([
+      loadEffectSegmentRenderWorkspaceSnapshot(
+        {
+          projectId: props.projectId,
+          workflowRunId: props.workflowRunId,
+          productId: product.id,
+        },
+        controller.signal,
+      ),
+      listWorkingArtifacts(
+        props.projectId,
+        { workflowRunId: props.workflowRunId, nodeId: 'PROMPT_GENERATION' },
+        controller.signal,
+      ).catch((error: unknown) => {
+        if (isAbortError(error)) throw error;
+        return null;
+      }),
+    ]);
+    if (generation !== loadGeneration || controller.signal.aborted) return;
+    renderSettings.value = { ...snapshot.data.settings };
+    renderSettingsRevision.value = snapshot.data.settingsRevision;
+    applyWorkspace(effectSegmentRenderWorkspaceFromApi(snapshot.data));
+    creatingTaskCount.value = null;
+    creatingLocalUpdate.value = false;
+    pageStatus.value = 'success';
+    if (artifactResponse) {
+      const promptArtifact = artifactResponse.data.items.find(
+        (artifact) => artifact.artifactKey === `prompt-batch:${product.id}`,
+      );
+      if (promptArtifact) {
+        creativeCoreByPromptId.value = effectSegmentRenderCreativeCoreMap(promptArtifact.payload);
+        promptDetailsByPromptId.value = effectSegmentRenderPromptDetailsMap(promptArtifact.payload);
+        creativeCoreSourceKey.value = `${promptArtifact.id}:${promptArtifact.revision}`;
+      }
+    } else {
+      creativeCoreByPromptId.value = {};
+      promptDetailsByPromptId.value = {};
+      creativeCoreSourceKey.value = '';
+    }
+    if (snapshot.prefetched) {
+      workspaceRevalidationTimer = setTimeout(() => {
+        workspaceRevalidationTimer = undefined;
+        if (nodeActive && generation === loadGeneration && !operation.value && !editTransitioning.value)
+          void loadCurrentWorkspace(false);
+      }, 600);
+    }
+  } catch (error) {
+    if (isAbortError(error) || generation !== loadGeneration) return;
+    if (!showLoading && workspace.value?.workflowRunId === props.workflowRunId &&
+      workspace.value.productId === product.id) {
+      // Recovery/auto-publication can conflict while a callback or another poll commits.
+      // Keep the last confirmed view; a failed read must not erase cards or stop recovery.
+      showNotice(safeMessage(error, '工作区同步暂未完成，将自动重试'), 'warning');
+      workspaceRevalidationTimer = setTimeout(() => {
+        workspaceRevalidationTimer = undefined;
+        if (nodeActive && generation === loadGeneration && !operation.value && !editTransitioning.value)
+          void loadCurrentWorkspace(false);
+      }, 5000);
+      return;
+    }
+    pageStatus.value = 'error';
+    loadError.value = safeMessage(error, '渲染工作区加载失败');
+  } finally {
+    if (loadController === controller) {
+      loadController = null;
+      workspaceSynchronizing.value = false;
+    }
+  }
+};
+
+const updateRenderSetting = async <Key extends keyof EffectSegmentRenderSettings>(
+  key: Key,
+  value: EffectSegmentRenderSettings[Key],
+): Promise<void> => {
+  const product = currentProduct.value;
+  if (!product || operation.value || batchActive.value) return;
+  const previous = { ...renderSettings.value };
+  const next = { ...renderSettings.value, [key]: value };
+  if (key === 'capabilityKey') {
+    const capability: RenderModelOption =
+      capabilityOptions.find((option) => option.value === next.capabilityKey) ??
+      capabilityOptions[1]!;
+    if (!capability.ratios.includes(next.ratio)) next.ratio = capability.defaultRatio;
+    if (!capability.resolutions.includes(next.resolution))
+      next.resolution = capability.defaultResolution;
+  }
+  renderSettings.value = next;
+  operation.value = 'settings';
+  try {
+    const response = await saveEffectSegmentRenderSettings(props.projectId, product.id, {
+      workflowRunId: props.workflowRunId,
+      expectedRevision: renderSettingsRevision.value,
+      settings: next,
+    });
+    if (product.id !== currentProductId.value) return;
+    renderSettings.value = { ...response.data.settings };
+    renderSettingsRevision.value = response.data.settingsRevision;
+    showNotice('视频渲染设置已保存');
+  } catch (error) {
+    renderSettings.value = previous;
+    showNotice(safeMessage(error, '视频渲染设置保存失败'), 'error');
+  } finally {
+    operation.value = null;
+  }
+};
+
+watch(
+  [() => props.projectId, () => props.workflowRunId, activeProductSignature],
+  () => {
+    if (!nodeActive) return;
+    const preserveView = runSynchronizing.value && expectedSynchronizedRunId === props.workflowRunId &&
+      workspace.value?.projectId === props.projectId;
+    void loadCurrentWorkspace(!preserveView);
+  },
+  { immediate: true },
+);
+
+watch(currentProductId, (next, previous) => {
+  if (skipNextProductLoad) {
+    skipNextProductLoad = false;
+    return;
+  }
+  if (nodeActive && next !== previous) void loadCurrentWorkspace();
+});
+
+watch([keyword, fragmentFilter, includeCompatiblePurposes], () => {
+  page.value = 1;
+});
+
+watch(fragmentFilter, (nextFilter) => {
+  if (!isPurposeFilter(nextFilter)) includeCompatiblePurposes.value = false;
+});
+
+watch(totalPages, (nextTotalPages) => {
+  if (page.value > nextTotalPages) page.value = nextTotalPages;
+});
+
+watch(page, () => {
+  taskVideoLoadQueue.splice(0);
+  activeTaskVideoLoads.clear();
+  requestedTaskVideoKeys.value = new Set();
+});
+
+watch(
+  () => tasks.value.map((task) => taskVideoKey(task)).join('|'),
+  () => {
+    const currentKeys = new Set(tasks.value.map((task) => taskVideoKey(task)));
+    cardVideoReadyKeys.value = new Set(
+      [...cardVideoReadyKeys.value].filter((key) => currentKeys.has(key)),
+    );
+    const retainedPosters = new Map<string, string>();
+    cardVideoPosterUrls.value.forEach((url, key) => {
+      if (currentKeys.has(key)) retainedPosters.set(key, url);
+      else URL.revokeObjectURL(url);
+    });
+    cardVideoPosterUrls.value = retainedPosters;
+    failedServerPosterKeys.value = new Set(
+      [...failedServerPosterKeys.value].filter((key) => currentKeys.has(key)),
+    );
+    requestedTaskVideoKeys.value = new Set(
+      [...requestedTaskVideoKeys.value].filter((key) => currentKeys.has(key)),
+    );
+  },
+);
+
+const statusMeta = (status: EffectSegmentRenderStatus): { label: string; tone: string } =>
+  ({
+    AUTO_RETRY: { label: '自动重试', tone: 'retry' },
+    COMPLETED: { label: '已完成', tone: 'success' },
+    FAILED: { label: '异常', tone: 'danger' },
+    QUEUED: { label: '排队中', tone: 'pending' },
+    RENDERING: { label: '生成中', tone: 'running' },
+  })[status];
+
+const fragmentTypeLabel = (fragmentType: EffectPromptFragmentType): string =>
+  EFFECT_PROMPT_FRAGMENT_TYPE_LABELS[fragmentType];
+
+const fragmentTypeCount = (fragmentType: EffectPromptFragmentType): number =>
+  tasks.value.filter((task) => task.fragmentType === fragmentType).length;
+
+const clearSearch = (): void => {
+  keyword.value = '';
+};
+
+const toggleFragmentFilter = (fragmentType: EffectPromptFragmentType): void => {
+  fragmentFilter.value = fragmentFilter.value === fragmentType ? 'ALL' : fragmentType;
+};
+
+const changePageSize = (): void => {
+  page.value = 1;
+};
+
+const startBatch = async (forceFull = false): Promise<void> => {
+  const product = currentProduct.value;
+  let current = workspace.value;
+  if (!product || operation.value || !current || !canStartBatch.value) return;
+  const startingTrigger =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const context = {
+    projectId: props.projectId,
+    workflowRunId: props.workflowRunId,
+    productId: product.id,
+  };
+  operationController?.abort();
+  const controller = new AbortController();
+  operationController = controller;
+  operation.value = 'prepare';
+  const inScope = () =>
+    !controller.signal.aborted &&
+    props.projectId === context.projectId &&
+    props.workflowRunId === context.workflowRunId &&
+    currentProductId.value === context.productId;
+  try {
+    // Read authoritative Prompt summaries and saved defaults before either confirmation.
+    const prepared = (
+      await getEffectSegmentRenderWorkspace(
+        context.projectId,
+        context.workflowRunId,
+        product.id,
+        controller.signal,
+      )
+    ).data;
+    if (!inScope()) return;
+    current = effectSegmentRenderWorkspaceFromApi(prepared);
+    applyWorkspace(current);
+    renderSettings.value = { ...prepared.settings };
+    renderSettingsRevision.value = prepared.settingsRevision;
+    const frozenDefaults = { ...prepared.settings };
+    const settingsRevision = prepared.settingsRevision ?? 0;
+    const selectiveRefresh = !forceFull && current.stale && current.refreshScope === 'SELECTIVE';
+    const changedTasks = current.tasks.filter((task) => task.needsUpdate);
+    const selectedTaskIds = selectiveRefresh ? changedTasks.map(({ id }) => id) : [];
+    const newPromptCount = selectiveRefresh ? (current.pendingPromptIds?.length ?? 0) : 0;
+    const renderCount = selectiveRefresh
+      ? changedTasks.filter((task) => !task.updateKind || task.updateKind === 'RENDER').length
+      : 0;
+    const metadataCount = selectiveRefresh
+      ? changedTasks.filter((task) => task.updateKind === 'METADATA').length
+      : 0;
+    const removedCount = selectiveRefresh ? (current.pendingRemovedTaskIds?.length ?? 0) : 0;
+    const updateCount = selectedTaskIds.length + newPromptCount;
+    if (selectiveRefresh && !updateCount) return;
+    if (!prepared.promptReady) {
+      showNotice('请先保存并确认提示词', 'error');
+      return;
+    }
+    const newInputs = (prepared.promptRenderInputs ?? []).filter(
+      (input) => !selectiveRefresh || current!.pendingPromptIds?.includes(input.promptId),
+    );
+    // Older servers without summaries must not bypass capability confirmation.
+    if (newInputs.length !== (selectiveRefresh ? newPromptCount : prepared.promptCount)) {
+      showNotice('提示词渲染配置尚未同步，请刷新后重试', 'error');
+      return;
+    }
+    const conflicts = newInputs.filter(
+      (input) => effectPromptRenderSettingsIssues(frozenDefaults, input).length,
+    );
+    let promptSettings: EffectSegmentRenderPromptSettings[] = [];
+    if (conflicts.length) {
+      promptConfiguration.value = { inputs: conflicts, defaults: frozenDefaults };
+      const configured = await new Promise<EffectSegmentRenderPromptSettings[] | null>(
+        (resolve) => {
+          resolvePromptConfiguration = resolve;
+        },
+      );
+      if (!configured || !inScope()) return;
+      promptSettings = configured;
+    }
+    const overrideDescription = promptSettings.length
+      ? `其中 ${promptSettings.length} 条使用刚才单独配置的参数，其余新任务使用默认配置。`
+      : '';
+    const rerendering = hasBatch.value;
+    if (
+      !(await requestActionConfirmation(
+        selectiveRefresh
+          ? {
+              eyebrow: '按最新 Prompt 定向更新',
+              title: `重渲染 ${renderCount} 个，新增 ${newPromptCount} 个，同步信息 ${metadataCount} 个，移除 ${removedCount} 个？`,
+              description: `其余 ${Math.max(0, current.tasks.length - selectedTaskIds.length)} 个素材保持不变。${overrideDescription}全部更新成功且校验通过后自动保存到当前分支；历史文件保留。本次产生 ${renderCount + newPromptCount} 个视频生成任务，信息同步和删除不产生生成费用。`,
+              confirmLabel: `局部更新 ${updateCount} 个素材`,
+              tone: 'warning',
+            }
+          : rerendering
+            ? {
+                eyebrow: current.stale ? '按最新 Prompt 重新渲染' : '重新渲染全部片段',
+                title: `重新生成全部 ${promptCount.value} 个视频素材片段？`,
+                description: `${product.name.trim() ? `${product.name.trim()}；` : ''}${currentCapabilityLabel.value}；${frozenDefaults.ratio}；${frozenDefaults.resolution}。${overrideDescription}确认后会严格按当前已确认 Prompt 创建新批次、提交 ${promptCount.value} 个视频生成任务并再次产生费用。人工导入的视频不会重新生成，也不会带入新分支。全部成功且校验通过后自动保存为新版本；原版本保持可回溯。`,
+                confirmLabel: `重新提交 ${promptCount.value} 个任务`,
+                tone: 'warning',
+              }
+            : {
+                eyebrow: '创建视频渲染批次',
+                title: `开始生成 ${promptCount.value} 个视频素材片段？`,
+                description: `${product.name.trim() ? `${product.name.trim()}；` : ''}${currentCapabilityLabel.value}；${frozenDefaults.ratio}；${frozenDefaults.resolution}。${overrideDescription}确认后会提交 ${promptCount.value} 个视频生成任务并产生费用。`,
+                confirmLabel: `提交 ${promptCount.value} 个任务`,
+                tone: 'warning',
+              },
+      ))
+    )
+      return;
+    if (!inScope()) return;
+    creatingTaskCount.value = selectiveRefresh ? updateCount : promptCount.value;
+    creatingLocalUpdate.value = Boolean(selectiveRefresh);
+    operation.value = 'batch';
+    if (selectiveRefresh) {
+      const response = await refreshEffectSegmentRenderBatch(
+        props.projectId,
+        current.batchId!,
+        {
+          expectedBatchRevision: current.batchRevision!,
+          expectedPromptArtifactRevision: current.promptArtifactRevision!,
+          ...(current.refreshSignature
+            ? { expectedDifferenceSignature: current.refreshSignature }
+            : {}),
+          idempotencyKey: crypto.randomUUID(),
+          promptSettings,
+          settingsContext: {
+            workflowRunId: context.workflowRunId,
+            productId: context.productId,
+            expectedSettingsRevision: settingsRevision,
+          },
+        },
+        controller.signal,
+      );
+      if (controller.signal.aborted || currentProductId.value !== product.id) return;
+      if (response.data.noChanges) {
+        await loadCurrentWorkspace(false);
+        showNotice('变更已抵消，无需更新素材');
+        return;
+      }
+      if (response.data.batch.workflowRunId !== props.workflowRunId) {
+        await synchronizeWorkflowRun(response.data.batch.workflowRunId);
+        return;
+      }
+      applyBatch(response.data.batch);
+      showNotice(
+        renderCount + newPromptCount
+          ? `${renderCount + newPromptCount} 个素材进入渲染队列，完成后自动保存`
+          : '素材信息同步/移除已完成并保存',
+      );
+      return;
+    }
+    const response = await startEffectSegmentRenderBatch(
+      props.projectId,
+      product.id,
+      {
+        workflowRunId: props.workflowRunId,
+        expectedPromptArtifactRevision: current.promptArtifactRevision!,
+        expectedSettingsRevision: settingsRevision,
+        idempotencyKey: crypto.randomUUID(),
+        promptSettings,
+      },
+      controller.signal,
+    );
+    if (controller.signal.aborted || currentProductId.value !== product.id) return;
+    if (response.data.batch.workflowRunId !== props.workflowRunId) {
+      await synchronizeWorkflowRun(response.data.batch.workflowRunId);
+      return;
+    }
+    applyBatch(response.data.batch);
+    showNotice(
+      rerendering
+        ? `新批次已创建，${response.data.batch.tasks.length} 个视频生成任务已进入渲染队列`
+        : `${response.data.batch.tasks.length} 个视频生成任务已进入渲染队列`,
+    );
+  } catch (error) {
+    if (inScope() && !isAbortError(error)) showNotice(safeMessage(error, '批量渲染失败'), 'error');
+  } finally {
+    if (operationController === controller) {
+      operationController = null;
+      operation.value = null;
+      creatingTaskCount.value = null;
+      creatingLocalUpdate.value = false;
+      void nextTick(() => {
+        if (inScope() && startingTrigger?.isConnected) startingTrigger.focus();
+      });
+    }
+  }
+};
+
+const importedRenderDescription = (task: EffectSegmentRenderTask): string => {
+  const settings = resolveEffectImportedRenderSettings(renderSettings.value, {
+    durationSeconds: task.durationSeconds,
+    ...(task.mediaShortSidePixels !== undefined
+      ? { shortSidePixels: task.mediaShortSidePixels }
+      : {}),
+  });
+  const label =
+    capabilityOptions.find((item) => item.value === settings.capabilityKey)?.label ??
+    settings.capabilityKey;
+  return `本次使用 ${label} · ${settings.resolution.toUpperCase()}，不改变全局渲染设置`;
+};
+
+const materialResolutionLabel = (resolution: string | undefined): string =>
+  resolution === '4k' ? '4K' : (resolution ?? '—');
+
+const materialAspectRatioLabel = (ratio: string | undefined): string =>
+  ratio === 'adaptive' ? '自适应' : (ratio ?? '—');
+
+const materialFormatLabel = (mimeType: string | undefined): string => {
+  if (!mimeType) return '—';
+  const normalized = mimeType.toLowerCase();
+  if (normalized === 'video/quicktime') return 'MOV';
+  if (normalized === 'video/webm') return 'WEBM';
+  if (normalized === 'video/mp4') return 'MP4';
+  return normalized.startsWith('video/') ? normalized.slice('video/'.length).toUpperCase() : '—';
+};
+
+const retryTask = async (taskId: string): Promise<void> => {
+  const taskNeedsRefresh = workspace.value?.tasks.find((task) => task.id === taskId)?.needsUpdate;
+  if (!canEditMaterials.value && !taskNeedsRefresh) {
+    showNotice('请先进入编辑状态，再重新生成单条素材', 'warning');
+    return;
+  }
+  const product = currentProduct.value;
+  const current = workspace.value;
+  if (!product || operation.value || !current?.batchId || typeof current.batchRevision !== 'number')
+    return;
+  const task = current.tasks.find(({ id }) => id === taskId);
+  if (!task || !canRetryTask(task)) return;
+  const taskNeedsUpdate = task.needsUpdate;
+  const settingsContext = { workflowRunId: props.workflowRunId, productId: product.id,
+    expectedSettingsRevision: renderSettingsRevision.value ?? 0 };
+  if (
+    !(await requestActionConfirmation({
+      eyebrow: taskNeedsUpdate ? '按最新 Prompt 更新素材' : '重新生成片段',
+      title: task.updateKind === 'METADATA' ? '同步这条素材的 Prompt 信息？' : taskNeedsUpdate ? '按修改后的 Prompt 更新这个素材？' : '重新生成这个视频片段？',
+      description: task.independentImport
+        ? `使用这条素材已确认的反推提示词重新生成，原视频仍会保留；${importedRenderDescription(task)}。`
+        : task.updateKind === 'METADATA'
+          ? '仅同步创意方向、六维与用途，原视频保持不变，不产生视频生成费用；校验通过后自动保存。'
+        : taskNeedsUpdate
+          ? '这条素材会使用当前已确认的 Prompt 和原批次渲染设置重新生成；校验通过后自动保存，旧版本视频仍会保留。'
+          : '重新生成会提交一个新的视频生成任务，Prompt 与渲染配置保持不变。',
+      confirmLabel: taskNeedsUpdate ? '确认更新素材' : '确认重新生成',
+      tone: 'warning',
+    }))
+  )
+    return;
+  if (props.workflowRunId !== settingsContext.workflowRunId || currentProductId.value !== settingsContext.productId) return;
+  operationController?.abort();
+  const controller = new AbortController();
+  operationController = controller;
+  creatingTaskCount.value = 1;
+  creatingLocalUpdate.value = taskNeedsUpdate;
+  operation.value = 'retry';
+  try {
+    const response = taskNeedsUpdate ? await refreshEffectSegmentRenderBatch(
+      props.projectId, current.batchId,
+      { taskIds: [taskId], expectedBatchRevision: current.batchRevision,
+        ...(task.refreshSignature ? { expectedDifferenceSignature: task.refreshSignature } : {}),
+        expectedPromptArtifactRevision: current.promptArtifactRevision!, idempotencyKey: crypto.randomUUID(), settingsContext },
+      controller.signal,
+    ) : await regenerateEffectSegmentRenderTasks(
+      props.projectId,
+      current.batchId,
+      {
+        taskIds: [taskId],
+        expectedBatchRevision: current.batchRevision,
+        idempotencyKey: crypto.randomUUID(),
+      },
+      controller.signal,
+    );
+    if (controller.signal.aborted || currentProductId.value !== product.id) return;
+    if ('noChanges' in response.data && response.data.noChanges) {
+      await loadCurrentWorkspace(false);
+      showNotice('变更已抵消，无需更新素材');
+      return;
+    }
+    if (response.data.batch.workflowRunId !== props.workflowRunId) {
+      await synchronizeWorkflowRun(response.data.batch.workflowRunId);
+      return;
+    }
+    applyBatch(response.data.batch);
+    showNotice(task.updateKind === 'METADATA' ? '素材信息已同步并保存' : taskNeedsUpdate
+      ? '视频素材片段已进入渲染队列，完成后自动保存' : '视频素材片段已进入渲染队列');
+  } catch (error) {
+    if (!isAbortError(error)) showNotice(safeMessage(error, '片段重生成失败'), 'error');
+  } finally {
+    if (operationController === controller) {
+      operationController = null;
+      operation.value = null;
+      creatingTaskCount.value = null;
+      creatingLocalUpdate.value = false;
+    }
+  }
+};
+
+const loadPreviewVideo = (
+  task: EffectSegmentRenderTask,
+  variant: 'ACTIVE' | 'REPAIR',
+  owner: 'preview' | 'repair',
+): void => {
+  const current = workspace.value;
+  const output = variant === 'ACTIVE' ? task.output : task.repair?.candidate;
+  if (!current?.batchId || !output) return;
+  clearPreview();
+  previewLoading.value = true;
+  const controller = new AbortController();
+  previewController = controller;
+  void getEffectSegmentRenderTaskContent(
+    props.projectId,
+    current.batchId,
+    task.id,
+    variant,
+    output.version,
+    controller.signal,
+  )
+    .then((response) => response.blob())
+    .then((blob) => {
+      const ownerTask = owner === 'preview' ? previewTask.value : repairTask.value;
+      if (controller.signal.aborted || ownerTask?.id !== task.id) return;
+      previewUrl.value = URL.createObjectURL(blob);
+    })
+    .catch((error: unknown) => {
+      if (!isAbortError(error)) previewError.value = safeMessage(error, '视频预览加载失败');
+    })
+    .finally(() => {
+      if (previewController === controller) previewController = null;
+      if (!controller.signal.aborted) previewLoading.value = false;
+    });
+};
+
+const handlePreviewVideoError = (): void => {
+  previewVideoReady.value = false;
+  previewError.value = '视频预览加载失败，请稍后重试';
+};
+
+const openPreview = (
+  task: EffectSegmentRenderTask,
+  event: Event,
+  variant: 'ACTIVE' | 'REPAIR' = 'ACTIVE',
+): void => {
+  dialogTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  previewTask.value = task;
+  previewVariant.value = variant;
+  loadPreviewVideo(task, variant, 'preview');
+  void nextTick(() => previewCloseButton.value?.focus());
+};
+
+const openRepair = (task: EffectSegmentRenderTask, event: Event): void => {
+  if (effectSegmentRepairUnavailableReason(task)) return;
+  dialogTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  repairTask.value = task;
+  repairStartSeconds.value = 0;
+  repairEndSeconds.value = Math.min(task.durationSeconds, 2);
+  repairInstruction.value = '';
+  repairCurrentSeconds.value = 0;
+  repairActiveBoundary.value = 'start';
+  loadPreviewVideo(task, 'ACTIVE', 'repair');
+  void nextTick(() => repairCloseButton.value?.focus());
+};
+
+const formatRepairTime = (seconds: number): string => `${seconds.toFixed(1)}s`;
+
+const seekRepairVideo = (seconds: number): void => {
+  const video = repairVideo.value;
+  const duration = repairTask.value?.durationSeconds ?? 0;
+  const next = Math.min(Math.max(seconds, 0), duration);
+  repairCurrentSeconds.value = next;
+  if (!video || !Number.isFinite(video.duration)) return;
+  video.pause();
+  repairRangePlaying.value = false;
+  video.currentTime = Math.min(next, video.duration);
+};
+
+const setRepairBoundary = (boundary: RepairBoundary, seconds: number): void => {
+  const duration = repairTask.value?.durationSeconds ?? 0;
+  repairActiveBoundary.value = boundary;
+  if (boundary === 'start') {
+    const next = Math.min(Math.max(seconds, 0), Math.max(0, duration - 0.1));
+    if (next >= repairEndSeconds.value)
+      repairEndSeconds.value = Math.min(duration, Number((next + 0.1).toFixed(1)));
+    repairStartSeconds.value = Number(next.toFixed(1));
+    seekRepairVideo(repairStartSeconds.value);
+    return;
+  }
+  const next = Math.max(Math.min(seconds, duration), Math.min(duration, 0.1));
+  if (next <= repairStartSeconds.value)
+    repairStartSeconds.value = Math.max(0, Number((next - 0.1).toFixed(1)));
+  repairEndSeconds.value = Number(next.toFixed(1));
+  seekRepairVideo(repairEndSeconds.value);
+};
+
+const updateRepairStart = (event: Event): void => {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement)) return;
+  const value = Number(input.value);
+  setRepairBoundary('start', Number.isFinite(value) ? value : 0);
+};
+
+const updateRepairEnd = (event: Event): void => {
+  const input = event.currentTarget;
+  if (!(input instanceof HTMLInputElement)) return;
+  const duration = repairTask.value?.durationSeconds ?? 0;
+  const value = Number(input.value);
+  setRepairBoundary('end', Number.isFinite(value) ? value : duration);
+};
+
+const selectRepairBoundary = (boundary: RepairBoundary): void => {
+  repairActiveBoundary.value = boundary;
+  seekRepairVideo(boundary === 'start' ? repairStartSeconds.value : repairEndSeconds.value);
+};
+
+const selectRepairBoundaryAtTrack = (event: PointerEvent): void => {
+  if (event.target instanceof HTMLInputElement) return;
+  const track = event.currentTarget;
+  const duration = repairTask.value?.durationSeconds ?? 0;
+  if (!(track instanceof HTMLElement) || duration <= 0) return;
+  const rect = track.getBoundingClientRect();
+  const ratio = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1);
+  const seconds = Number((ratio * duration).toFixed(1));
+  const boundary =
+    Math.abs(seconds - repairStartSeconds.value) <= Math.abs(seconds - repairEndSeconds.value)
+      ? 'start'
+      : 'end';
+  setRepairBoundary(boundary, seconds);
+};
+
+const setRepairBoundaryFromCurrentFrame = (boundary: RepairBoundary): void =>
+  setRepairBoundary(boundary, repairVideo.value?.currentTime ?? repairCurrentSeconds.value);
+
+const nudgeRepairBoundary = (offsetSeconds: number): void => {
+  const current =
+    repairActiveBoundary.value === 'start' ? repairStartSeconds.value : repairEndSeconds.value;
+  setRepairBoundary(repairActiveBoundary.value, current + offsetSeconds);
+};
+
+const handleRepairVideoReady = (): void => {
+  previewVideoReady.value = true;
+  repairCurrentSeconds.value = Number((repairVideo.value?.currentTime ?? 0).toFixed(1));
+};
+
+const toggleRepairRangePreview = async (): Promise<void> => {
+  const video = repairVideo.value;
+  if (!video || !previewVideoReady.value) return;
+  if (repairRangePlaying.value) {
+    video.pause();
+    repairRangePlaying.value = false;
+    return;
+  }
+  video.currentTime = repairStartSeconds.value;
+  repairRangePlaying.value = true;
+  try {
+    await video.play();
+  } catch {
+    repairRangePlaying.value = false;
+  }
+};
+
+const stopRepairRangePreviewAtEnd = (): void => {
+  const video = repairVideo.value;
+  if (!video) return;
+  repairCurrentSeconds.value = Number(video.currentTime.toFixed(1));
+  if (!repairRangePlaying.value || video.currentTime < repairEndSeconds.value) return;
+  video.pause();
+  video.currentTime = repairEndSeconds.value;
+  repairRangePlaying.value = false;
+};
+
+const submitRepair = async (): Promise<void> => {
+  if (!canEditMaterials.value) {
+    showNotice('请先进入编辑状态，再提交画面返修', 'warning');
+    return;
+  }
+  const product = currentProduct.value;
+  const task = repairTask.value;
+  const current = workspace.value;
+  if (
+    !product ||
+    !task ||
+    !task.output ||
+    operation.value ||
+    !current?.batchId ||
+    typeof current.batchRevision !== 'number'
+  )
+    return;
+  operation.value = 'repair';
+  try {
+    const response = await startEffectSegmentRenderRepair(
+      props.projectId,
+      current.batchId,
+      task.id,
+      {
+        expectedBatchRevision: current.batchRevision,
+        expectedSourceVersion: task.output.version,
+        startMs: Math.round(repairStartSeconds.value * 1000),
+        endMs: Math.round(repairEndSeconds.value * 1000),
+        instruction: repairInstruction.value,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    applyBatch(response.data.batch);
+    closeAllDialogs(true);
+    showNotice('返修任务已进入队列，完成后可预览并决定是否采用');
+  } catch (error) {
+    if (!isAbortError(error)) showNotice(safeMessage(error, '视频画面返修失败'), 'error');
+  } finally {
+    operation.value = null;
+  }
+};
+
+const decideRepair = async (
+  task: EffectSegmentRenderTask,
+  decision: 'ACCEPT' | 'DISCARD',
+): Promise<void> => {
+  if (!canEditMaterials.value) {
+    showNotice('请先进入编辑状态，再采用或放弃返修候选', 'warning');
+    return;
+  }
+  const product = currentProduct.value;
+  const current = workspace.value;
+  const repairVersion = task.repair?.version ?? task.repair?.candidateVersion;
+  if (
+    !product ||
+    operation.value ||
+    !task.repair ||
+    !repairVersion ||
+    !current?.batchId ||
+    typeof current.batchRevision !== 'number'
+  )
+    return;
+  if (
+    !(await requestActionConfirmation({
+      eyebrow: decision === 'ACCEPT' ? '采用修复版' : '放弃修复版',
+      title: decision === 'ACCEPT' ? '用修复版替换当前素材？' : '放弃这个返修候选？',
+      description:
+        decision === 'ACCEPT'
+          ? '采用后，修复版会成为当前编辑草稿；保存修改后会更新当前分支。'
+          : '放弃后保留当前原视频，返修候选将不再可用。',
+      confirmLabel: decision === 'ACCEPT' ? '确认采用' : '确认放弃',
+      tone: 'warning',
+    }))
+  )
+    return;
+  operation.value = 'repair';
+  try {
+    const response = await decideEffectSegmentRenderRepair(
+      props.projectId,
+      current.batchId,
+      task.id,
+      {
+        expectedBatchRevision: current.batchRevision,
+        repairVersion,
+        decision,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    applyBatch(response.data.batch);
+    showNotice(decision === 'ACCEPT' ? '已采用修复版视频' : '已放弃返修候选');
+  } catch (error) {
+    showNotice(safeMessage(error, '处理返修候选失败'), 'error');
+  } finally {
+    operation.value = null;
+  }
+};
+
+const openPrompt = (task: EffectSegmentRenderTask, event: Event): void => {
+  dialogTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  promptTask.value = task;
+  void nextTick(() => promptCloseButton.value?.focus());
+};
+
+const openTransferPanel = (panel: Exclude<TransferPanel, null>, event: Event): void => {
+  if (panel === 'import' && !canEditMaterials.value) {
+    showNotice('请先进入编辑状态，再导入素材', 'warning');
+    return;
+  }
+  const current = workspace.value;
+  if (!current?.batchId || typeof current.batchRevision !== 'number') {
+    showNotice('请先创建视频渲染批次，再进行素材操作', 'warning');
+    return;
+  }
+  if (panel === 'import' && batchActive.value) {
+    showNotice('当前批次正在渲染，完成后才能导入新增素材', 'warning');
+    return;
+  }
+  dialogTrigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  if (panel === 'export' && exportScope.value === 'SELECTED' && !selectedTasks.value.length)
+    exportScope.value = 'ALL_TASKS';
+  transferPanel.value = panel;
+  if (panel === 'import') imports.start({ projectId: props.projectId, batchId: current.batchId });
+  void nextTick(() => transferCloseButton.value?.focus());
+};
+
+const handleImportFileChange = async (event: Event): Promise<void> => {
+  const input = event.currentTarget as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = '';
+  await imports.addFiles(files);
+};
+
+const handleTransferKeydown = (event: KeyboardEvent): void => {
+  if (event.key !== 'Tab' || !(event.currentTarget instanceof HTMLElement)) return;
+  const focusable = [
+    ...event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, video[controls]',
+    ),
+  ].filter((element) => element.getClientRects().length > 0);
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first?.focus();
+  }
+};
+
+const toggleSelectionMode = (): void => {
+  selectionMode.value = !selectionMode.value;
+  if (!selectionMode.value) selectedTaskIds.value = new Set();
+};
+
+const toggleTaskSelection = (taskId: string): void => {
+  const next = new Set(selectedTaskIds.value);
+  if (next.has(taskId)) next.delete(taskId);
+  else next.add(taskId);
+  selectedTaskIds.value = next;
+};
+
+const selectAllFiltered = (): void => {
+  if (allFilteredSelected.value) {
+    const filteredIds = new Set(selectableFilteredTasks.value.map((task) => task.id));
+    selectedTaskIds.value = new Set(
+      [...selectedTaskIds.value].filter((taskId) => !filteredIds.has(taskId)),
+    );
+    return;
+  }
+  selectedTaskIds.value = new Set([
+    ...selectedTaskIds.value,
+    ...selectableFilteredTasks.value.map((task) => task.id),
+  ]);
+};
+
+const deleteSelectedMaterials = async (): Promise<void> => {
+  const current = workspace.value;
+  if (
+    !showDeleteMaterials.value ||
+    operation.value ||
+    editTransitioning.value ||
+    batchActive.value ||
+    !selectedTasks.value.length ||
+    !current?.batchId ||
+    typeof current.batchRevision !== 'number'
+  )
+    return;
+  const projectId = props.projectId;
+  const workflowRunId = props.workflowRunId;
+  const taskIds = selectedTasks.value.map(({ id }) => id);
+  const controller = new AbortController();
+  operationController = controller;
+  const isCurrent = (): boolean =>
+    nodeActive && !controller.signal.aborted &&
+    props.projectId === projectId && props.workflowRunId === workflowRunId;
+  operation.value = 'delete';
+  try {
+    if (!(await requestActionConfirmation({
+      eyebrow: '删除素材',
+      title: `删除已选择的 ${taskIds.length} 个视频素材？`,
+      description: '删除仅写入编辑草稿，保存修改后才影响混剪素材池；取消编辑保留原素材和历史文件。',
+      confirmLabel: '确认删除',
+      tone: 'danger',
+    })) || !isCurrent()) return;
+    if (workspace.value?.batchId !== current.batchId ||
+      workspace.value?.batchRevision !== current.batchRevision)
+      throw new Error('素材状态已变化，请重新选择后删除');
+    if (!showDeleteMaterials.value || !selectedTasks.value.length) return;
+    const response = await deleteEffectSegmentRenderMaterials(projectId, current.batchId, {
+      taskIds,
+      expectedBatchRevision: current.batchRevision,
+      idempotencyKey: crypto.randomUUID(),
+    }, controller.signal);
+    if (!isCurrent()) return;
+    applyBatch(response.data.batch);
+    selectedTaskIds.value = new Set();
+    selectionMode.value = false;
+    showNotice('所选素材已从编辑草稿移除，请保存修改；取消编辑可保留原素材');
+  } catch (error) {
+    if (isCurrent()) showNotice(safeMessage(error, '视频素材删除失败'), 'error');
+  } finally {
+    if (operationController === controller) {
+      operationController = null;
+      operation.value = null;
+    }
+  }
+};
+
+const toggleExportFormat = (format: EffectSegmentRenderExportFormat): void => {
+  const next = new Set(exportFormats.value);
+  if (next.has(format)) next.delete(format);
+  else next.add(format);
+  exportFormats.value = [...next];
+};
+
+const downloadExport = async (): Promise<void> => {
+  const current = workspace.value;
+  if (
+    operation.value ||
+    !exportRangeTasks.value.length ||
+    !exportFormats.value.length ||
+    !current?.batchId ||
+    typeof current.batchRevision !== 'number'
+  )
+    return;
+  operation.value = 'export';
+  try {
+    const response = await exportEffectSegmentRenderMaterials(props.projectId, current.batchId, {
+      taskIds: exportRangeTasks.value.map(({ id }) => id),
+      formats: exportFormats.value,
+      expectedBatchRevision: current.batchRevision,
+    });
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') ?? '';
+    const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/iu)?.[1];
+    const fileName = encodedName
+      ? decodeURIComponent(encodedName)
+      : `${currentProduct.value?.name ?? '视频素材'}-导出.zip`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+    closeTransferPanel(false);
+    showNotice('视频素材导出包已生成');
+  } catch (error) {
+    showNotice(safeMessage(error, '视频素材导出失败'), 'error');
+  } finally {
+    operation.value = null;
+  }
+};
+
+const formatFileSize = (size: number): string =>
+  size >= 1024 * 1024
+    ? `${(size / 1024 / 1024).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(size / 1024))} KB`;
+
+const enterEdit = async (): Promise<void> => {
+  if (editTransitioning.value || operation.value || batchActive.value) return;
+  editRequestPending.value = true;
+  try {
+    const response = await beginEffectWorkflowNodeEdit(
+      props.projectId,
+      props.workflowRunId,
+      'SEGMENT_RENDER',
+    );
+    await synchronizeWorkflowRun(response.data.run.id);
+  } catch (error) {
+    showNotice(safeMessage(error, '进入视频素材编辑状态失败'), 'error');
+  } finally {
+    editRequestPending.value = false;
+  }
+};
+
+const cancelEdit = async (): Promise<void> => {
+  if (!props.editing || editTransitioning.value || operation.value || batchActive.value) return;
+  if (!(await confirmDiscardEffectEdit())) return;
+  if (!props.editing || editTransitioning.value || operation.value || batchActive.value) return;
+  editRequestPending.value = true;
+  try {
+    const response = await cancelEffectWorkflowNodeEdit(
+      props.projectId,
+      props.workflowRunId,
+      'SEGMENT_RENDER',
+    );
+    await synchronizeWorkflowRun(response.data.activeWorkflowRunId);
+  } catch (error) {
+    showNotice(safeMessage(error, '取消视频素材编辑失败'), 'error');
+  } finally {
+    editRequestPending.value = false;
+  }
+};
+
+const saveVersion = async (): Promise<void> => {
+  if (!canEditMaterials.value) return;
+  if (!currentProductReady.value) {
+    const message = !hasBatch.value
+      ? '请先开始批量渲染'
+      : missingPromptCount.value
+        ? `当前批次缺少 ${missingPromptCount.value} 个 Prompt 片段，请返回 Prompt 节点检查上游数据`
+        : summary.value.failed
+          ? '请逐条重新生成异常片段'
+          : '仍有片段正在生成，或存在待处理返修，请先处理后再保存';
+    showNotice(message, 'warning');
+    return;
+  }
+  const current = workspace.value;
+  if (!current?.batchId || typeof current.batchRevision !== 'number') return;
+  editRequestPending.value = true;
+  try {
+    const response = await validateEffectSegmentRenderBatch(props.projectId, current.batchId, {
+      expectedBatchRevision: current.batchRevision,
+    });
+    if (!response.data.valid) {
+      showNotice(response.data.issues[0]?.message ?? '视频渲染批次校验未通过', 'warning');
+      return;
+    }
+    // The validated batch and branch activation commit atomically in the API.
+    // The parent reloads the active Run, which may be the original Run if the
+    // content hash did not change.
+    await synchronizeWorkflowRun(props.workflowRunId);
+    showNotice('视频素材修改已保存');
+  } catch (error) {
+    showNotice(safeMessage(error, '保存视频素材修改失败'), 'error');
+  } finally {
+    editRequestPending.value = false;
+  }
+};
+
+const flushPendingEdits = (): Promise<boolean> =>
+  flushEffectNodeNavigation(
+    runSynchronization,
+    () => operation.value !== null || editRequestPending.value,
+  );
+
+defineExpose({ flushPendingEdits });
+
+const stopNodeRequests = (): void => {
+  clearTimeout(workspaceRevalidationTimer);
+  workspaceRevalidationTimer = undefined;
+  loadGeneration += 1;
+  loadController?.abort();
+  operationController?.abort();
+  stopPolling();
+  clearPreview();
+  taskVideoLoadQueue.splice(0);
+  activeTaskVideoLoads.clear();
+  requestedTaskVideoKeys.value = new Set();
+};
+
+const refreshOnFocus = (): void => { if (nodeActive) void pollBatch(); };
+onMounted(() => window.addEventListener('focus', refreshOnFocus));
+
+onActivated(() => {
+  nodeActive = true;
+  if (!activatedOnce) {
+    activatedOnce = true;
+    return;
+  }
+  void loadCurrentWorkspace(false);
+});
+
+onDeactivated(() => {
+  settlePromptConfiguration(null);
+  nodeActive = false;
+  operation.value = null;
+  creatingTaskCount.value = null;
+  closeTransferPanel(false);
+  imports.dispose();
+  stopNodeRequests();
+});
+
+onBeforeUnmount(() => {
+  settlePromptConfiguration(null);
+  window.removeEventListener('focus', refreshOnFocus);
+  nodeActive = false;
+  operation.value = null;
+  creatingTaskCount.value = null;
+  closeTransferPanel(false);
+  imports.dispose();
+  stopNodeRequests();
+  taskVideoObserver?.disconnect();
+  taskVideoObserver = null;
+  cardVideoPosterUrls.value.forEach((url) => URL.revokeObjectURL(url));
+  cardVideoPosterUrls.value = new Map();
+  if (noticeTimer) clearTimeout(noticeTimer);
+});
+</script>
+
+<template>
+  <section
+    class="effect-segment-render-node"
+    aria-labelledby="effect-segment-render-title"
+    :inert="workspaceSynchronizing || runSynchronizing || undefined"
+    :aria-busy="workspaceSynchronizing || runSynchronizing || undefined">
+    <Transition name="segment-notice">
+      <div v-if="notice" class="segment-notice" :class="notice.kind" role="status">
+        {{ notice.text }}
+      </div>
+    </Transition>
+
+    <WorkflowPageLoading
+      v-if="pageStatus === 'loading'"
+      icon="render"
+      title="正在恢复视频渲染工作区"
+      description="正在读取当前工作流的 Prompt 批次和视频渲染任务…"
+    />
+    <section v-else-if="pageStatus === 'error'" class="segment-page-state error" role="alert">
+      <AlertCircle :size="32" />
+      <h2>视频片段渲染工作区加载失败</h2>
+      <p>{{ loadError }}</p>
+      <button type="button" @click="loadCurrentWorkspace()">
+        <RefreshCw :size="14" />重新加载
+      </button>
+    </section>
+    <section v-else-if="pageStatus === 'empty' || !currentProduct" class="segment-page-state">
+      <Sparkles :size="32" />
+      <h2>暂无可渲染的 Prompt</h2>
+      <p>请返回 Prompt 生成节点，完成至少一个产品的 Prompt 校验。</p>
+      <button type="button" @click="emit('back')"><ChevronLeft :size="14" />返回上一步</button>
+    </section>
+
+    <template v-else>
+      <header class="segment-heading">
+        <div class="segment-heading__title">
+          <span>04</span>
+          <div>
+            <h2 id="effect-segment-render-title">AI 视频片段批量渲染</h2>
+            <p v-if="hasBatch">
+              {{ promptCount }} 条 Prompt 任务 × 每条 1 个视频素材片段，成功片段自动进入素材池
+            </p>
+            <p v-else-if="workspace?.promptReady">
+              已就绪 {{ promptCount }} 条 Prompt，每条将生成 1 个视频素材片段
+            </p>
+            <p v-else>上游 Prompt 尚未生成可用版本，当前不会创建视频任务</p>
+          </div>
+        </div>
+        <div class="segment-heading__actions">
+          <button
+            v-if="workspace?.stale && workspace.refreshScope === 'SELECTIVE'"
+            class="secondary-button segment-local-update-button"
+            type="button"
+            :disabled="operation !== null || editTransitioning || !canStartBatch"
+            @click="startBatch()"
+          >
+            <LoaderCircle v-if="operation === 'batch' || batchActive" class="spin" :size="14" />
+            <RefreshCw v-else :size="14" />{{ startButtonLabel }}
+          </button>
+          <button
+            v-if="hasConfirmedRender && !editing"
+            class="secondary-button"
+            type="button"
+            :disabled="editTransitioning || operation !== null || batchActive"
+            @click="enterEdit"
+          >
+            <LoaderCircle v-if="editTransitioning" class="spin" :size="14" />
+            <Pencil v-else :size="14" />进入编辑
+          </button>
+          <template v-else-if="editing">
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="editTransitioning || operation !== null || batchActive"
+              @click="cancelEdit"
+            >
+              <X :size="14" />取消编辑
+            </button>
+            <button
+              v-if="!workspace?.autoCommitPending"
+              class="secondary-button"
+              type="button"
+              :disabled="editTransitioning || !currentProductReady"
+              @click="saveVersion"
+            >
+              <CheckCircle2 :size="14" />保存修改
+            </button>
+          </template>
+          <button
+            v-else-if="hasBatch && !batchActive && !workspace?.autoCommitPending"
+            class="secondary-button"
+            type="button"
+            :disabled="editTransitioning || !currentProductReady"
+            @click="saveVersion"
+          >
+            <CheckCircle2 :size="14" />保存修改
+          </button>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="
+              !hasBatch ||
+              !canEditMaterials ||
+              batchActive ||
+              operation !== null ||
+              editTransitioning
+            "
+            @click="openTransferPanel('import', $event)"
+          >
+            <FolderInput :size="14" />导入素材
+          </button>
+          <button
+            v-if="workspace?.stale && workspace.refreshScope === 'SELECTIVE'"
+            class="secondary-button"
+            type="button"
+            :disabled="operation !== null || editTransitioning || !canStartBatch"
+            @click="startBatch(true)"
+          >
+            <RefreshCw :size="14" />重新渲染
+          </button>
+          <button
+            v-if="!(workspace?.stale && workspace.refreshScope === 'SELECTIVE')"
+            class="primary-button start-render-button"
+            type="button"
+            :disabled="operation !== null || editTransitioning || !canStartBatch"
+            @click="startBatch()"
+          >
+            <LoaderCircle v-if="operation === 'batch' || batchActive" class="spin" :size="14" />
+            <RefreshCw v-else-if="hasBatch && canStartBatch" :size="14" />
+            <Play v-else-if="canStartBatch" :size="14" />{{ startButtonLabel }}
+          </button>
+        </div>
+      </header>
+
+      <WorkflowRunProgress
+        v-if="creatingTaskCount !== null || batchActive"
+        class="segment-run-progress"
+        tone="update"
+        :progress="batchProgress"
+        :summary="updatingProgress ? '本次更新进度' : '视频渲染进度'"
+        :attempt-label="batchProgressDetail"
+        action-label=""
+      />
+
+      <section class="render-settings-card" aria-labelledby="render-settings-title">
+        <div class="render-settings-card__heading">
+          <span><Settings2 :size="17" /></span>
+          <div>
+            <h3 id="render-settings-title">视频渲染设置</h3>
+            <p>新任务的默认配置，不追溯修改已有素材。</p>
+          </div>
+          <small>{{
+            batchActive ? '当前批次参数已锁定' : operation === 'settings' ? '保存中…' : '已自动保存'
+          }}</small>
+        </div>
+        <div class="render-settings-grid">
+          <label>
+            <span>视频模型</span>
+            <EffectUpwardCreatableSelect
+              field-label="视频模型"
+              :model-value="renderSettings.capabilityKey"
+              :options="capabilityOptions"
+              :creatable="false"
+              :disabled="operation !== null || batchActive"
+              @update:model-value="
+                updateRenderSetting(
+                  'capabilityKey',
+                  $event as EffectSegmentRenderSettings['capabilityKey'],
+                )
+              "
+            />
+          </label>
+          <label>
+            <span>画幅</span>
+            <EffectUpwardCreatableSelect
+              field-label="画幅"
+              :model-value="renderSettings.ratio"
+              :options="ratioOptions"
+              :creatable="false"
+              :disabled="operation !== null || batchActive"
+              @update:model-value="
+                updateRenderSetting('ratio', $event as EffectSegmentRenderSettings['ratio'])
+              "
+            />
+          </label>
+          <label>
+            <span>分辨率</span>
+            <EffectUpwardCreatableSelect
+              field-label="分辨率"
+              :model-value="renderSettings.resolution"
+              :options="resolutionOptions"
+              :creatable="false"
+              :disabled="operation !== null || batchActive"
+              @update:model-value="
+                updateRenderSetting(
+                  'resolution',
+                  $event as EffectSegmentRenderSettings['resolution'],
+                )
+              "
+            />
+          </label>
+        </div>
+      </section>
+
+      <section class="segment-workspace" aria-label="AI 视频素材工作区">
+        <div class="segment-material-panel">
+          <div class="segment-toolbar">
+            <div class="prompt-search" role="search">
+              <Search :size="15" />
+              <input
+                v-model="keyword"
+                type="search"
+                aria-label="搜索视频素材"
+                :disabled="!tasks.length || operation !== null"
+                placeholder="搜索编号或多个关键词，例如：R012、厨房 特写"
+              />
+              <button
+                v-if="keyword"
+                class="prompt-search__clear"
+                type="button"
+                aria-label="清除搜索"
+                @click="clearSearch"
+              >
+                <X :size="14" />
+              </button>
+            </div>
+            <span class="prompt-result-count">{{ filteredTasks.length }} 个结果</span>
+            <span v-if="hasBatch" class="toolbar-result-stats" aria-label="视频素材生成结果">
+              <span class="success"
+                ><i></i>成功 <strong>{{ summary.completed }}</strong></span
+              >
+              <span class="danger"
+                ><i></i>异常 <strong>{{ summary.failed }}</strong></span
+              >
+            </span>
+            <button
+              class="selection-mode-button"
+              :class="{ active: selectionMode }"
+              type="button"
+              :disabled="!completedTasks.length || operation !== null"
+              @click="toggleSelectionMode"
+            >
+              <Check :size="14" />{{ selectionMode ? '退出选择' : '选择素材' }}
+            </button>
+          </div>
+
+          <nav class="purpose-filter-bar" aria-label="按片段类型筛选视频素材">
+            <button
+              type="button"
+              :class="{ active: fragmentFilter === 'ALL' }"
+              :aria-pressed="fragmentFilter === 'ALL'"
+              @click="fragmentFilter = 'ALL'"
+            >
+              全部用途 <small>{{ tasks.length }}</small>
+            </button>
+            <button
+              v-for="fragmentType in EFFECT_PROMPT_FRAGMENT_TYPES"
+              :key="fragmentType"
+              type="button"
+              :class="{ active: fragmentFilter === fragmentType }"
+              :aria-pressed="fragmentFilter === fragmentType"
+              @click="toggleFragmentFilter(fragmentType)"
+            >
+              {{ fragmentTypeLabel(fragmentType) }}
+              <small>{{ fragmentTypeCount(fragmentType) }}</small>
+            </button>
+            <button
+              class="abnormal-purpose-filter"
+              type="button"
+              :class="{ active: fragmentFilter === 'ABNORMAL' }"
+              :aria-pressed="fragmentFilter === 'ABNORMAL'"
+              @click="fragmentFilter = fragmentFilter === 'ABNORMAL' ? 'ALL' : 'ABNORMAL'"
+            >
+              异常片段 <small>{{ summary.failed }}</small>
+            </button>
+            <label
+              class="compatible-purpose-toggle"
+              :class="{ disabled: !isPurposeFilter(fragmentFilter) }"
+              title="开启后，也会显示将该用途标记为兼容用途的视频素材"
+            >
+              <input
+                v-model="includeCompatiblePurposes"
+                type="checkbox"
+                :disabled="!isPurposeFilter(fragmentFilter)"
+              />
+              <span>包含兼容用途</span>
+            </label>
+          </nav>
+
+          <div v-if="selectionMode" class="selection-action-bar">
+            <span>已选 {{ selectedTasks.length }} 个已完成素材</span>
+            <button type="button" @click="selectAllFiltered">
+              {{ allFilteredSelected ? '取消全选' : '全选筛选结果' }}
+            </button>
+            <button
+              v-if="showDeleteMaterials"
+              class="delete-selection-button"
+              type="button"
+              :disabled="!selectedTasks.length || operation !== null || editTransitioning || batchActive"
+              @click="deleteSelectedMaterials"
+            >
+              <Trash2 :size="13" />删除
+            </button>
+            <button
+              type="button"
+              :disabled="!selectedTasks.length || operation !== null"
+              @click="
+                exportScope = 'SELECTED';
+                openTransferPanel('export', $event);
+              "
+            >
+              导出所选
+            </button>
+          </div>
+
+          <div v-if="pagedTasks.length" class="segment-material-grid">
+            <article
+              v-for="task in pagedTasks"
+              :key="task.id"
+              class="segment-material-card"
+              :class="{
+                abnormal: task.abnormal,
+                'needs-update': task.needsUpdate,
+                selectable: selectionMode && canPreviewTask(task),
+                selected: selectedTaskIds.has(task.id),
+              }"
+              @click="selectionMode && canPreviewTask(task) && toggleTaskSelection(task.id)"
+            >
+              <label
+                v-if="selectionMode && canPreviewTask(task)"
+                class="material-checkbox"
+                @click.stop
+              >
+                <input
+                  type="checkbox"
+                  :checked="selectedTaskIds.has(task.id)"
+                  :aria-label="`选择 ${task.renderCode}`"
+                  @change.stop="toggleTaskSelection(task.id)"
+                />
+              </label>
+              <button
+                v-task-video-visible="taskVideoPosterUrl(task) ? '' : taskVideoKey(task)"
+                class="material-preview"
+                :class="[statusMeta(task.status).tone, { 'video-ready': isTaskVideoReady(task) }]"
+                type="button"
+                :disabled="!canPreviewTask(task)"
+                :aria-label="`${selectionMode ? '选择' : '预览'} ${task.renderCode}`"
+                @click.stop="
+                  selectionMode ? toggleTaskSelection(task.id) : openPreview(task, $event)
+                "
+              >
+                <img
+                  v-if="taskVideoPosterUrl(task)"
+                  class="material-preview-video is-ready"
+                  :src="taskVideoPosterUrl(task)"
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  aria-hidden="true"
+                  @error="handleTaskPosterError(task)"
+                />
+                <video
+                  v-else-if="taskVideoUrl(task) && shouldLoadTaskVideo(task)"
+                  :key="taskVideoKey(task)"
+                  class="material-preview-video"
+                  :class="{ 'is-ready': isTaskVideoReady(task) }"
+                  :src="taskVideoUrl(task)"
+                  muted
+                  playsinline
+                  preload="metadata"
+                  aria-hidden="true"
+                  @loadedmetadata="revealVideoPosterFrame(task, $event)"
+                  @loadeddata="captureTaskVideoPoster(task, $event)"
+                  @seeked="captureTaskVideoPoster(task, $event)"
+                  @error="handleTaskVideoLoadError(task)"
+                />
+                <span class="material-status-pill" :class="statusMeta(task.status).tone">
+                  {{ statusMeta(task.status).label }}
+                </span>
+                <span v-if="task.needsUpdate" class="prompt-update-pill">{{ task.updateKind === 'REMOVE' ? '待移除' : '待更新' }}</span>
+                <LoaderCircle
+                  v-if="isEffectSegmentRenderBusy(task.status)"
+                  class="spin"
+                  :size="25"
+                />
+                <Play v-else :size="27" />
+              </button>
+              <div class="material-card-body">
+                <div class="material-card-title">
+                  <strong :title="creativeCoreForTask(task)">{{
+                    creativeCoreForTask(task)
+                  }}</strong>
+                  <span>{{ task.renderCode }}</span>
+                </div>
+                <p>{{ task.promptCode }}</p>
+                <div class="task-tags">
+                  <span class="primary-tag">{{ fragmentTypeLabel(task.fragmentType) }}</span>
+                  <span
+                    class="origin-tag"
+                    :class="task.origin === 'EXTERNAL_IMPORT' ? 'external' : 'ai'"
+                    >{{ task.origin === 'EXTERNAL_IMPORT' ? '外部导入' : 'AI 生成' }}</span
+                  >
+                </div>
+                <div
+                  v-if="effectSegmentRenderAdditionalPurposes(task).length"
+                  class="compatible-purpose-tags"
+                  aria-label="该视频素材的兼容用途"
+                >
+                  <small>还适合</small>
+                  <span
+                    v-for="compatibleType in effectSegmentRenderAdditionalPurposes(task)"
+                    :key="compatibleType"
+                  >
+                    {{ fragmentTypeLabel(compatibleType) }}
+                  </span>
+                </div>
+                <div class="material-facts" aria-label="视频素材参数">
+                  <span><small>时长</small>{{ importVideoDuration(task.durationSeconds) }}s</span>
+                  <span><small>画幅</small>{{ materialAspectRatioLabel(task.mediaAspectRatio) }}</span>
+                  <span><small>分辨率</small>{{ materialResolutionLabel(task.mediaResolution) }}</span>
+                  <span><small>格式</small>{{ materialFormatLabel(task.output?.mimeType) }}</span>
+                </div>
+                <div v-if="task.errorMessage" class="task-error" role="status">
+                  <AlertCircle :size="12" />{{ task.errorMessage }}
+                </div>
+                <div
+                  v-if="task.repair"
+                  class="repair-status"
+                  :class="task.repair.status.toLowerCase()"
+                >
+                  <Sparkles :size="11" />
+                  <span>
+                    {{
+                      task.repair.status === 'READY'
+                        ? '返修候选待确认'
+                        : task.repair.status === 'FAILED'
+                          ? '返修失败，原视频已保留'
+                          : `返修中 ${task.repair.startMs / 1000}-${task.repair.endMs / 1000}s`
+                    }}
+                  </span>
+                </div>
+                <div v-if="isEffectSegmentRenderBusy(task.status)" class="material-progress">
+                  <i :style="{ width: `${task.progress}%` }" />
+                </div>
+              </div>
+              <footer v-if="!selectionMode" class="material-card-actions">
+                <template v-if="task.repair?.status === 'READY'">
+                  <button type="button" @click="openPreview(task, $event, 'REPAIR')">
+                    预览修复版
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="!canEditMaterials || operation !== null"
+                    @click="decideRepair(task, 'ACCEPT')"
+                  >
+                    采用
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="!canEditMaterials || operation !== null"
+                    @click="decideRepair(task, 'DISCARD')"
+                  >
+                    放弃
+                  </button>
+                </template>
+                <button
+                  v-else-if="task.repair?.status === 'FAILED'"
+                  type="button"
+                  :disabled="!canEditMaterials || operation !== null"
+                  @click="decideRepair(task, 'DISCARD')"
+                >
+                  清除返修记录
+                </button>
+                <button v-else-if="task.repair" type="button" disabled>返修处理中</button>
+                <button
+                  v-else
+                  type="button"
+                  :disabled="
+                    !canEditMaterials ||
+                    operation !== null ||
+                    !!effectSegmentRepairUnavailableReason(task)
+                  "
+                  :title="effectSegmentRepairUnavailableReason(task) || '画面返修'"
+                  @click="openRepair(task, $event)"
+                >
+                  画面返修
+                </button>
+                <button
+                  type="button"
+                  :disabled="!canPreviewTask(task)"
+                  @click="openPreview(task, $event)"
+                >
+                  即时预览
+                </button>
+                <button type="button" @click="openPrompt(task, $event)">来源 Prompt</button>
+                <button
+                  type="button"
+                  :disabled="(!canEditMaterials && !task.needsUpdate) || operation !== null || editTransitioning || !canRetryTask(task)"
+                  :title="task.updateKind === 'REMOVE' ? '请通过顶部局部更新移除素材' : undefined"
+                  @click="retryTask(task.id)"
+                >
+                  {{ task.updateKind === 'REMOVE' ? '待移除' : task.needsUpdate ? '更新素材' : '重新生成' }}
+                </button>
+              </footer>
+            </article>
+          </div>
+
+          <div v-else-if="!hasBatch && !tasks.length" class="segment-batch-empty">
+            <span><Play :size="23" /></span>
+            <strong>{{
+              workspace?.promptReady ? '尚未创建视频渲染任务' : '等待上游 Prompt 校验'
+            }}</strong>
+            <p v-if="workspace?.promptReady">
+              已确认 {{ promptCount }} 条片段 Prompt，可从页头开始批量渲染。
+            </p>
+            <p v-else>请返回 Prompt 节点生成可用版本，渲染节点只消费已确认的工作副本。</p>
+          </div>
+
+          <div v-else class="segment-empty-filter">
+            <Search :size="24" />
+            <strong>没有匹配当前筛选条件的素材</strong>
+            <span>请调整关键词或片段类型。</span>
+          </div>
+
+          <div v-if="tasks.length" class="prompt-pagination">
+            <label class="prompt-page-size">
+              <select v-model.number="pageSize" aria-label="每页展示数量" @change="changePageSize">
+                <option v-for="size in EFFECT_PROMPT_PAGE_SIZE_OPTIONS" :key="size" :value="size">
+                  {{ size }} 条/页
+                </option>
+              </select> </label
+            ><button type="button" :disabled="page <= 1" @click="page -= 1">
+              <ChevronLeft :size="14" />上一页</button
+            ><strong>第 {{ page }} / {{ totalPages }} 页</strong
+            ><button type="button" :disabled="page >= totalPages" @click="page += 1">
+              下一页<ChevronRight :size="14" />
+            </button>
+          </div>
+        </div>
+      </section>
+
+
+      <WorkflowNodeFooter
+        back-label="上一步：素材 Prompt"
+        :show-validate="false"
+        :next-disabled="operation !== null || editTransitioning"
+        next-label="下一步：模板混剪"
+        @back="emit('back')"
+        @next="emit('next')"
+      />
+    </template>
+
+    <EffectPromptRenderConfigurationDialog
+      v-if="promptConfiguration"
+      :inputs="promptConfiguration.inputs"
+      :defaults="promptConfiguration.defaults"
+      @cancel="settlePromptConfiguration(null)"
+      @confirm="settlePromptConfiguration"
+    />
+
+    <Teleport to="body">
+      <div
+        v-if="previewTask"
+        class="segment-dialog-backdrop"
+        @mousedown.self="closeAllDialogs(true)"
+      >
+        <section
+          class="segment-dialog preview-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="segment-preview-title"
+          @keydown.esc="closeAllDialogs(true)"
+        >
+          <header>
+            <h2 id="segment-preview-title">渲染片段即时预览</h2>
+            <button
+              ref="previewCloseButton"
+              type="button"
+              aria-label="关闭即时预览"
+              @click="closeAllDialogs(true)"
+            >
+              <X :size="16" />
+            </button>
+          </header>
+          <div class="large-preview" :style="previewFrameStyle">
+            <LoaderCircle v-if="previewLoading" class="spin" :size="34" />
+            <div v-else-if="previewError" class="preview-load-error" role="alert">
+              <AlertCircle :size="28" />
+              <small>{{ previewError }}</small>
+            </div>
+            <video
+              v-else-if="previewUrl"
+              :class="{ 'is-ready': previewVideoReady }"
+              :src="previewUrl"
+              controls
+              autoplay
+              playsinline
+              @loadedmetadata="handlePreviewVideoMetadata"
+              @canplay="previewVideoReady = true"
+              @error="handlePreviewVideoError"
+            />
+            <template v-else>
+              <Play :size="34" />
+              <small>{{ importVideoDuration(previewTask.durationSeconds) }}s</small>
+            </template>
+            <LoaderCircle
+              v-if="previewUrl && !previewVideoReady"
+              class="spin preview-video-loader"
+              :size="34"
+            />
+          </div>
+          <div class="preview-meta">
+            <span>
+              <strong>{{ previewTask.productName }} · {{ previewTask.renderCode }}</strong>
+              <small
+                >{{ previewTask.promptCode ?? previewTask.sourceName }} ·
+                {{ fragmentTypeLabel(previewTask.fragmentType) }}</small
+              >
+            </span>
+            <span
+              class="origin-tag preview-origin-tag"
+              :class="previewTask.origin === 'EXTERNAL_IMPORT' ? 'external' : 'ai'"
+              >{{ previewTask.origin === 'EXTERNAL_IMPORT' ? '外部导入' : 'AI 生成' }}</span
+            >
+          </div>
+          <EffectSegmentRenderSourcePrompt
+            :details="previewTaskDetails"
+            :prompt-text="previewTask.promptText"
+            compact
+            heading="来源 Prompt"
+          />
+          <p v-if="previewVariant === 'REPAIR'" class="dialog-note">
+            当前预览的是返修候选；采用前不会覆盖原视频。
+          </p>
+        </section>
+      </div>
+
+      <div
+        v-if="repairTask"
+        class="segment-dialog-backdrop"
+        @mousedown.self="closeAllDialogs(true)"
+      >
+        <section
+          class="segment-dialog repair-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="segment-repair-title"
+          @keydown.esc="closeAllDialogs(true)"
+        >
+          <header>
+            <div>
+              <h2 id="segment-repair-title">返修指定画面</h2>
+              <small>{{ repairTask.renderCode }} · 完整参考视频 4～30 秒</small>
+              <small v-if="repairTask.independentImport">{{
+                importedRenderDescription(repairTask)
+              }}</small>
+            </div>
+            <button
+              ref="repairCloseButton"
+              type="button"
+              aria-label="关闭视频返修"
+              @click="closeAllDialogs(true)"
+            >
+              <X :size="16" />
+            </button>
+          </header>
+          <div class="repair-dialog-body">
+            <p>
+              在视频下方拖动前后指针选择问题画面，再填写该范围内需要修改的内容。原 Prompt
+              不会改动，生成结果会先作为候选保存。
+            </p>
+            <div class="large-preview repair-video-preview" :style="repairFrameStyle">
+              <LoaderCircle v-if="previewLoading" class="spin" :size="34" />
+              <div v-else-if="previewError" class="preview-load-error" role="alert">
+                <AlertCircle :size="28" />
+                <small>{{ previewError }}</small>
+              </div>
+              <video
+                v-else-if="previewUrl"
+                ref="repairVideo"
+                :class="{ 'is-ready': previewVideoReady }"
+                :src="previewUrl"
+                controls
+                playsinline
+                @loadedmetadata="handleRepairVideoMetadata"
+                @canplay="handleRepairVideoReady"
+                @error="handlePreviewVideoError"
+                @timeupdate="stopRepairRangePreviewAtEnd"
+                @pause="repairRangePlaying = false"
+                @ended="repairRangePlaying = false"
+              />
+              <template v-else>
+                <Play :size="34" />
+                <small>{{ importVideoDuration(repairTask.durationSeconds) }}s</small>
+              </template>
+              <LoaderCircle
+                v-if="previewUrl && !previewVideoReady"
+                class="spin preview-video-loader"
+                :size="34"
+              />
+            </div>
+            <div class="repair-range-editor">
+              <div class="repair-range-heading">
+                <span>选择返修范围</span>
+                <div class="repair-boundary-buttons">
+                  <button
+                    type="button"
+                    :class="{ active: repairActiveBoundary === 'start' }"
+                    @click="selectRepairBoundary('start')"
+                  >
+                    起点 <strong>{{ formatRepairTime(repairStartSeconds) }}</strong>
+                  </button>
+                  <button
+                    type="button"
+                    :class="{ active: repairActiveBoundary === 'end' }"
+                    @click="selectRepairBoundary('end')"
+                  >
+                    终点 <strong>{{ formatRepairTime(repairEndSeconds) }}</strong>
+                  </button>
+                </div>
+              </div>
+              <div
+                class="repair-range-track"
+                aria-label="返修时间范围，点击轨道可移动最近的指针"
+                @pointerdown="selectRepairBoundaryAtTrack"
+              >
+                <span class="repair-range-selection" :style="repairSelectionStyle"></span>
+                <input
+                  class="repair-range-input repair-range-input-start"
+                  :class="{ active: repairActiveBoundary === 'start' }"
+                  type="range"
+                  min="0"
+                  :max="repairTask.durationSeconds"
+                  step="0.1"
+                  :value="repairStartSeconds"
+                  :disabled="!previewVideoReady"
+                  :aria-valuetext="formatRepairTime(repairStartSeconds)"
+                  aria-label="返修范围开始位置"
+                  @input="updateRepairStart"
+                />
+                <input
+                  class="repair-range-input repair-range-input-end"
+                  :class="{ active: repairActiveBoundary === 'end' }"
+                  type="range"
+                  min="0"
+                  :max="repairTask.durationSeconds"
+                  step="0.1"
+                  :value="repairEndSeconds"
+                  :disabled="!previewVideoReady"
+                  :aria-valuetext="formatRepairTime(repairEndSeconds)"
+                  aria-label="返修范围结束位置"
+                  @input="updateRepairEnd"
+                />
+              </div>
+              <div class="repair-range-footer">
+                <span>0.0s</span>
+                <button
+                  type="button"
+                  :disabled="!previewVideoReady"
+                  @click="toggleRepairRangePreview"
+                >
+                  <Pause v-if="repairRangePlaying" :size="13" />
+                  <Play v-else :size="13" />
+                  {{ repairRangePlaying ? '停止预览' : '预览选中范围' }}
+                </button>
+                <span>{{ formatRepairTime(repairTask.durationSeconds) }}</span>
+              </div>
+              <div class="repair-current-toolbar">
+                <span
+                  >当前画面 <strong>{{ formatRepairTime(repairCurrentSeconds) }}</strong></span
+                >
+                <div>
+                  <button
+                    type="button"
+                    :disabled="!previewVideoReady"
+                    @click="setRepairBoundaryFromCurrentFrame('start')"
+                  >
+                    设为起点
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="!previewVideoReady"
+                    @click="setRepairBoundaryFromCurrentFrame('end')"
+                  >
+                    设为终点
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="!previewVideoReady"
+                    :aria-label="`${repairActiveBoundary === 'start' ? '起点' : '终点'}后退 0.1 秒`"
+                    @click="nudgeRepairBoundary(-0.1)"
+                  >
+                    −0.1s
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="!previewVideoReady"
+                    :aria-label="`${repairActiveBoundary === 'start' ? '起点' : '终点'}前进 0.1 秒`"
+                    @click="nudgeRepairBoundary(0.1)"
+                  >
+                    +0.1s
+                  </button>
+                </div>
+              </div>
+            </div>
+            <label class="repair-instruction-field">
+              <span>画面返修要求</span>
+              <textarea
+                v-model="repairInstruction"
+                maxlength="1000"
+                placeholder="例如：移除台面右侧的黑色污点，保持人物、产品和镜头运动不变。"
+              />
+              <small>{{ repairInstruction.trim().length }}/1000</small>
+            </label>
+          </div>
+          <footer>
+            <button type="button" @click="closeAllDialogs(true)">取消</button>
+            <button
+              class="primary"
+              type="button"
+              :disabled="
+                operation !== null ||
+                !previewVideoReady ||
+                !repairInstruction.trim() ||
+                repairStartSeconds < 0 ||
+                repairEndSeconds <= repairStartSeconds ||
+                repairEndSeconds > repairTask.durationSeconds
+              "
+              @click="submitRepair"
+            >
+              <LoaderCircle v-if="operation === 'repair'" class="spin" :size="14" />
+              {{ operation === 'repair' ? '正在生成候选…' : '生成返修候选' }}
+            </button>
+          </footer>
+        </section>
+      </div>
+
+      <div
+        v-if="promptTask"
+        class="segment-dialog-backdrop"
+        @mousedown.self="closeAllDialogs(true)"
+      >
+        <section
+          class="segment-dialog prompt-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="segment-prompt-title"
+          @keydown.esc="closeAllDialogs(true)"
+        >
+          <header>
+            <h2 id="segment-prompt-title">任务 Prompt 原文</h2>
+            <button
+              ref="promptCloseButton"
+              type="button"
+              aria-label="关闭 Prompt 原文"
+              @click="closeAllDialogs(true)"
+            >
+              <X :size="16" />
+            </button>
+          </header>
+          <div class="prompt-dialog-meta">
+            <span>
+              <strong>{{ promptTask.productName }} · {{ promptTask.renderCode }}</strong>
+              <small
+                >{{ promptTask.promptCode }} · 推荐用途：{{
+                  fragmentTypeLabel(promptTask.fragmentType)
+                }}</small
+              >
+            </span>
+            <em>来源 Prompt</em>
+          </div>
+          <EffectSegmentRenderSourcePrompt
+            :details="promptTaskDetails"
+            :prompt-text="promptTask.promptText"
+          />
+          <footer><button type="button" @click="closeAllDialogs(true)">关闭</button></footer>
+        </section>
+      </div>
+
+      <div
+        v-if="transferPanel"
+        :class="[
+          'segment-transfer-backdrop',
+          { 'segment-import-backdrop': transferPanel === 'import' },
+        ]"
+        @mousedown.self="closeTransferPanel(true)"
+      >
+        <section
+          class="segment-transfer-drawer"
+          :class="{
+            'segment-import-modal': transferPanel === 'import',
+            'segment-import-empty': transferPanel === 'import' && !importColumns.length,
+          }"
+          :style="
+            transferPanel === 'import'
+              ? {
+                  '--import-modal-width': `${importColumns.length ? Math.max(640, importColumns.length * 420 + 32) : 560}px`,
+                }
+              : undefined
+          "
+          role="dialog"
+          aria-modal="true"
+          :aria-labelledby="
+            transferPanel === 'import' ? 'segment-import-title' : 'segment-export-title'
+          "
+          @keydown.esc="closeTransferPanel(true)"
+          @keydown="handleTransferKeydown"
+        >
+          <header>
+            <div>
+              <span
+                ><Upload v-if="transferPanel === 'import'" :size="17" /><Download v-else :size="17"
+              /></span>
+              <div>
+                <h2
+                  :id="transferPanel === 'import' ? 'segment-import-title' : 'segment-export-title'"
+                >
+                  {{ transferPanel === 'import' ? '导入外部视频素材' : '导出视频素材' }}
+                </h2>
+                <p v-if="transferPanel === 'import'">
+                  校验视频后填写素材提示词，确认后新增素材，不替换已有视频。
+                </p>
+                <p v-else>选择导出范围和随包清单，已完成素材才会进入导出结果。</p>
+              </div>
+            </div>
+            <button
+              ref="transferCloseButton"
+              type="button"
+              aria-label="关闭素材传输面板"
+              :disabled="importConfirming"
+              @click="closeTransferPanel(true)"
+            >
+              <X :size="17" />
+            </button>
+          </header>
+
+          <template v-if="transferPanel === 'import'">
+            <input
+              ref="importInput"
+              class="visually-hidden"
+              type="file"
+              multiple
+              accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm"
+              @change="handleImportFileChange"
+            />
+            <div v-if="importError" class="transfer-note" role="alert">
+              <AlertCircle :size="15" />
+              <p>{{ importError }}</p>
+            </div>
+            <button
+              v-if="!importColumns.length"
+              class="import-dropzone"
+              type="button"
+              @click="importInput?.click()"
+            >
+              <span><FileVideo2 :size="24" /></span>
+              <strong>选择要导入的视频素材</strong>
+              <small>最多 5 个；支持 MP4、MOV、WebM；时长 4～30 秒，单个不超过 512 MB</small>
+            </button>
+            <div
+              v-else
+              class="import-review-list"
+              :style="{ '--import-columns': importColumns.length }"
+              aria-label="待导入视频"
+            >
+              <article v-for="column in importColumns" :key="column.key" class="import-prompt-item">
+                <div class="import-column-top">
+                  <div class="import-column-heading">
+                    <span><FileVideo2 :size="16" /></span>
+                    <strong :title="column.file.name">{{ column.file.name }}</strong>
+                    <button
+                      type="button"
+                      :aria-label="`移除 ${column.file.name}`"
+                      :disabled="column.confirming || column.removing"
+                      @click="imports.remove(column)"
+                    >
+                      <LoaderCircle v-if="column.removing" class="spin" :size="15" /><X
+                        v-else
+                        :size="15"
+                      />
+                    </button>
+                  </div>
+                  <div
+                    v-if="importColumnError(column)"
+                    class="transfer-note import-column-error"
+                    role="alert"
+                    aria-label="视频处理错误"
+                  >
+                    <AlertCircle :size="15" />
+                    <p>{{ importColumnError(column) }}</p>
+                  </div>
+                </div>
+                <div class="import-column-body">
+                  <div
+                    class="large-preview import-video-preview"
+                    :style="importVideoPreviewStyle(column.previewSize ?? column.draft ?? {})"
+                  >
+                    <video
+                      :ref="
+                        (element) => {
+                          column.video = element as HTMLVideoElement | null;
+                        }
+                      "
+                      :src="column.previewUrl"
+                      :aria-label="`${column.file.name} 的视频预览`"
+                      class="is-ready"
+                      controls
+                      playsinline
+                      preload="metadata"
+                      @loadedmetadata="handleImportPreviewMetadata(column, $event)"
+                      @error="handleImportPreviewError(column, $event)"
+                    />
+                  </div>
+                  <p v-if="column.previewError" class="import-preview-error" role="alert">
+                    当前浏览器无法播放此视频，请检查编码格式或使用其他播放器预览。
+                  </p>
+                  <div
+                    v-if="column.uploading || (!column.draft && !column.error)"
+                    class="transfer-loading"
+                    role="status"
+                  >
+                    <LoaderCircle class="spin" :size="17" />{{
+                      column.uploading ? '正在校验格式与时长…' : '等待上传…'
+                    }}
+                  </div>
+                  <template v-if="column.draft">
+                    <dl class="import-video-info">
+                      <div>
+                        <dt>时长</dt>
+                        <dd>{{ importVideoDuration(column.draft.durationSeconds) }} 秒</dd>
+                      </div>
+                      <div>
+                        <dt>分辨率</dt>
+                        <dd
+                          :title="`${(column.previewSize ?? column.draft).width ?? '—'} × ${(column.previewSize ?? column.draft).height ?? '—'}`"
+                        >
+                          {{ importVideoResolution(column.previewSize ?? column.draft) }}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>画幅</dt>
+                        <dd>{{ importVideoAspectRatio(column.previewSize ?? column.draft) }}</dd>
+                      </div>
+                      <div>
+                        <dt>帧率</dt>
+                        <dd>{{ importVideoFrameRate(column.draft.frameRate) }}</dd>
+                      </div>
+                      <div>
+                        <dt>大小</dt>
+                        <dd>{{ formatFileSize(column.draft.sizeBytes) }}</dd>
+                      </div>
+                      <div>
+                        <dt>格式</dt>
+                        <dd>{{ column.file.name.split('.').pop()?.toUpperCase() }}</dd>
+                      </div>
+                    </dl>
+                    <label class="repair-instruction-field import-prompt-field">
+                      <span>素材提示词 <em class="import-field-required">必填</em></span>
+                      <textarea
+                        v-model="column.draft.promptText"
+                        :aria-label="`${column.draft.fileName} 的素材提示词`"
+                        rows="4"
+                        maxlength="4000"
+                        :disabled="importColumnLocked(column)"
+                        placeholder="描述视频画面、主体动作和镜头变化，也可点击智能识别视频后编辑。"
+                      />
+                    </label>
+                    <fieldset class="import-purpose-field" :disabled="importColumnLocked(column)">
+                      <legend>主要片段类型 <em class="import-field-required">必填</em></legend>
+                      <div class="import-purpose-options">
+                        <label
+                          v-for="purpose in EFFECT_PROMPT_FRAGMENT_TYPES"
+                          :key="purpose"
+                          :class="{ selected: column.draft.primaryPurpose === purpose }"
+                        >
+                          <input
+                            type="radio"
+                            :name="`import-primary-${column.draft.id}`"
+                            :value="purpose"
+                            :checked="column.draft.primaryPurpose === purpose"
+                            @change="selectImportPrimary(column, purpose)"
+                          />
+                          {{ EFFECT_PROMPT_FRAGMENT_TYPE_LABELS[purpose] }}
+                        </label>
+                      </div>
+                    </fieldset>
+                    <fieldset class="import-purpose-field" :disabled="importColumnLocked(column)">
+                      <legend>兼容片段类型 <em class="import-field-required">必填</em></legend>
+                      <div class="import-purpose-options">
+                        <label
+                          v-for="purpose in EFFECT_PROMPT_FRAGMENT_TYPES"
+                          :key="purpose"
+                          :class="{ selected: column.draft.compatiblePurposes?.includes(purpose) }"
+                        >
+                          <input
+                            v-model="column.draft.compatiblePurposes"
+                            type="checkbox"
+                            :value="purpose"
+                            :disabled="column.draft.primaryPurpose === purpose"
+                          />
+                          {{ EFFECT_PROMPT_FRAGMENT_TYPE_LABELS[purpose] }}
+                        </label>
+                      </div>
+                    </fieldset>
+                    <label class="repair-instruction-field import-prompt-field">
+                      <span>创意方向 <em class="import-field-optional">选填</em></span>
+                      <textarea
+                        v-model="column.draft.creativeCore"
+                        :aria-label="`${column.file.name} 的创意方向`"
+                        rows="2"
+                        maxlength="160"
+                        :disabled="importColumnLocked(column)"
+                        placeholder="概括这段视频的观看事件和产品价值"
+                      />
+                    </label>
+                    <details v-if="column.draft.dimensions" class="import-creative-details">
+                      <summary>六维创意信息 <em class="import-field-optional">选填</em></summary>
+                      <label
+                        v-for="dimension in EFFECT_PROMPT_DIMENSIONS"
+                        :key="dimension.key"
+                        class="repair-instruction-field import-prompt-field"
+                      >
+                        <span
+                          >{{ dimension.label }} <em class="import-field-optional">选填</em></span
+                        >
+                        <textarea
+                          v-model="column.draft.dimensions[dimension.key]"
+                          :aria-label="`${column.file.name} 的${dimension.label}`"
+                          rows="2"
+                          :maxlength="EFFECT_SEGMENT_IMPORT_DIMENSION_LIMITS[dimension.key]"
+                          :disabled="importColumnLocked(column)"
+                          :placeholder="`填写${dimension.label}，也可由智能识别视频后编辑`"
+                        />
+                      </label>
+                    </details>
+                  </template>
+                  <button
+                    v-if="column.error && !column.draft"
+                    type="button"
+                    :disabled="column.uploading || column.uploadQueued"
+                    @click="imports.retryUpload(column)"
+                  >
+                    重新上传
+                  </button>
+                </div>
+                <div class="import-column-footer">
+                  <small role="status">{{
+                    importRecognitionBusy(column)
+                      ? 'AI 正在识别，请稍候…'
+                      : column.confirming
+                        ? '正在确认导入…'
+                        : '确认前可自由编辑'
+                  }}</small>
+                  <div class="import-column-actions">
+                    <button
+                      type="button"
+                      :disabled="!column.draft || importColumnLocked(column)"
+                      @click="imports.recognize(column)"
+                    >
+                      {{ importRecognitionLabel(column) }}
+                    </button>
+                    <button
+                      type="button"
+                      class="primary"
+                      :aria-label="`确认导入 ${column.file.name}`"
+                      :disabled="!importColumnReady(column)"
+                      @click="imports.confirm(column)"
+                    >
+                      <LoaderCircle v-if="column.confirming" class="spin" :size="14" />确认导入
+                    </button>
+                  </div>
+                </div>
+              </article>
+            </div>
+            <footer class="import-batch-footer">
+              <span>{{ importColumns.length }} / 5 个待导入</span>
+              <div>
+                <button
+                  v-if="importColumns.length"
+                  type="button"
+                  :disabled="importColumns.length >= 5"
+                  @click="importInput?.click()"
+                >
+                  <Upload :size="14" />继续添加
+                </button>
+                <button
+                  v-if="importColumns.length > 1"
+                  type="button"
+                  :disabled="
+                    !importColumns.some((column) => column.draft && !importColumnLocked(column))
+                  "
+                  @click="imports.recognizeAll()"
+                >
+                  <Sparkles :size="14" />全部智能识别
+                </button>
+                <button type="button" :disabled="importConfirming" @click="cancelImport">
+                  取消导入
+                </button>
+                <button
+                  type="button"
+                  :disabled="importConfirming"
+                  @click="closeTransferPanel(true)"
+                >
+                  关闭
+                </button>
+              </div>
+            </footer>
+          </template>
+
+          <template v-else>
+            <div class="export-section">
+              <div class="transfer-section-heading">
+                <strong>导出范围</strong><span>{{ exportRangeTasks.length }} 个素材</span>
+              </div>
+              <label
+                ><input v-model="exportScope" type="radio" value="ALL_TASKS" />当前批次全部任务
+                <small>{{ tasks.length }} 个</small></label
+              >
+              <label
+                ><input v-model="exportScope" type="radio" value="FILTERED" />当前筛选结果
+                <small>{{ filteredTasks.length }} 个</small></label
+              >
+              <label :class="{ disabled: !selectedTasks.length }"
+                ><input
+                  v-model="exportScope"
+                  type="radio"
+                  value="SELECTED"
+                  :disabled="!selectedTasks.length"
+                />已选择素材 <small>{{ selectedTasks.length }} 个</small></label
+              >
+            </div>
+            <div class="export-section">
+              <div class="transfer-section-heading">
+                <strong>导出内容</strong><span>可多选</span>
+              </div>
+              <label
+                ><input
+                  type="checkbox"
+                  :checked="exportFormats.includes('VIDEO_PACKAGE')"
+                  @change="toggleExportFormat('VIDEO_PACKAGE')"
+                />视频素材包 ZIP <small>仅包含已完成视频</small></label
+              >
+              <label
+                ><input
+                  type="checkbox"
+                  :checked="exportFormats.includes('MANIFEST_JSON')"
+                  @change="toggleExportFormat('MANIFEST_JSON')"
+                />素材清单 JSON <small>含 Prompt 与用途映射</small></label
+              >
+              <label
+                ><input
+                  type="checkbox"
+                  :checked="exportFormats.includes('FAILURE_CSV')"
+                  @change="toggleExportFormat('FAILURE_CSV')"
+                />异常明细 CSV <small>便于补录与追踪</small></label
+              >
+            </div>
+            <div class="transfer-note">
+              <AlertCircle :size="15" />
+              <p>所选内容统一打包为 ZIP；异常明细只记录当前范围内的失败任务。</p>
+            </div>
+            <footer>
+              <button type="button" @click="closeTransferPanel(true)">取消</button>
+              <button
+                class="primary"
+                type="button"
+                :disabled="operation !== null || !exportRangeTasks.length || !exportFormats.length"
+                @click="downloadExport"
+              >
+                <LoaderCircle v-if="operation === 'export'" class="spin" :size="14" />生成导出包
+              </button>
+            </footer>
+          </template>
+        </section>
+      </div>
+    </Teleport>
+  </section>
+</template>
+
+<style scoped>
+.effect-segment-render-node {
+  --effect-blue: #2563eb;
+  position: relative;
+  margin-top: 18px;
+  padding: 28px;
+  color: #253047;
+  background: #fff;
+  border: 1px solid #dbe4f6;
+  border-radius: 26px;
+  box-shadow: 0 12px 34px #7a4e3b12;
+}
+.segment-notice {
+  position: fixed;
+  z-index: 1300;
+  top: 145px;
+  right: 24px;
+  max-width: 420px;
+  padding: 11px 15px;
+  color: #245643;
+  background: #effaf5;
+  border: 1px solid #b7e3d3;
+  border-radius: 10px;
+  box-shadow: 0 12px 30px #1a2a4430;
+  font-size: 11px;
+  font-weight: 800;
+}
+.segment-notice.warning {
+  color: #926123;
+  background: #fff9eb;
+  border-color: #f3d69a;
+}
+.segment-notice.error {
+  color: #a84148;
+  background: #fff3f2;
+  border-color: #f3c6c4;
+}
+.segment-notice-enter-active,
+.segment-notice-leave-active {
+  transition: 0.2s ease;
+}
+.segment-notice-enter-from,
+.segment-notice-leave-to {
+  opacity: 0;
+  transform: translateY(-7px);
+}
+.segment-page-state {
+  display: flex;
+  min-height: 420px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  color: #7f8da2;
+  text-align: center;
+}
+.segment-page-state > svg {
+  color: var(--effect-blue);
+}
+.segment-page-state.error > svg {
+  color: #d65355;
+}
+.segment-page-state h2 {
+  margin: 13px 0 5px;
+  color: #34445c;
+  font-size: 18px;
+}
+.segment-page-state p {
+  margin: 0;
+  font-size: 11px;
+}
+.segment-page-state button,
+.secondary-button,
+.primary-button {
+  display: inline-flex;
+  height: 40px;
+  padding: 0 18px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.segment-page-state button,
+.secondary-button {
+  color: #42526a;
+  background: #fff;
+  border: 1px solid #dbe4f6;
+}
+.segment-page-state button {
+  margin-top: 15px;
+}
+.primary-button {
+  color: #fff;
+  background: var(--effect-blue);
+  border: 1px solid var(--effect-blue);
+  box-shadow: 0 8px 18px #2563eb2e;
+}
+button:disabled,
+input:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+.segment-heading {
+  display: flex;
+  min-height: 50px;
+  margin-bottom: 22px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.segment-heading__title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 14px;
+}
+.segment-heading__title > span {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  place-items: center;
+  color: #d67b16;
+  background: #fff5e7;
+  border-radius: 14px;
+  font-size: 13px;
+  font-weight: 900;
+}
+.segment-heading h2,
+.segment-heading p {
+  margin: 0;
+}
+.segment-heading h2 {
+  color: #172033;
+  font-size: 21px;
+}
+.segment-heading p {
+  margin-top: 5px;
+  color: #7d899d;
+  font-size: 13px;
+}
+.segment-heading__actions {
+  display: flex;
+  margin-left: auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.render-settings-card {
+  padding: 16px 18px;
+  background: linear-gradient(135deg, #f8fbff 0%, #fffaf7 100%);
+  border: 1px solid #dce6f5;
+  border-radius: 16px;
+}
+.render-settings-card__heading {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+.render-settings-card__heading > span {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: #2563eb;
+  background: #eaf2ff;
+  border-radius: 10px;
+}
+.render-settings-card h3,
+.render-settings-card p {
+  margin: 0;
+}
+.render-settings-card h3 {
+  color: #29384f;
+  font-size: 14px;
+}
+.render-settings-card p,
+.render-settings-card small {
+  color: #7b8aa1;
+  font-size: 11px;
+}
+.render-settings-card p {
+  margin-top: 3px;
+}
+.render-settings-card small {
+  color: #15956f;
+  font-weight: 700;
+}
+.render-settings-grid {
+  display: grid;
+  margin-top: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.render-settings-grid > label {
+  display: grid;
+  gap: 7px;
+}
+.render-settings-grid > label > span {
+  color: #506078;
+  font-size: 11px;
+  font-weight: 700;
+}
+.secondary-button {
+  min-width: 171px;
+}
+.segment-local-update-button {
+  color: #a66a0b;
+  background: #fffaf0;
+  border-color: #f5ca80;
+}
+.start-render-button {
+  min-width: 154px;
+}
+.segment-stats {
+  display: grid;
+  margin-top: 18px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.stat-card {
+  position: relative;
+  min-height: 109px;
+  padding: 17px 18px;
+  overflow: hidden;
+  border-radius: 17px;
+}
+.stat-card span,
+.stat-card small {
+  display: block;
+  color: #838b9b;
+  font-size: 11px;
+}
+.stat-card strong {
+  display: block;
+  margin: 7px 0 3px;
+  font-size: 25px;
+  line-height: 1;
+}
+.stat-card.neutral {
+  background: #f7f8fa;
+  border: 1px solid #e5e8ed;
+}
+.stat-card.neutral strong {
+  color: #253047;
+}
+.stat-card.cyan {
+  background: #eefafd;
+  border: 1px solid #ccecf0;
+}
+.stat-card.cyan strong {
+  color: #18859a;
+}
+.stat-card.amber {
+  background: #fff8e8;
+  border: 1px solid #f5e4b5;
+}
+.stat-card.amber strong {
+  color: #bd7a12;
+}
+.stat-card.coral {
+  background: #eef3ff;
+  border: 1px solid #ffd9cf;
+}
+.stat-card.coral strong {
+  color: #e14950;
+}
+.segment-task-list {
+  display: grid;
+  margin-top: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.segment-toolbar {
+  display: flex;
+  min-height: 54px;
+  padding: 10px 14px;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 12px;
+  color: #253047;
+  background: #f7f9fc;
+  border: 1px solid #e5e9f2;
+  border-radius: 12px;
+}
+.segment-filter-controls {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+}
+.segment-search {
+  display: flex;
+  width: min(360px, 100%);
+  height: 32px;
+  padding: 0 9px;
+  align-items: center;
+  gap: 6px;
+  color: #8792a4;
+  background: #fff;
+  border: 1px solid #d7dfeb;
+  border-radius: 6px;
+}
+.segment-search:focus-within {
+  border-color: #4f8df7;
+}
+.segment-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: #334155;
+  background: transparent;
+  font-size: 10px;
+}
+.segment-filter select {
+  height: 32px;
+  min-width: 142px;
+  padding: 0 30px 0 10px;
+  color: #526078;
+  background: #fff;
+  border: 1px solid #d7dfeb;
+  border-radius: 6px;
+  outline: 0;
+  font-size: 10px;
+}
+.segment-filter select:focus {
+  border-color: #4f8df7;
+}
+.filtered-result-count {
+  margin-left: auto;
+  color: #7f8a9e;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.segment-task-card {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 154px;
+  padding: 14px 16px;
+  grid-template-columns: 112px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  background: #fff;
+  border: 1px solid #eadfd8;
+  border-radius: 12px;
+  transition: 0.15s;
+}
+.segment-task-card:hover {
+  border-color: #8eb2ee;
+}
+.segment-task-card.abnormal {
+  background: #fffafa;
+  border-color: #ef9ba5;
+}
+.video-placeholder {
+  position: relative;
+  display: grid;
+  width: 112px;
+  height: 92px;
+  padding: 0;
+  place-items: center;
+  overflow: hidden;
+  color: #fff;
+  background: linear-gradient(135deg, #ba604d, #f6a349);
+  border: 0;
+  border-radius: 12px;
+}
+.video-placeholder.running,
+.video-placeholder.retry,
+.video-placeholder.pending {
+  background: linear-gradient(135deg, #5c7fc4, #65b9de);
+}
+.video-placeholder.danger {
+  background: linear-gradient(135deg, #b6404e, #e77869);
+}
+.video-placeholder small {
+  position: absolute;
+  right: 6px;
+  bottom: 5px;
+  color: #fff;
+  font-size: 9px;
+}
+.task-main {
+  min-width: 0;
+}
+.task-title {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.task-title > div:first-child {
+  min-width: 180px;
+  flex: 1 1 180px;
+}
+.task-title strong {
+  display: block;
+  overflow: hidden;
+  color: #253047;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-title p {
+  margin: 4px 0 7px;
+  overflow: hidden;
+  color: #8490a4;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-actions {
+  display: flex;
+  min-width: max-content;
+  margin-left: auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  white-space: nowrap;
+}
+.task-actions button {
+  height: 26px;
+  padding: 0 3px;
+  color: #526078;
+  background: transparent;
+  border: 0;
+  font-size: 9px;
+  font-weight: 650;
+}
+.task-actions button:hover {
+  color: #2563eb;
+}
+.task-actions button.danger {
+  color: #b94a55;
+}
+.task-actions em {
+  padding: 3px 7px;
+  color: #0f8a68;
+  background: #eaf8f3;
+  border-radius: 5px;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+}
+.task-actions em.running,
+.task-actions em.pending {
+  color: #2563eb;
+  background: #eaf2ff;
+}
+.task-actions em.retry {
+  color: #a46b0a;
+  background: #fff5dc;
+}
+.task-actions em.danger {
+  color: #c93448;
+  background: #fff0f2;
+}
+.task-tags {
+  display: flex;
+  margin: 6px 0;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.task-tags span {
+  min-height: 20px;
+  padding: 2px 7px;
+  color: #2874e8;
+  background: #f8fbff;
+  border: 1px solid #b9d3ff;
+  border-radius: 4px;
+  font-size: 10px;
+}
+.task-tags span.primary-tag {
+  color: #ef5366;
+  background: #fffafa;
+  border-color: #ffb9bd;
+}
+.task-error {
+  display: flex;
+  margin: 5px 0;
+  align-items: center;
+  gap: 4px;
+  color: #bd3346;
+  font-size: 9px;
+}
+.task-progress {
+  display: flex;
+  margin-top: 7px;
+  align-items: center;
+  gap: 8px;
+}
+.task-progress > span {
+  color: #526078;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.task-progress > div {
+  height: 6px;
+  flex: 1;
+  overflow: hidden;
+  background: #e7ecf3;
+  border-radius: 5px;
+}
+.task-progress i {
+  display: block;
+  height: 100%;
+  background: #4f8df7;
+  border-radius: inherit;
+  transition: width 0.25s;
+}
+.task-progress i.retry {
+  background: #d99a22;
+}
+.task-progress i.danger {
+  background: #dc3f52;
+}
+.task-progress b {
+  width: 34px;
+  color: #2563eb;
+  font-size: 10px;
+  text-align: right;
+}
+.segment-batch-empty,
+.segment-empty-filter {
+  display: flex;
+  min-height: 230px;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 7px;
+  color: #8792a4;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+}
+.segment-batch-empty {
+  padding: 28px;
+  color: #79869c;
+  background: linear-gradient(145deg, #fbfdff, #fffaf6);
+  border-color: #cddcf4;
+}
+.segment-batch-empty > span {
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  color: #2563eb;
+  background: #eaf2ff;
+  border-radius: 15px;
+}
+.segment-batch-empty strong {
+  margin-top: 3px;
+  color: #253047;
+  font-size: 16px;
+}
+.segment-batch-empty p {
+  max-width: 520px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.75;
+  text-align: center;
+}
+.segment-empty-filter strong {
+  color: #526078;
+  font-size: 13px;
+}
+.segment-empty-filter span {
+  font-size: 10px;
+}
+.segment-pagination {
+  display: flex;
+  min-height: 61px;
+  margin-top: 2px;
+  padding: 10px 14px;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  color: #7d899d;
+  border-top: 1px solid #f0f2f5;
+  font-size: 12px;
+}
+.segment-pagination > span,
+.segment-pagination button {
+  display: inline-flex;
+  height: 40px;
+  padding: 0 12px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: #5b6679;
+  background: #fff;
+  border: 1px solid #dfe5ed;
+  border-radius: 10px;
+}
+.segment-pagination > span {
+  min-width: 90px;
+}
+.visually-hidden {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.segment-dialog-backdrop {
+  position: fixed;
+  z-index: 1400;
+  inset: 0;
+  display: grid;
+  padding: 20px;
+  place-items: center;
+  background: #0f172a66;
+  backdrop-filter: blur(4px);
+}
+.segment-dialog {
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #dbe4f6;
+  border-radius: 18px;
+  box-shadow: 0 24px 70px #0f172a38;
+}
+.segment-dialog > header {
+  display: flex;
+  padding: 18px 18px 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.segment-dialog h2 {
+  margin: 0;
+  color: #253047;
+  font-size: 19px;
+}
+.segment-dialog > header p {
+  margin: 5px 0 0;
+  color: #8490a4;
+  font-size: 10px;
+}
+.segment-dialog > header button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  color: #7b8798;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+}
+.preview-dialog {
+  width: min(520px, 100%);
+  padding: 0 16px 16px;
+}
+.large-preview {
+  position: relative;
+  display: grid;
+  max-width: 100%;
+  margin: 0 auto;
+  place-items: center;
+  color: #5f7cae;
+  background: linear-gradient(135deg, #edf3fa, #e4ecf6);
+  border-radius: 18px;
+  overflow: hidden;
+}
+.large-preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #111827;
+  opacity: 0;
+}
+.large-preview video.is-ready {
+  opacity: 1;
+}
+.preview-video-loader {
+  position: absolute;
+  z-index: 2;
+}
+.preview-load-error {
+  display: grid;
+  max-width: 360px;
+  padding: 20px;
+  gap: 10px;
+  place-items: center;
+  text-align: center;
+}
+.large-preview small {
+  position: absolute;
+  right: 14px;
+  bottom: 10px;
+  font-size: 11px;
+}
+.preview-meta,
+.prompt-dialog-meta {
+  display: flex;
+  padding: 14px 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.preview-meta strong,
+.preview-meta small,
+.prompt-dialog-meta strong,
+.prompt-dialog-meta small {
+  display: block;
+}
+.preview-meta strong,
+.prompt-dialog-meta strong {
+  color: #334155;
+  font-size: 12px;
+}
+.preview-meta small,
+.prompt-dialog-meta small {
+  margin-top: 4px;
+  color: #8490a4;
+  font-size: 9px;
+}
+.preview-meta em,
+.prompt-dialog-meta em {
+  padding: 4px 8px;
+  color: #4a8b2a;
+  background: #f0faea;
+  border-radius: 999px;
+  font-size: 9px;
+  font-style: normal;
+  white-space: nowrap;
+}
+.preview-origin-tag {
+  padding: 3px 6px;
+  border-radius: 5px;
+  font-size: 8px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.dialog-note {
+  margin: 0;
+  padding: 10px 12px;
+  color: #8a94a5;
+  background: #f5f6f8;
+  font-size: 11px;
+}
+.prompt-dialog {
+  width: min(620px, 100%);
+  max-height: calc(100vh - 40px);
+  padding: 0 16px 16px;
+  overflow-y: auto;
+}
+.prompt-dialog-meta {
+  border-bottom: 1px solid #e8edf5;
+}
+.prompt-dialog-meta em {
+  color: #3473d4;
+  background: #edf4ff;
+}
+.prompt-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.prompt-dialog > footer button {
+  height: 38px;
+  padding: 0 18px;
+  color: #fff;
+  background: #2563eb;
+  border: 0;
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.repair-dialog {
+  width: min(680px, 100%);
+  max-height: calc(100vh - 40px);
+  padding: 0 18px 18px;
+  overflow-y: auto;
+}
+.repair-dialog header > div small {
+  display: block;
+  margin-top: 4px;
+  color: #8793a6;
+  font-size: 10px;
+}
+.repair-dialog-body > p {
+  margin: 16px 0;
+  color: #65748a;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.repair-video-preview {
+  box-shadow: inset 0 0 0 1px #dbe4f0;
+}
+.repair-instruction-field {
+  display: grid;
+  gap: 7px;
+  color: #485970;
+  font-size: 11px;
+  font-weight: 700;
+}
+.repair-instruction-field textarea {
+  width: 100%;
+  color: #34445b;
+  background: #fbfcfe;
+  border: 1px solid #dbe3ee;
+  border-radius: 9px;
+  outline: none;
+  font: inherit;
+  font-weight: 500;
+}
+.repair-range-editor {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 15px 0 0;
+  padding: 12px 14px 10px;
+  background: #f8faff;
+  border: 1px solid #dce6f6;
+  border-radius: 11px;
+}
+.repair-range-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #52627a;
+  font-size: 11px;
+  font-weight: 700;
+}
+.repair-range-heading strong {
+  color: #2563eb;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.repair-boundary-buttons {
+  display: flex;
+  gap: 6px;
+}
+.repair-boundary-buttons button {
+  height: 30px;
+  padding: 0 9px;
+  color: #65748a;
+  background: #fff;
+  border: 1px solid #d5e0f0;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+}
+.repair-boundary-buttons button.active {
+  color: #1f57ba;
+  background: #edf4ff;
+  border-color: #7fa7f8;
+  box-shadow: 0 0 0 2px #dce8ff;
+}
+.repair-range-track {
+  position: relative;
+  height: 28px;
+  margin-top: 8px;
+  cursor: pointer;
+}
+.repair-range-track::before,
+.repair-range-selection {
+  position: absolute;
+  top: 10px;
+  height: 8px;
+  border-radius: 999px;
+  content: '';
+}
+.repair-range-track::before {
+  right: 0;
+  left: 0;
+  background: #dfe7f2;
+}
+.repair-range-selection {
+  z-index: 1;
+  pointer-events: none;
+  background: #4f7ff1;
+}
+.repair-range-input {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  pointer-events: none;
+  appearance: none;
+  background: transparent;
+  outline: none;
+}
+.repair-range-input-end {
+  z-index: 2;
+}
+.repair-range-input.active {
+  z-index: 4;
+}
+.repair-range-input::-webkit-slider-runnable-track {
+  height: 8px;
+  background: transparent;
+}
+.repair-range-input::-webkit-slider-thumb {
+  width: 19px;
+  height: 26px;
+  margin-top: -9px;
+  pointer-events: auto;
+  appearance: none;
+  cursor: ew-resize;
+  background: #fff;
+  border: 3px solid #2563eb;
+  border-radius: 6px;
+  box-shadow: 0 2px 7px #1d4ed840;
+}
+.repair-range-input::-moz-range-track {
+  height: 8px;
+  background: transparent;
+  border: 0;
+}
+.repair-range-input::-moz-range-thumb {
+  width: 15px;
+  height: 22px;
+  pointer-events: auto;
+  cursor: ew-resize;
+  background: #fff;
+  border: 3px solid #2563eb;
+  border-radius: 6px;
+  box-shadow: 0 2px 7px #1d4ed840;
+}
+.repair-range-input:focus-visible::-webkit-slider-thumb {
+  outline: 3px solid #93b4ff;
+  outline-offset: 2px;
+}
+.repair-range-input:focus-visible::-moz-range-thumb {
+  outline: 3px solid #93b4ff;
+  outline-offset: 2px;
+}
+.repair-range-input:disabled::-webkit-slider-thumb {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.repair-range-input:disabled::-moz-range-thumb {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.repair-range-footer {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+  color: #8a97aa;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.repair-range-footer > span:last-child {
+  text-align: right;
+}
+.repair-range-footer button {
+  display: inline-flex;
+  height: 29px;
+  padding: 0 10px;
+  align-items: center;
+  gap: 5px;
+  color: #2f63bd;
+  background: #fff;
+  border: 1px solid #cddcf5;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 800;
+}
+.repair-range-footer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.repair-current-toolbar {
+  display: flex;
+  margin-top: 9px;
+  padding-top: 9px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid #e1e8f3;
+}
+.repair-current-toolbar > span {
+  color: #718096;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.repair-current-toolbar > span strong {
+  margin-left: 3px;
+  color: #253d69;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.repair-current-toolbar > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+.repair-current-toolbar button {
+  height: 28px;
+  padding: 0 8px;
+  color: #45638f;
+  background: #fff;
+  border: 1px solid #d2deef;
+  border-radius: 7px;
+  font-size: 9px;
+  font-weight: 700;
+}
+.repair-current-toolbar button:hover:not(:disabled) {
+  color: #1f5ec8;
+  border-color: #8aaff5;
+}
+.repair-current-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.repair-instruction-field {
+  position: relative;
+  margin-top: 14px;
+}
+.repair-instruction-field textarea {
+  box-sizing: border-box;
+  min-height: 88px;
+  padding: 11px;
+  resize: vertical;
+  line-height: 1.65;
+}
+.repair-instruction-field small {
+  position: absolute;
+  right: 9px;
+  bottom: 8px;
+  color: #98a3b3;
+  font-size: 9px;
+  font-weight: 500;
+}
+.repair-dialog > footer {
+  display: flex;
+  margin-top: 16px;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.repair-dialog > footer button {
+  display: inline-flex;
+  height: 38px;
+  padding: 0 15px;
+  align-items: center;
+  gap: 6px;
+  color: #56657b;
+  background: #fff;
+  border: 1px solid #dbe3ee;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.repair-dialog > footer button.primary {
+  color: #fff;
+  background: #2563eb;
+  border-color: #2563eb;
+}
+.repair-dialog > footer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.spin {
+  animation: segment-spin 0.75s linear infinite;
+}
+@keyframes segment-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (max-width: 1180px) {
+  .segment-heading,
+  .segment-toolbar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .segment-heading__actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .segment-filter-controls {
+    order: 3;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .segment-search {
+    flex: 1;
+  }
+}
+@media (max-width: 980px) {
+  .render-settings-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .segment-stats,
+  .segment-task-list {
+    grid-template-columns: 1fr;
+  }
+  .segment-task-card,
+  .segment-toolbar,
+  .segment-pagination {
+    grid-column: 1;
+  }
+}
+@media (max-width: 760px) {
+  .effect-segment-render-node {
+    padding: 18px;
+    border-radius: 20px;
+  }
+  .segment-heading__actions,
+  .secondary-button,
+  .start-render-button {
+    width: 100%;
+  }
+  .segment-stats {
+    grid-template-columns: 1fr;
+  }
+  .render-settings-grid {
+    grid-template-columns: 1fr;
+  }
+  .segment-task-card {
+    min-height: 0;
+    grid-template-columns: 1fr;
+  }
+  .video-placeholder {
+    width: 100%;
+    grid-column: 1;
+  }
+  .task-main {
+    grid-column: 1;
+  }
+  .task-actions {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .segment-search,
+  .segment-filter,
+  .segment-filter select {
+    width: 100%;
+  }
+  .filtered-result-count {
+    margin-left: 0;
+  }
+  .segment-dialog-backdrop {
+    padding: 10px;
+  }
+}
+
+/* 素材画廊 */
+.segment-workspace {
+  display: grid;
+  margin-top: 14px;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+.segment-material-panel {
+  min-width: 0;
+  background: #fff;
+  border: 1px solid #dfe6f1;
+  border-radius: 15px;
+}
+.segment-material-panel {
+  overflow: hidden;
+}
+.segment-toolbar {
+  display: flex;
+  min-height: 56px;
+  padding: 9px 12px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #f7f9fc;
+  border: 0;
+  border-bottom: 1px solid #e4e9f1;
+  border-radius: 0;
+}
+.prompt-search {
+  display: flex;
+  width: min(415px, 40%);
+  height: 40px;
+  padding: 0 12px;
+  align-items: center;
+  gap: 8px;
+  color: #7390b3;
+  background: #fff;
+  border: 1px solid #dbe4f6;
+  border-radius: 10px;
+}
+.prompt-search input {
+  min-width: 0;
+  flex: 1;
+  color: #42526a;
+  background: transparent;
+  border: 0;
+  outline: none;
+  font-size: 13px;
+}
+.prompt-search__clear {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  padding: 0;
+  place-items: center;
+  color: #7d8ba0;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+}
+.prompt-search__clear:hover {
+  color: #2563eb;
+  background: #eef4ff;
+}
+.prompt-result-count {
+  margin-right: auto;
+  color: #8b95a5;
+  font-size: 12px;
+}
+.toolbar-result-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.toolbar-result-stats > span {
+  display: inline-flex;
+  min-height: 26px;
+  padding: 0 9px;
+  align-items: center;
+  gap: 4px;
+  color: #397761;
+  background: #eef9f4;
+  border: 1px solid #d2ebdf;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.toolbar-result-stats > span.danger {
+  color: #b5545a;
+  background: #fff3f2;
+  border-color: #f1d2cf;
+}
+.toolbar-result-stats i {
+  width: 5px;
+  height: 5px;
+  background: #27a176;
+  border-radius: 50%;
+}
+.toolbar-result-stats .danger i {
+  background: #df5b61;
+}
+.toolbar-result-stats strong {
+  font-size: 11px;
+}
+.purpose-filter-bar {
+  display: flex;
+  padding: 8px 12px 10px;
+  flex-wrap: wrap;
+  gap: 7px;
+  background: #fff;
+  border-bottom: 1px solid #edf0f5;
+}
+.purpose-filter-bar button {
+  display: inline-flex;
+  min-height: 30px;
+  padding: 0 11px;
+  align-items: center;
+  gap: 5px;
+  color: #62728a;
+  background: #f7f9fc;
+  border: 1px solid #e1e7f0;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.purpose-filter-bar button small {
+  min-width: 18px;
+  padding: 1px 5px;
+  color: #8795aa;
+  background: #fff;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 16px;
+  text-align: center;
+}
+.purpose-filter-bar button.active {
+  color: #245fca;
+  background: #edf4ff;
+  border-color: #bcd0f5;
+}
+.purpose-filter-bar button.active small {
+  color: #245fca;
+  background: #dce9ff;
+}
+.purpose-filter-bar .abnormal-purpose-filter {
+  color: #b85a60;
+  background: #fff7f6;
+  border-color: #efd2cf;
+}
+.purpose-filter-bar .abnormal-purpose-filter.active {
+  color: #c83f49;
+  background: #fff0ef;
+  border-color: #edaeaa;
+}
+.compatible-purpose-toggle {
+  display: inline-flex;
+  min-height: 30px;
+  margin-left: auto;
+  padding: 0 4px;
+  align-items: center;
+  gap: 7px;
+  color: #5d6d84;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  user-select: none;
+}
+.compatible-purpose-toggle input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: #2f6dea;
+}
+.compatible-purpose-toggle.disabled {
+  color: #aab4c3;
+  cursor: not-allowed;
+}
+.segment-filter-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+.segment-search {
+  width: min(300px, 38vw);
+}
+.segment-search,
+.segment-filter {
+  display: flex;
+  height: 36px;
+  align-items: center;
+  color: #8390a5;
+  background: #fff;
+  border: 1px solid #dbe3ef;
+  border-radius: 9px;
+}
+.segment-search svg {
+  flex: 0 0 auto;
+  margin-left: 10px;
+}
+.segment-search input,
+.segment-filter select {
+  width: 100%;
+  height: 100%;
+  color: #42526a;
+  background: transparent;
+  border: 0;
+  outline: none;
+  font-size: 10px;
+}
+.segment-search input {
+  padding: 0 10px 0 7px;
+}
+.segment-filter select {
+  min-width: 132px;
+  padding: 0 26px 0 10px;
+}
+.filtered-result-count {
+  color: #8a97aa;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.selection-mode-button,
+.selection-action-bar button {
+  display: inline-flex;
+  height: 34px;
+  padding: 0 11px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: #4f5f75;
+  background: #fff;
+  border: 1px solid #d8e1ee;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.selection-mode-button.active {
+  color: #2563eb;
+  background: #edf4ff;
+  border-color: #9ebdf9;
+}
+.selection-action-bar {
+  display: flex;
+  min-height: 43px;
+  padding: 6px 12px;
+  align-items: center;
+  gap: 8px;
+  color: #52647c;
+  background: #eff5ff;
+  border-bottom: 1px solid #d8e5fa;
+  font-size: 10px;
+}
+.selection-action-bar span {
+  margin-right: auto;
+  font-weight: 700;
+}
+.selection-action-bar button:last-child {
+  color: #fff;
+  background: #2563eb;
+  border-color: #2563eb;
+}
+.selection-action-bar .delete-selection-button {
+  color: #d14d56;
+  background: #fff;
+  border-color: #efc2c0;
+}
+.segment-material-grid {
+  display: grid;
+  padding: 12px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 11px;
+}
+.segment-material-card {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #e1e6ee;
+  border-radius: 12px;
+  transition: 0.18s ease;
+}
+.segment-material-card:hover {
+  border-color: #aac2f2;
+  box-shadow: 0 8px 18px #315c9c13;
+  transform: translateY(-1px);
+}
+.segment-material-card.abnormal {
+  border-color: #f0b9b3;
+}
+.segment-material-card.selected {
+  border-color: #4f83ef;
+  box-shadow: 0 0 0 2px #4f83ef1f;
+}
+.segment-material-card.needs-update {
+  border-color: #e8b750;
+  box-shadow: 0 0 0 1px #e8b75030;
+}
+.segment-material-card.selectable {
+  cursor: pointer;
+}
+.material-checkbox {
+  position: absolute;
+  z-index: 3;
+  top: 10px;
+  left: 10px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  background: #ffffffee;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px #17203330;
+}
+.material-checkbox input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #2563eb;
+}
+.material-preview {
+  position: relative;
+  display: grid;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 112px;
+  place-items: center;
+  color: #fff;
+  background: linear-gradient(135deg, #c9514f, #ed9445);
+  border: 0;
+}
+.material-preview.success {
+  color: #5f7cae;
+  background: linear-gradient(135deg, #edf3fa, #e4ecf6);
+}
+.material-preview.success.video-ready {
+  color: #fff;
+  background: #111827;
+}
+.material-preview-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  object-fit: cover;
+  opacity: 0;
+}
+.material-preview-video.is-ready {
+  opacity: 1;
+}
+.material-preview.running,
+.material-preview.pending,
+.material-preview.retry {
+  background: linear-gradient(135deg, #5f7cae, #7ea6df);
+}
+.material-preview.danger {
+  background: linear-gradient(135deg, #be4f55, #e2786d);
+}
+.material-preview:disabled {
+  opacity: 1;
+}
+.material-preview > svg {
+  position: relative;
+  z-index: 1;
+  filter: drop-shadow(0 2px 6px #17203340);
+}
+.material-status-pill {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  right: 8px;
+  padding: 3px 7px;
+  color: #fff;
+  background: #1720337a;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 800;
+}
+.material-status-pill.danger {
+  background: #a72e38d9;
+}
+.material-status-pill.retry {
+  background: #b6751bd9;
+}
+.prompt-update-pill {
+  position: absolute;
+  z-index: 2;
+  top: 31px;
+  right: 8px;
+  padding: 3px 7px;
+  color: #805000;
+  background: #fff2ce;
+  border: 1px solid #f2d28c;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 800;
+}
+.material-card-body {
+  min-height: 112px;
+  padding: 10px 11px 8px;
+}
+.material-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.material-card-title strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: #29364b;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.material-card-title span {
+  color: #9aa5b6;
+  font-size: 9px;
+}
+.material-card-body > p {
+  margin: 4px 0 8px;
+  overflow: hidden;
+  color: #8290a5;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-tags {
+  display: flex;
+  gap: 5px;
+}
+.task-tags span {
+  padding: 3px 6px;
+  border-radius: 5px;
+  font-size: 8px;
+  font-weight: 700;
+}
+.task-tags .primary-tag {
+  color: #e5505a;
+  background: #fff5f4;
+  border: 1px solid #f3b5b5;
+}
+.origin-tag {
+  color: #7d5a22;
+  background: #fff7df;
+  border: 1px solid #f1d89a;
+}
+.origin-tag.ai {
+  color: #287194;
+  background: #edf9fd;
+  border-color: #b8dfeb;
+}
+.origin-tag.external {
+  color: #7d5a22;
+  background: #fff7df;
+  border-color: #f1d89a;
+}
+.compatible-purpose-tags {
+  display: flex;
+  margin: 7px 0 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.compatible-purpose-tags small {
+  color: #8995a8;
+  font-size: 8px;
+}
+.compatible-purpose-tags span {
+  padding: 2px 6px;
+  color: #6656a8;
+  background: #f4f1ff;
+  border: 1px solid #ded6fb;
+  border-radius: 999px;
+  font-size: 8px;
+}
+.material-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 8px;
+  padding: 6px 4px;
+  align-items: center;
+  gap: 0;
+  color: #526178;
+  background: #f6f8fc;
+  border: 1px solid #e8edf5;
+  border-radius: 7px;
+  font-size: 8px;
+  line-height: 1;
+}
+.material-facts span {
+  display: inline-flex;
+  min-width: 0;
+  justify-content: center;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.material-facts small {
+  color: #94a0b2;
+  font-size: inherit;
+}
+.material-facts span + span {
+  border-left: 1px solid #dce3ed;
+}
+.task-error {
+  display: flex;
+  margin-top: 7px;
+  align-items: flex-start;
+  gap: 4px;
+  color: #c34850;
+  font-size: 8px;
+  line-height: 1.45;
+}
+.repair-status {
+  display: flex;
+  margin-top: 7px;
+  align-items: center;
+  gap: 5px;
+  color: #7653b8;
+  font-size: 8px;
+  line-height: 1.45;
+}
+.repair-status.ready {
+  color: #28755c;
+}
+.repair-status.failed {
+  color: #c34850;
+}
+.material-progress {
+  height: 4px;
+  margin-top: 9px;
+  overflow: hidden;
+  background: #e7ecf4;
+  border-radius: 999px;
+}
+.material-progress i {
+  display: block;
+  height: 100%;
+  background: #4f83ef;
+  border-radius: inherit;
+}
+.material-card-actions {
+  display: grid;
+  min-height: 38px;
+  padding: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  background: #fafbfd;
+  border-top: 1px solid #edf0f5;
+}
+.material-card-actions button {
+  display: inline-flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 4px;
+  align-items: center;
+  justify-content: center;
+  color: #425679;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid #edf0f5;
+  font-size: 8px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition:
+    color 0.16s ease,
+    background 0.16s ease;
+}
+.material-card-actions button:first-child {
+  border-left: 0;
+}
+.material-card-actions button:hover:not(:disabled) {
+  color: #2563eb;
+  background: #f1f6ff;
+}
+.material-card-actions button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #7aa2f4;
+  outline-offset: -2px;
+}
+.material-card-actions button:last-child {
+  color: #d5535b;
+}
+.material-card-actions button:last-child:hover:not(:disabled) {
+  color: #bd3640;
+  background: #fff4f4;
+}
+.segment-batch-empty,
+.segment-empty-filter {
+  display: flex;
+  min-height: 330px;
+  padding: 32px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  color: #8693a7;
+  text-align: center;
+}
+.segment-batch-empty > span {
+  display: grid;
+  width: 50px;
+  height: 50px;
+  margin-bottom: 12px;
+  place-items: center;
+  color: #2563eb;
+  background: #eaf2ff;
+  border-radius: 14px;
+}
+.segment-batch-empty strong,
+.segment-empty-filter strong {
+  color: #314058;
+  font-size: 14px;
+}
+.segment-batch-empty p,
+.segment-empty-filter span {
+  max-width: 460px;
+  margin: 7px 0 0;
+  font-size: 10px;
+  line-height: 1.7;
+}
+.segment-pagination {
+  display: flex;
+  min-height: 52px;
+  padding: 8px 12px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  border-top: 1px solid #edf0f5;
+  font-size: 9px;
+}
+.segment-pagination button {
+  height: 32px;
+  border-radius: 8px;
+}
+.prompt-pagination {
+  display: flex;
+  min-height: 61px;
+  margin-top: 2px;
+  padding: 10px 14px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  color: #7d899d;
+  border-top: 1px solid #f0f2f5;
+  font-size: 12px;
+}
+.prompt-page-size select,
+.prompt-pagination button {
+  display: inline-flex;
+  height: 40px;
+  padding: 0 12px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: #5b6679;
+  background: #fff;
+  border: 1px solid #dfe5ed;
+  border-radius: 10px;
+}
+.prompt-page-size select {
+  min-width: 108px;
+  appearance: auto;
+  cursor: pointer;
+}
+.segment-transfer-backdrop {
+  position: fixed;
+  z-index: 1450;
+  inset: 0;
+  display: flex;
+  justify-content: flex-end;
+  background: #0f172a55;
+  backdrop-filter: blur(3px);
+}
+.segment-transfer-drawer {
+  display: flex;
+  width: min(460px, 100%);
+  height: 100%;
+  padding: 0 20px;
+  overflow: auto;
+  flex-direction: column;
+  color: #34445b;
+  background: #fff;
+  box-shadow: -18px 0 55px #17203325;
+}
+.segment-transfer-drawer > header {
+  display: flex;
+  min-height: 82px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #e7ecf3;
+}
+.segment-transfer-drawer > header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.segment-transfer-drawer > header > div > span {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #2563eb;
+  background: #eaf2ff;
+  border-radius: 10px;
+}
+.segment-transfer-drawer h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.segment-transfer-drawer header p {
+  margin: 4px 0 0;
+  color: #8793a6;
+  font-size: 9px;
+}
+.segment-transfer-drawer > header > button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #778397;
+  background: #f5f7fa;
+  border: 0;
+  border-radius: 8px;
+}
+.import-dropzone {
+  display: flex;
+  min-height: 168px;
+  margin-top: 18px;
+  padding: 20px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  color: #697991;
+  background: #f8fbff;
+  border: 1px dashed #9bbbf5;
+  border-radius: 13px;
+  text-align: center;
+}
+.import-dropzone > span {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 10px;
+  place-items: center;
+  color: #2563eb;
+  background: #e7f0ff;
+  border-radius: 14px;
+}
+.import-dropzone strong {
+  color: #35445c;
+  font-size: 12px;
+}
+.import-dropzone small {
+  margin-top: 6px;
+  color: #8a96a9;
+  font-size: 9px;
+}
+.transfer-loading {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: #75849a;
+  font-size: 10px;
+}
+.transfer-section-heading {
+  display: flex;
+  margin-bottom: 9px;
+  align-items: center;
+  justify-content: space-between;
+}
+.transfer-section-heading strong {
+  color: #35445c;
+  font-size: 11px;
+}
+.transfer-section-heading span {
+  color: #8b97a8;
+  font-size: 9px;
+}
+.import-review-list {
+  margin-top: 18px;
+}
+.import-review-list article {
+  display: grid;
+  padding: 10px;
+  grid-template-columns: 27px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  background: #fbfcfe;
+  border: 1px solid #e3e8f0;
+  border-radius: 9px;
+}
+.import-review-list article + article {
+  margin-top: 7px;
+}
+.import-prompt-field,
+.import-purpose-field,
+.import-video-preview,
+.import-video-info,
+.import-preview-error,
+.import-prompt-actions {
+  grid-column: 1 / -1;
+}
+.import-purpose-field {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.import-purpose-field legend {
+  margin-bottom: 8px;
+  color: #35445c;
+  font-size: 11px;
+  font-weight: 600;
+}
+.import-purpose-options {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 7px;
+}
+.import-purpose-options label {
+  display: inline-flex;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  gap: 5px;
+  align-items: center;
+  border: 1px solid #dbe3ee;
+  border-radius: 7px;
+  padding: 6px 8px;
+  color: #697991;
+  background: #fff;
+  font-size: 11px;
+  cursor: pointer;
+}
+.import-purpose-options label.selected {
+  color: #2563eb;
+  border-color: #9bbbf5;
+  background: #f3f7ff;
+}
+.import-purpose-options input {
+  margin: 0;
+  accent-color: #2563eb;
+}
+.import-purpose-field:disabled {
+  opacity: 0.6;
+}
+.import-creative-details {
+  grid-column: 1 / -1;
+  color: #5577a8;
+  font-size: 11px;
+}
+.import-creative-details summary {
+  cursor: pointer;
+  padding: 8px 0;
+}
+.import-creative-details label {
+  display: block;
+}
+.import-review-list .import-field-required,
+.import-review-list .import-field-optional {
+  margin-left: 5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 500;
+}
+.import-review-list .import-field-required {
+  color: #dc5252;
+  background: #fff1f1;
+}
+.import-review-list .import-field-optional {
+  color: #8290a4;
+  background: #edf1f6;
+}
+.import-video-preview {
+  width: 100%;
+  border-radius: 9px;
+  background: #111827;
+}
+.import-video-preview video {
+  display: block;
+  height: 240px;
+  max-height: 35vh;
+}
+.import-video-info {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  gap: 10px 16px;
+  font-size: 11px;
+}
+.import-video-info > div {
+  display: grid;
+  grid-template-columns: 3em minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 8px;
+}
+.import-video-info dt {
+  color: #8a96a9;
+}
+.import-video-info dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+  color: #35445c;
+}
+.import-preview-error {
+  margin: 0;
+  color: #b45309;
+  font-size: 11px;
+}
+.import-prompt-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.import-prompt-item button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 9px;
+  color: #3565df;
+  background: #f3f7ff;
+  border: 1px solid #dbe3ee;
+  border-radius: 7px;
+  font: inherit;
+  cursor: pointer;
+}
+.import-prompt-item button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.import-review-list article.unmatched {
+  background: #fff7f6;
+  border-color: #f0c5c0;
+}
+.import-review-list article > span {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  color: #5c79a4;
+  background: #edf3fb;
+  border-radius: 7px;
+}
+.import-review-list strong,
+.import-review-list small {
+  display: block;
+}
+.import-review-list strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-review-list small {
+  margin-top: 3px;
+  color: #8a96a9;
+  font-size: 8px;
+}
+.import-review-list em {
+  color: #3e7e5c;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 700;
+}
+.import-review-list article.conflict em {
+  color: #b46d1b;
+}
+.import-review-list article.unmatched em {
+  color: #c24c54;
+}
+.export-section {
+  margin-top: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #edf0f4;
+}
+.export-section > label {
+  display: grid;
+  min-height: 48px;
+  padding: 8px 10px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  color: #42526a;
+  background: #fafbfd;
+  border: 1px solid #e4e9f1;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.export-section > label + label {
+  margin-top: 7px;
+}
+.export-section input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #2563eb;
+}
+.export-section small {
+  color: #8a96a9;
+  font-size: 8px;
+  font-weight: 500;
+}
+.export-section label.disabled {
+  opacity: 0.5;
+}
+.transfer-note {
+  display: flex;
+  margin-top: 18px;
+  padding: 10px;
+  align-items: flex-start;
+  gap: 7px;
+  color: #7a6646;
+  background: #fff9eb;
+  border: 1px solid #f1dfb4;
+  border-radius: 9px;
+}
+.transfer-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+.transfer-note p {
+  margin: 0;
+  font-size: 9px;
+  line-height: 1.6;
+}
+.segment-transfer-drawer > footer {
+  display: flex;
+  min-height: 74px;
+  margin-top: auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid #e7ecf3;
+}
+.segment-transfer-drawer > footer button {
+  display: inline-flex;
+  height: 38px;
+  padding: 0 15px;
+  align-items: center;
+  gap: 5px;
+  color: #56657b;
+  background: #fff;
+  border: 1px solid #dbe3ee;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.segment-transfer-drawer > footer button.primary {
+  color: #fff;
+  background: #2563eb;
+  border-color: #2563eb;
+}
+
+/* Import uses the existing Prompt modal framing; export retains its drawer. */
+.segment-import-backdrop {
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+.segment-import-modal {
+  width: min(var(--import-modal-width, 600px), 100%);
+  height: min(820px, calc(100dvh - 48px));
+  padding: 0 16px;
+  overflow: hidden;
+  border: 1px solid #dbe4f6;
+  border-radius: 20px;
+  box-shadow: 0 24px 70px #0f172a38;
+}
+.segment-import-modal > header {
+  flex: 0 0 auto;
+}
+.segment-import-modal > header p {
+  font-size: 11px;
+}
+.segment-import-modal > .import-dropzone {
+  flex: 0 0 auto;
+  margin: 18px 0;
+  min-height: 180px;
+  padding: 28px 20px;
+}
+.segment-import-modal.segment-import-empty {
+  height: auto;
+  max-height: calc(100dvh - 48px);
+}
+.segment-import-modal > .import-review-list {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  margin: 16px 0;
+  grid-template-columns: repeat(var(--import-columns), minmax(400px, 1fr));
+  align-items: stretch;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: auto;
+  padding-bottom: 6px;
+}
+.segment-import-modal .import-prompt-item {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  flex-direction: column;
+  gap: 0;
+  align-items: stretch;
+  overflow: hidden;
+}
+.segment-import-modal .import-prompt-item + .import-prompt-item {
+  margin-top: 0;
+}
+.import-column-heading {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 12px;
+  gap: 8px;
+  border-bottom: 1px solid #e3e8f0;
+}
+.import-column-heading > span {
+  color: #5c79a4;
+}
+.import-column-error {
+  margin: 0;
+  border-radius: 0;
+}
+.import-column-error p {
+  overflow-wrap: anywhere;
+}
+.import-column-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.import-column-body > * {
+  flex-shrink: 0;
+}
+.import-column-body .import-video-preview video {
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+}
+.import-column-body .repair-instruction-field {
+  margin: 0;
+}
+.import-column-body .import-purpose-options {
+  gap: 4px;
+}
+.import-column-body .import-purpose-options label {
+  padding: 5px 4px;
+  font-size: 10px;
+}
+.import-column-footer {
+  flex: 0 0 auto;
+  padding: 10px 12px 12px;
+  border-top: 1px solid #e3e8f0;
+  background: #f8fbff;
+}
+.import-column-footer small {
+  min-height: 16px;
+  margin: 0 0 8px;
+}
+.import-column-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.import-column-actions button.primary {
+  color: #fff;
+  background: #2563eb;
+  border-color: #2563eb;
+}
+.segment-import-modal > .import-batch-footer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 64px;
+  margin-top: 0;
+}
+.import-batch-footer > span {
+  color: #8793a6;
+  font-size: 11px;
+}
+.import-batch-footer > div {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+@media (max-width: 680px) {
+  .segment-import-backdrop {
+    padding: 12px;
+  }
+  .segment-import-modal {
+    height: calc(100dvh - 24px);
+    border-radius: 14px;
+  }
+  .import-batch-footer {
+    flex-wrap: wrap;
+    padding: 10px 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .segment-material-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 680px) {
+  .segment-toolbar,
+  .segment-filter-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .prompt-search,
+  .segment-search,
+  .segment-filter,
+  .segment-filter select,
+  .selection-mode-button {
+    width: 100%;
+  }
+  .segment-material-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .selection-action-bar {
+    flex-wrap: wrap;
+  }
+  .selection-action-bar span {
+    width: 100%;
+  }
+  .segment-transfer-drawer {
+    padding: 0 14px;
+  }
+}
+@media (max-width: 480px) {
+  .repair-range-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .repair-boundary-buttons,
+  .repair-current-toolbar > div {
+    width: 100%;
+  }
+  .repair-boundary-buttons button {
+    flex: 1;
+  }
+  .repair-current-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .repair-current-toolbar > div {
+    justify-content: flex-start;
+  }
+  .segment-material-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

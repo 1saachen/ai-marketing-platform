@@ -1,0 +1,240 @@
+export type AppEnvironment = 'development' | 'test' | 'production';
+import { tosEndpoint } from '../platform/file/tos-endpoint';
+
+export type StorageDriver = 'local' | 'tos';
+
+export type EnvironmentVariables = {
+  APP_ENV: AppEnvironment;
+  API_PORT: number;
+  WEB_ORIGIN: string;
+  AUTH_USERNAME: string | undefined;
+  AUTH_PASSWORD_HASH: string | undefined;
+  AUTH_COOKIE_SECURE: boolean;
+  AUTH_TRUST_PROXY_HOPS: number;
+  STORAGE_DRIVER: StorageDriver;
+  LOCAL_STORAGE_ROOT: string | undefined;
+  MAX_UPLOAD_BYTES: number;
+  WORKING_FILE_CLEANUP_GRACE_HOURS: number;
+  DATABASE_URL: string;
+  REDIS_URL: string;
+  EFFECT_READ_CACHE_ENABLED: boolean;
+  EFFECT_READ_CACHE_LOG_METRICS: boolean;
+  EFFECT_READ_CACHE_TIMEOUT_MS: number;
+  EFFECT_READ_CACHE_TTL_SECONDS: number;
+  EFFECT_READ_CACHE_MAX_BYTES: number;
+  EFFECT_READ_CACHE_MIN_LOAD_MS: number;
+  EFFECT_READ_CACHE_NAMESPACE: string;
+  RABBITMQ_URL: string;
+  EFFECT_EXTRACTION_WORKER_TOKEN: string | undefined;
+  CUSTOMIZED_EXTRACTION_WORKER_TOKEN: string | undefined;
+  CUSTOMIZED_STORYBOARD_WORKER_TOKEN: string | undefined;
+  CUSTOMIZED_ASSETS_WORKER_TOKEN: string | undefined;
+  CUSTOMIZED_PRODUCTION_WORKER_TOKEN: string | undefined;
+  CUSTOMIZED_STORYBOARD_CREATIVE_MODEL: string | undefined;
+  CUSTOMIZED_STORYBOARD_DETAIL_MODEL: string | undefined;
+  EFFECT_PROMPT_WORKER_TOKEN: string | undefined;
+  EFFECT_SEGMENT_RENDER_WORKER_TOKEN: string | undefined;
+  EFFECT_TEMPLATE_MIX_WORKER_TOKEN: string | undefined;
+  TOS_ENDPOINT: string | undefined;
+  TOS_REGION: string | undefined;
+  TOS_BUCKET: string | undefined;
+  TOS_ACCESS_KEY_ID: string | undefined;
+  TOS_SECRET_ACCESS_KEY: string | undefined;
+  SEEDANCE_BASE_URL: string | undefined;
+  SEEDANCE_API_KEY: string | undefined;
+  SEEDANCE_MODEL: string | undefined;
+  SEEDANCE_MODEL_2_5: string | undefined;
+  SEEDANCE_MODEL_2_0: string | undefined;
+  SEEDANCE_MODEL_2_0_MINI: string | undefined;
+  SEEDANCE_MODEL_2_0_FAST: string | undefined;
+  SEEDANCE_REFERENCE_PUBLIC_BASE_URL: string | undefined;
+  SEEDANCE_REFERENCE_SIGNING_SECRET: string | undefined;
+};
+
+const requiredString = (value: unknown, key: string): string => {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`环境变量 ${key} 未配置`);
+  }
+
+  return value;
+};
+
+const optionalString = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim() !== '' ? value : undefined;
+
+const parseBoolean = (value: unknown, key: string, fallback: boolean): boolean => {
+  if (value === undefined) return fallback;
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  throw new Error(`环境变量 ${key} 必须是 true 或 false`);
+};
+
+const parsePort = (value: unknown, key: string, defaultValue: number): number => {
+  const port = Number(value ?? defaultValue);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`环境变量 ${key} 必须是 1 到 65535 之间的整数`);
+  }
+
+  return port;
+};
+
+const parseStorageDriver = (value: unknown): StorageDriver => {
+  const driver = value ?? 'local';
+  if (driver !== 'local' && driver !== 'tos') {
+    throw new Error('环境变量 STORAGE_DRIVER 必须是 local 或 tos');
+  }
+  return driver;
+};
+
+const parsePositiveInteger = (value: unknown, key: string, defaultValue: number): number => {
+  const parsed = Number(value ?? defaultValue);
+
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`环境变量 ${key} 必须是正整数`);
+  }
+
+  return parsed;
+};
+
+const parseNonnegativeInteger = (value: unknown, key: string, defaultValue: number): number => {
+  const parsed = Number(value ?? defaultValue);
+  if (!Number.isSafeInteger(parsed) || parsed < 0)
+    throw new Error(`环境变量 ${key} 必须是非负整数`);
+  return parsed;
+};
+
+const parseEnvironment = (value: unknown): AppEnvironment => {
+  const environment = value ?? 'development';
+
+  if (environment !== 'development' && environment !== 'test' && environment !== 'production') {
+    throw new Error('环境变量 APP_ENV 必须是 development、test 或 production');
+  }
+
+  return environment;
+};
+
+export const validateEnvironment = (raw: Record<string, unknown>): EnvironmentVariables => {
+  const appEnvironment = parseEnvironment(raw.APP_ENV);
+  const storageDriver = parseStorageDriver(raw.STORAGE_DRIVER);
+  if (storageDriver === 'tos') {
+    const endpoint = requiredString(raw.TOS_ENDPOINT, 'TOS_ENDPOINT').trim();
+    const region = requiredString(raw.TOS_REGION, 'TOS_REGION').trim();
+    tosEndpoint(endpoint, region);
+    requiredString(raw.TOS_BUCKET, 'TOS_BUCKET');
+    requiredString(raw.TOS_ACCESS_KEY_ID, 'TOS_ACCESS_KEY_ID');
+    requiredString(raw.TOS_SECRET_ACCESS_KEY, 'TOS_SECRET_ACCESS_KEY');
+  }
+
+  const effectExtractionWorkerToken =
+    optionalString(raw.EFFECT_EXTRACTION_WORKER_TOKEN) ??
+    (appEnvironment === 'production' ? undefined : 'local-effect-extraction-worker-token');
+  const effectPromptWorkerToken =
+    optionalString(raw.EFFECT_PROMPT_WORKER_TOKEN) ??
+    (appEnvironment === 'production' ? undefined : 'local-effect-prompt-worker-token');
+  const effectSegmentRenderWorkerToken =
+    optionalString(raw.EFFECT_SEGMENT_RENDER_WORKER_TOKEN) ??
+    (appEnvironment === 'production' ? undefined : 'local-effect-segment-render-worker-token');
+  const effectTemplateMixWorkerToken =
+    optionalString(raw.EFFECT_TEMPLATE_MIX_WORKER_TOKEN) ??
+    (appEnvironment === 'production' ? undefined : 'local-effect-template-mix-worker-token');
+  const seedanceReferenceSigningSecret = optionalString(raw.SEEDANCE_REFERENCE_SIGNING_SECRET);
+  if (seedanceReferenceSigningSecret && seedanceReferenceSigningSecret.length < 32) {
+    throw new Error('环境变量 SEEDANCE_REFERENCE_SIGNING_SECRET 至少需要 32 个字符');
+  }
+  if (appEnvironment === 'production') {
+    requiredString(effectExtractionWorkerToken, 'EFFECT_EXTRACTION_WORKER_TOKEN');
+    requiredString(effectPromptWorkerToken, 'EFFECT_PROMPT_WORKER_TOKEN');
+    requiredString(effectSegmentRenderWorkerToken, 'EFFECT_SEGMENT_RENDER_WORKER_TOKEN');
+    requiredString(effectTemplateMixWorkerToken, 'EFFECT_TEMPLATE_MIX_WORKER_TOKEN');
+  }
+
+  return {
+    APP_ENV: appEnvironment,
+    AUTH_USERNAME: optionalString(raw.AUTH_USERNAME),
+    AUTH_TRUST_PROXY_HOPS: parseNonnegativeInteger(
+      raw.AUTH_TRUST_PROXY_HOPS,
+      'AUTH_TRUST_PROXY_HOPS',
+      0,
+    ),
+    AUTH_PASSWORD_HASH: optionalString(raw.AUTH_PASSWORD_HASH),
+    AUTH_COOKIE_SECURE: parseBoolean(
+      raw.AUTH_COOKIE_SECURE,
+      'AUTH_COOKIE_SECURE',
+      appEnvironment === 'production',
+    ),
+    API_PORT: parsePort(raw.API_PORT, 'API_PORT', 3000),
+    WEB_ORIGIN: requiredString(raw.WEB_ORIGIN ?? 'http://localhost:5173', 'WEB_ORIGIN'),
+    STORAGE_DRIVER: storageDriver,
+    LOCAL_STORAGE_ROOT: optionalString(raw.LOCAL_STORAGE_ROOT),
+    MAX_UPLOAD_BYTES: parsePositiveInteger(
+      raw.MAX_UPLOAD_BYTES,
+      'MAX_UPLOAD_BYTES',
+      512 * 1024 * 1024,
+    ),
+    WORKING_FILE_CLEANUP_GRACE_HOURS: parsePositiveInteger(
+      raw.WORKING_FILE_CLEANUP_GRACE_HOURS,
+      'WORKING_FILE_CLEANUP_GRACE_HOURS',
+      24,
+    ),
+    DATABASE_URL: requiredString(raw.DATABASE_URL, 'DATABASE_URL'),
+    REDIS_URL: requiredString(raw.REDIS_URL, 'REDIS_URL'),
+    EFFECT_READ_CACHE_ENABLED: parseBoolean(
+      raw.EFFECT_READ_CACHE_ENABLED,
+      'EFFECT_READ_CACHE_ENABLED',
+      true,
+    ),
+    EFFECT_READ_CACHE_LOG_METRICS: parseBoolean(
+      raw.EFFECT_READ_CACHE_LOG_METRICS,
+      'EFFECT_READ_CACHE_LOG_METRICS',
+      false,
+    ),
+    EFFECT_READ_CACHE_TIMEOUT_MS: parsePositiveInteger(
+      raw.EFFECT_READ_CACHE_TIMEOUT_MS,
+      'EFFECT_READ_CACHE_TIMEOUT_MS',
+      150,
+    ),
+    EFFECT_READ_CACHE_TTL_SECONDS: parsePositiveInteger(
+      raw.EFFECT_READ_CACHE_TTL_SECONDS,
+      'EFFECT_READ_CACHE_TTL_SECONDS',
+      1800,
+    ),
+    EFFECT_READ_CACHE_MAX_BYTES: parsePositiveInteger(
+      raw.EFFECT_READ_CACHE_MAX_BYTES,
+      'EFFECT_READ_CACHE_MAX_BYTES',
+      2097152,
+    ),
+    EFFECT_READ_CACHE_NAMESPACE:
+      optionalString(raw.EFFECT_READ_CACHE_NAMESPACE) ?? 'amp:effect-read:v1',
+    EFFECT_READ_CACHE_MIN_LOAD_MS: parseNonnegativeInteger(
+      raw.EFFECT_READ_CACHE_MIN_LOAD_MS,
+      'EFFECT_READ_CACHE_MIN_LOAD_MS',
+      0,
+    ),
+    RABBITMQ_URL: requiredString(raw.RABBITMQ_URL, 'RABBITMQ_URL'),
+    EFFECT_EXTRACTION_WORKER_TOKEN: effectExtractionWorkerToken,
+    CUSTOMIZED_EXTRACTION_WORKER_TOKEN: optionalString(raw.CUSTOMIZED_EXTRACTION_WORKER_TOKEN),
+    CUSTOMIZED_STORYBOARD_WORKER_TOKEN: optionalString(raw.CUSTOMIZED_STORYBOARD_WORKER_TOKEN),
+    CUSTOMIZED_ASSETS_WORKER_TOKEN: optionalString(raw.CUSTOMIZED_ASSETS_WORKER_TOKEN),
+    CUSTOMIZED_PRODUCTION_WORKER_TOKEN: optionalString(raw.CUSTOMIZED_PRODUCTION_WORKER_TOKEN),
+    CUSTOMIZED_STORYBOARD_CREATIVE_MODEL: optionalString(raw.CUSTOMIZED_STORYBOARD_CREATIVE_MODEL),
+    CUSTOMIZED_STORYBOARD_DETAIL_MODEL: optionalString(raw.CUSTOMIZED_STORYBOARD_DETAIL_MODEL),
+    EFFECT_PROMPT_WORKER_TOKEN: effectPromptWorkerToken,
+    EFFECT_SEGMENT_RENDER_WORKER_TOKEN: effectSegmentRenderWorkerToken,
+    EFFECT_TEMPLATE_MIX_WORKER_TOKEN: effectTemplateMixWorkerToken,
+    TOS_ENDPOINT: optionalString(raw.TOS_ENDPOINT),
+    TOS_REGION: optionalString(raw.TOS_REGION),
+    TOS_BUCKET: optionalString(raw.TOS_BUCKET),
+    TOS_ACCESS_KEY_ID: optionalString(raw.TOS_ACCESS_KEY_ID),
+    TOS_SECRET_ACCESS_KEY: optionalString(raw.TOS_SECRET_ACCESS_KEY),
+    SEEDANCE_BASE_URL: optionalString(raw.SEEDANCE_BASE_URL),
+    SEEDANCE_API_KEY: optionalString(raw.SEEDANCE_API_KEY),
+    SEEDANCE_MODEL: optionalString(raw.SEEDANCE_MODEL),
+    SEEDANCE_MODEL_2_5: optionalString(raw.SEEDANCE_MODEL_2_5),
+    SEEDANCE_MODEL_2_0: optionalString(raw.SEEDANCE_MODEL_2_0),
+    SEEDANCE_MODEL_2_0_MINI: optionalString(raw.SEEDANCE_MODEL_2_0_MINI),
+    SEEDANCE_MODEL_2_0_FAST: optionalString(raw.SEEDANCE_MODEL_2_0_FAST),
+    SEEDANCE_REFERENCE_PUBLIC_BASE_URL: optionalString(raw.SEEDANCE_REFERENCE_PUBLIC_BASE_URL),
+    SEEDANCE_REFERENCE_SIGNING_SECRET: seedanceReferenceSigningSecret,
+  };
+};

@@ -1,0 +1,780 @@
+import type {
+  EffectExtractionNodeDetail,
+  EffectExtractionNodeDetailField,
+  EffectExtractionNodeDetailSource,
+  EffectExtractionNodeDetailValue,
+  EffectExtractionNodeExecution,
+  EffectExtractionNodeId,
+  EffectExtractionNodeStatus,
+} from '@ai-marketing/contracts';
+
+import type { EffectExtractionInputSnapshot } from './effect-extraction.types';
+
+type DetailBranchRecord = {
+  branch:
+    'DOCUMENT' | 'IMAGE' | 'COMMERCE' | 'FORM' | 'FUSION' | 'SEMANTIC_REFINEMENT' | 'NORMALIZATION';
+  status: EffectExtractionNodeStatus;
+  structuredOutput?: unknown;
+  updatedAt: Date;
+};
+
+type DetailResultRecord = {
+  draftResult: unknown;
+  provenance: unknown;
+  conflictReport: unknown;
+  revision: number;
+  savedAt: Date | null;
+  updatedAt: Date;
+};
+
+export type ExtractionNodeDetailRecord = {
+  inputSnapshot: unknown;
+  updatedAt: Date;
+  branches?: DetailBranchRecord[];
+  result?: DetailResultRecord | null;
+};
+
+type JsonRecord = Record<string, unknown>;
+
+const CANDIDATE_FIELDS = [
+  ['productCategory', '品类'],
+  ['productName', '产品名称'],
+  ['coreSpecification', '核心规格'],
+  ['priceRange', '价格带'],
+  ['visualFeatures', '核心外观特征'],
+  ['sellingPoints', '卖点'],
+] as const;
+
+const COMMERCE_CANDIDATE_FIELDS = [
+  ['productName', '商品名称'],
+  ['productCategory', '品类'],
+  ['priceRange', '价格区间'],
+  ['coreSpecification', '核心规格'],
+  ['sellingPoints', '卖点'],
+] as const;
+
+const SOURCE_LABELS: Record<string, string> = {
+  DOCUMENT: '文档解析',
+  COMMERCE: '电商抓取',
+  IMAGE: '图片识别',
+  FUSION: '多源融合',
+  SEMANTIC_REFINEMENT: '语义整理',
+  NORMALIZATION: '标准化',
+};
+
+const SEMANTIC_FIELD_LABELS: Record<string, string> = {
+  sellingPoints: '卖点',
+  coreSellingPoints: '卖点',
+  secondarySellingPoints: '卖点',
+  trustBackings: '卖点',
+  targetAudiences: '卖点',
+  corePainPoints: '卖点',
+  decisionDrivers: '卖点',
+  usageScenarios: '卖点',
+  purchaseScenarios: '卖点',
+  emotionalScenarios: '卖点',
+};
+
+const SEMANTIC_RELATION_LABELS: Record<string, string> = {
+  SAME_MEANING: '含义相同',
+  PARENT_CHILD: '包含关系',
+  SAME_FAMILY: '同一主题',
+};
+
+const MATERIAL_TYPE_LABELS: Record<string, string> = {
+  PRODUCT_IMAGE: '商品图片',
+  PRODUCT_DOCUMENT: '产品文档',
+  BRAND_GUIDELINE: '品牌规范',
+  REFERENCE_VIDEO: '参考视频',
+};
+
+const isRecord = (value: unknown): value is JsonRecord =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const LEGACY_SELLING_POINT_FIELDS = [
+  'coreSellingPoints',
+  'secondarySellingPoints',
+  'trustBackings',
+  'targetAudiences',
+  'corePainPoints',
+  'decisionDrivers',
+  'usageScenarios',
+  'purchaseScenarios',
+  'emotionalScenarios',
+] as const;
+
+const candidateSellingPoints = (candidate: JsonRecord): string[] => {
+  const rawValues = Array.isArray(candidate.sellingPoints)
+    ? candidate.sellingPoints
+    : LEGACY_SELLING_POINT_FIELDS.flatMap((key) =>
+        Array.isArray(candidate[key]) ? candidate[key] : [],
+      );
+  const values =
+    rawValues.length > 0
+      ? rawValues
+      : typeof candidate.targetAudience === 'string'
+        ? [candidate.targetAudience]
+        : [];
+  return [...new Set(values.filter((value): value is string => typeof value === 'string'))];
+};
+
+const candidateSellingPointProvenance = (sources: JsonRecord): string | null => {
+  if (typeof sources.sellingPoints === 'string') return sources.sellingPoints;
+  const parts = LEGACY_SELLING_POINT_FIELDS.flatMap((key) =>
+    typeof sources[key] === 'string' ? sources[key].split('>') : [],
+  );
+  const unique = [...new Set(parts.filter(Boolean))];
+  return unique.length ? unique.join('>') : null;
+};
+
+const publicText = (value: unknown, maxLength = 500): string =>
+  String(value ?? '')
+    .replace(/data:[^\s,]+;base64,[a-z\d+/=]+/giu, '[图片数据已隐藏]')
+    .replace(/(?:https?|tos|s3):\/\/\S+/giu, '[链接已隐藏]')
+    .replace(/[a-z]:\\(?:[^\\\s]+\\)+[^\s]+/giu, '[本地路径已隐藏]')
+    .trim()
+    .slice(0, maxLength);
+
+const fileName = (value: unknown): string => {
+  const name = publicText(
+    String(value ?? '')
+      .split(/[\\/]/)
+      .at(-1),
+    255,
+  ).trim();
+  return name || '未命名素材';
+};
+
+const safeValue = (
+  value: unknown,
+  includeEmpty: boolean,
+): EffectExtractionNodeDetailValue | undefined => {
+  if (typeof value === 'string') {
+    const text = publicText(value);
+    return text || (includeEmpty ? '' : undefined);
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'boolean') return value;
+  if (value === null) return includeEmpty ? null : undefined;
+  if (Array.isArray(value)) {
+    const items = value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => publicText(item, 160))
+      .filter(Boolean)
+      .slice(0, 20);
+    return items.length || includeEmpty ? items : undefined;
+  }
+  return undefined;
+};
+
+const field = (
+  key: string,
+  label: string,
+  value: unknown,
+  source: string | null = null,
+  includeEmpty = false,
+): EffectExtractionNodeDetailField | null => {
+  const safe = safeValue(value, includeEmpty);
+  return safe === undefined ? null : { key, label, value: safe, source };
+};
+
+const fields = (
+  values: Array<EffectExtractionNodeDetailField | null>,
+): EffectExtractionNodeDetailField[] => values.filter((value) => value !== null);
+
+const provenanceLabel = (value: unknown): string | null => {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  return value
+    .split('>')
+    .map((part) => SOURCE_LABELS[part] ?? publicText(part, 40))
+    .filter(Boolean)
+    .join(' → ');
+};
+
+const candidateFields = (
+  candidate: unknown,
+  provenance: unknown = null,
+  includeEmpty = false,
+): EffectExtractionNodeDetailField[] => {
+  const record = isRecord(candidate) ? candidate : {};
+  const sources = isRecord(provenance) ? provenance : {};
+  const snakeCase = (key: string) => key.replace(/[A-Z]/g, (value) => `_${value.toLowerCase()}`);
+  return fields(
+    CANDIDATE_FIELDS.map(([key, label]) =>
+      field(
+        key,
+        label,
+        key === 'sellingPoints'
+          ? candidateSellingPoints(record)
+          : (record[key] ?? record[snakeCase(key)]),
+        provenanceLabel(
+          key === 'sellingPoints'
+            ? candidateSellingPointProvenance(sources)
+            : (sources[key] ?? sources[snakeCase(key)]),
+        ),
+        includeEmpty,
+      ),
+    ),
+  );
+};
+
+const semanticValueKey = (value: unknown): string =>
+  String(value ?? '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .toLocaleLowerCase();
+
+const branchDetailCandidates = (branch: DetailBranchRecord): JsonRecord[] => {
+  const raw = isRecord(branch.structuredOutput) ? branch.structuredOutput : {};
+  const candidates: JsonRecord[] = [];
+  if (isRecord(raw.candidate)) candidates.push(raw.candidate);
+  for (const item of Array.isArray(raw.items) ? raw.items : []) {
+    if (isRecord(item) && isRecord(item.candidate)) candidates.push(item.candidate);
+  }
+  return candidates;
+};
+
+const semanticCandidateValues = (candidates: readonly JsonRecord[], field: string): Set<string> =>
+  new Set(
+    candidates.flatMap((candidate) =>
+      (field === 'sellingPoints'
+        ? candidateSellingPoints(candidate)
+        : Array.isArray(candidate[field])
+          ? candidate[field]
+          : []
+      )
+        .map(semanticValueKey)
+        .filter(Boolean),
+    ),
+  );
+
+const reconciledNodeDetailProvenance = (
+  record: ExtractionNodeDetailRecord,
+  candidate: unknown,
+  storedProvenance: unknown,
+): JsonRecord => {
+  const provenance = isRecord(storedProvenance) ? { ...storedProvenance } : {};
+  const branches = record.branches ?? [];
+  if (!branches.some(({ branch }) => branch === 'SEMANTIC_REFINEMENT')) return provenance;
+  const result = isRecord(candidate) ? candidate : {};
+  const authoritative = (['DOCUMENT', 'COMMERCE'] as const).map(
+    (branchName) =>
+      [
+        branchName,
+        branches.filter(({ branch }) => branch === branchName).flatMap(branchDetailCandidates),
+      ] as const,
+  );
+  const imageCandidates = branches
+    .filter(({ branch }) => branch === 'IMAGE')
+    .flatMap(branchDetailCandidates);
+  const imageValues = new Set(
+    Object.keys(SEMANTIC_FIELD_LABELS).flatMap((field) => [
+      ...semanticCandidateValues(imageCandidates, field),
+    ]),
+  );
+  for (const field of Object.keys(SEMANTIC_FIELD_LABELS)) {
+    const snakeCaseField = field.replace(/[A-Z]/g, (value) => `_${value.toLowerCase()}`);
+    delete provenance[field];
+    delete provenance[snakeCaseField];
+    const sources: string[] = [];
+    for (const value of field === 'sellingPoints' ? candidateSellingPoints(result) : []) {
+      const key = semanticValueKey(value);
+      const source =
+        authoritative.find(([, candidates]) =>
+          semanticCandidateValues(candidates, field).has(key),
+        )?.[0] ?? (imageValues.has(key) ? 'IMAGE' : null);
+      if (source && !sources.includes(source)) sources.push(source);
+    }
+    if (sources.length) provenance[field] = sources.join('>');
+  }
+  return provenance;
+};
+
+const semanticSources = (
+  metadata: JsonRecord,
+  fallbackStatus: EffectExtractionNodeStatus,
+): EffectExtractionNodeDetailSource[] => {
+  const groups = Array.isArray(metadata.semanticGroups) ? metadata.semanticGroups : [];
+  return groups.flatMap((value, index) => {
+    if (!isRecord(value)) return [];
+    const canonicalValue = publicText(value.canonicalValue, 240);
+    const fieldKey = publicText(value.field, 80);
+    const memberValues = Array.isArray(value.memberValues)
+      ? value.memberValues
+          .map((item) => publicText(item, 240))
+          .filter(Boolean)
+          .slice(0, 20)
+      : [];
+    if (!canonicalValue || memberValues.length < 2) return [];
+    const relation = publicText(value.relation, 80);
+    const applied = value.applied !== false;
+    return [
+      {
+        name: canonicalValue,
+        status: fallbackStatus,
+        fields: fields([
+          field(
+            `semantic-group-${index}-field`,
+            '归并类型',
+            SEMANTIC_FIELD_LABELS[fieldKey] ?? fieldKey,
+          ),
+          field(
+            `semantic-group-${index}-relation`,
+            '语义关系',
+            SEMANTIC_RELATION_LABELS[relation] ?? relation,
+          ),
+          field(
+            `semantic-group-${index}-action`,
+            '处理方式',
+            applied ? '合并为代表表达' : '保留全部原始表达',
+          ),
+          field(`semantic-group-${index}-members`, '原始表达', memberValues),
+        ]),
+        warnings: [],
+      },
+    ];
+  });
+};
+
+const SEMANTIC_CORRECTION_LABELS: Record<string, string> = {
+  UNKNOWN_SUGGESTION_ID: '未知图片建议',
+  DUPLICATE_SUGGESTION_DECISION: '重复处理决定',
+  MISSING_SUGGESTION_DECISION: '缺少处理决定',
+  DROP_TARGET_IGNORED: '删除决定携带多余字段',
+  KEEP_TARGET_MISSING: '保留决定缺少目标字段',
+  FIELD_CAPACITY_EXCEEDED: '目标字段容量超限',
+  UNKNOWN_USER_NOTICE_FACT: '提示引用未知用户事实',
+  DUPLICATE_USER_NOTICE: '重复用户提示',
+  MODEL_CAPACITY_NOTICE_IGNORED: '模型重复生成容量提示',
+  INVALID_RELATED_USER_FACT: '提示关联事实无效',
+  INVALID_SUGGESTED_FIELD: '建议字段无效',
+  UNEXPECTED_SUGGESTED_FIELD: '提示携带多余建议字段',
+  CROSS_LAYER_USER_NOTICE: '跨业务层提示已忽略',
+};
+
+const payload = (
+  value: unknown,
+): { candidate: unknown; items: unknown[]; metadata: JsonRecord } => {
+  const record = isRecord(value) ? value : {};
+  return {
+    candidate: record.candidate,
+    items: Array.isArray(record.items) ? record.items : [],
+    metadata: isRecord(record.metadata) ? record.metadata : {},
+  };
+};
+
+const safeWarnings = (values: unknown, excludedMessages: string[] = []): string[] => {
+  const excluded = new Set(excludedMessages.map((value) => publicText(value)).filter(Boolean));
+  const seen = new Set<string>();
+  return (Array.isArray(values) ? values : [])
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => publicText(value))
+    .filter((value) => {
+      if (!value || excluded.has(value) || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    })
+    .slice(0, 20);
+};
+
+const status = (
+  value: unknown,
+  fallback: EffectExtractionNodeStatus,
+): EffectExtractionNodeStatus =>
+  ['PENDING', 'RUNNING', 'SUCCEEDED', 'PARTIAL', 'SKIPPED', 'FAILED'].includes(String(value))
+    ? (value as EffectExtractionNodeStatus)
+    : fallback;
+
+const materialTypeLabel = (value: string): string => MATERIAL_TYPE_LABELS[value] ?? '资料文件';
+
+const materialMedia = (
+  snapshot: EffectExtractionInputSnapshot,
+  material: EffectExtractionInputSnapshot['materials'][number],
+): NonNullable<EffectExtractionNodeDetailSource['media']> => ({
+  kind:
+    material.type === 'PRODUCT_IMAGE'
+      ? 'IMAGE'
+      : material.type === 'PRODUCT_DOCUMENT' || material.type === 'BRAND_GUIDELINE'
+        ? 'DOCUMENT'
+        : material.type === 'REFERENCE_VIDEO'
+          ? 'VIDEO'
+          : 'FILE',
+  typeLabel: materialTypeLabel(material.type),
+  previewUrl:
+    material.type === 'PRODUCT_IMAGE'
+      ? `/api/projects/${encodeURIComponent(snapshot.projectId)}/workflows/effect/source-import/drafts/${snapshot.mode}/products/${encodeURIComponent(snapshot.product.id)}/materials/${encodeURIComponent(material.id)}/content`
+      : null,
+  sizeBytes: material.sizeBytes,
+});
+
+const commerceHost = (value: string | null): string | null => {
+  if (!value) return null;
+  try {
+    return new URL(value).hostname.slice(0, 120);
+  } catch {
+    return null;
+  }
+};
+
+const visibleCommerceUrl = (value: string | null): string | null => {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    url.username = '';
+    url.password = '';
+    return url.toString().slice(0, 2000);
+  } catch {
+    return null;
+  }
+};
+
+const structuredCommerceHost = (value: unknown): string | null => {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const raw = value.trim();
+  try {
+    const host = new URL(raw.includes('://') ? raw : `https://${raw}`).hostname
+      .toLowerCase()
+      .slice(0, 120);
+    return host || null;
+  } catch {
+    return null;
+  }
+};
+
+const commerceFields = (
+  candidate: unknown,
+  metadata: JsonRecord,
+  fallbackUrl: string | null,
+): EffectExtractionNodeDetailField[] => {
+  const record = isRecord(candidate) ? candidate : {};
+  const host =
+    structuredCommerceHost(metadata.sourceHost) ??
+    (metadata.hasCommerceUrl === true ? commerceHost(fallbackUrl) : null);
+  return fields([
+    field('commerceHost', '来源网站', host),
+    field('productName', '商品名称', record.productName),
+    field('brand', '品牌', metadata.brand),
+    field('productCategory', '品类', record.productCategory),
+    field('priceRange', '价格区间', record.priceRange),
+    field('coreSpecification', '核心规格', record.coreSpecification),
+    field('seller', '店铺', metadata.seller),
+    field('deliveryPromise', '配送信息', metadata.deliveryPromise),
+    ...COMMERCE_CANDIDATE_FIELDS.slice(4).map(([key, label]) =>
+      field(key, label, key === 'sellingPoints' ? candidateSellingPoints(record) : record[key]),
+    ),
+  ]);
+};
+
+const commerceSummary = (nodeStatus: EffectExtractionNodeStatus): string => {
+  switch (nodeStatus) {
+    case 'FAILED':
+      return '商品页面暂时无法读取，已继续使用其他资料';
+    case 'PARTIAL':
+      return '已提取部分商品信息';
+    case 'SUCCEEDED':
+      return '已提取商品页中的产品信息';
+    case 'SKIPPED':
+      return '未提供商品链接，无需解析';
+    case 'RUNNING':
+      return '正在解析商品链接';
+    default:
+      return '等待解析商品链接';
+  }
+};
+
+const itemSources = (
+  items: unknown[],
+  snapshot: EffectExtractionInputSnapshot,
+  fallbackStatus: EffectExtractionNodeStatus,
+  excludedMessages: string[] = [],
+): EffectExtractionNodeDetailSource[] => {
+  const materials = new Map(snapshot.materials.map((material) => [material.id, material]));
+  return items.slice(0, 50).flatMap((raw) => {
+    if (!isRecord(raw)) return [];
+    const material = typeof raw.sourceId === 'string' ? materials.get(raw.sourceId) : undefined;
+    return [
+      {
+        name: fileName(material?.originalFileName),
+        status: status(raw.status, fallbackStatus),
+        ...(material ? { media: materialMedia(snapshot, material) } : {}),
+        fields: candidateFields(raw.candidate),
+        warnings: safeWarnings(raw.warning ? [raw.warning] : [], excludedMessages),
+      },
+    ];
+  });
+};
+
+const materialCount = (snapshot: EffectExtractionInputSnapshot, type: string): number =>
+  snapshot.materials.filter((material) => material.type === type).length;
+
+const snapshotSummary = (snapshot: EffectExtractionInputSnapshot): string => {
+  const commerceUrl = visibleCommerceUrl(snapshot.product.commerceUrl);
+  const counts = [
+    ['图片', '份', materialCount(snapshot, 'PRODUCT_IMAGE')],
+    ['文档', '份', materialCount(snapshot, 'PRODUCT_DOCUMENT')],
+    ['品牌规范', '份', materialCount(snapshot, 'BRAND_GUIDELINE')],
+    ['参考视频', '份', materialCount(snapshot, 'REFERENCE_VIDEO')],
+    ['电商链接', '个', commerceUrl ? 1 : 0],
+  ] as const;
+  const parts = counts
+    .filter(([, , count]) => count > 0)
+    .map(([label, unit, count]) => `${count} ${unit}${label}`);
+  const total = snapshot.materials.length + Number(Boolean(commerceUrl));
+  return total ? `本次共使用 ${total} 项资料：${parts.join('、')}` : '本次没有可用资料';
+};
+
+const snapshotSources = (
+  snapshot: EffectExtractionInputSnapshot,
+  nodeStatus: EffectExtractionNodeStatus,
+): EffectExtractionNodeDetailSource[] => {
+  const sourceStatus: EffectExtractionNodeStatus =
+    nodeStatus === 'PENDING' || nodeStatus === 'RUNNING' ? nodeStatus : 'SUCCEEDED';
+  const materialSources: EffectExtractionNodeDetailSource[] = snapshot.materials
+    .slice(0, 50)
+    .map((material) => ({
+      name: fileName(material.originalFileName),
+      status: sourceStatus,
+      media: materialMedia(snapshot, material),
+      fields: [],
+      warnings: [],
+    }));
+  const commerceUrl = visibleCommerceUrl(snapshot.product.commerceUrl);
+  return commerceUrl
+    ? [
+        ...materialSources,
+        {
+          name: commerceUrl,
+          status: sourceStatus,
+          media: {
+            kind: 'LINK',
+            typeLabel: '电商链接',
+            previewUrl: null,
+            sizeBytes: null,
+          },
+          fields: [],
+          warnings: [],
+        },
+      ]
+    : materialSources;
+};
+
+export const presentExtractionNodeDetail = (
+  record: ExtractionNodeDetailRecord,
+  nodeId: EffectExtractionNodeId,
+  execution: EffectExtractionNodeExecution,
+): EffectExtractionNodeDetail => {
+  const snapshot = record.inputSnapshot as EffectExtractionInputSnapshot;
+  const branch = record.branches?.find((item) => item.branch === nodeId);
+  const output = payload(branch?.structuredOutput);
+  const errorMessage = execution.errorMessage ? publicText(execution.errorMessage) : null;
+  const warningMessages = new Set<string>();
+  const base = {
+    nodeId,
+    status: execution.status,
+    warnings: execution.warnings.flatMap((warning) => {
+      const message = publicText(warning.message, 1000);
+      if (!message || message === errorMessage || warningMessages.has(message)) return [];
+      warningMessages.add(message);
+      return [
+        {
+          code: publicText(warning.code, 120),
+          message,
+          branch: warning.branch,
+        },
+      ];
+    }),
+    errorMessage,
+    updatedAt: (branch?.updatedAt ?? record.updatedAt).toISOString(),
+  };
+
+  if (nodeId === 'LOAD_AND_SNAPSHOT') {
+    return {
+      ...base,
+      summary: snapshotSummary(snapshot),
+      fields: [],
+      sources: snapshotSources(snapshot, execution.status),
+    };
+  }
+
+  if (nodeId === 'DOCUMENT' || nodeId === 'IMAGE') {
+    const sources = itemSources(
+      output.items,
+      snapshot,
+      execution.status,
+      errorMessage ? [errorMessage] : [],
+    );
+    const label = nodeId === 'DOCUMENT' ? '文档' : '图片';
+    return {
+      ...base,
+      summary: branch ? `已处理 ${sources.length} 份${label}资料` : `等待处理${label}资料`,
+      fields: [],
+      sources,
+    };
+  }
+
+  if (nodeId === 'COMMERCE') {
+    const visibleFields = commerceFields(
+      output.candidate,
+      output.metadata,
+      snapshot.product.commerceUrl,
+    );
+    return {
+      ...base,
+      warnings: execution.status === 'SKIPPED' ? [] : base.warnings,
+      summary: commerceSummary(execution.status),
+      fields: visibleFields,
+      sources: [],
+    };
+  }
+
+  if (nodeId === 'FUSION') {
+    return {
+      ...base,
+      summary: branch ? '已合并来自不同资料的产品信息' : '等待合并产品信息',
+      fields: candidateFields(output.candidate, output.metadata.provenance, true),
+      sources: [],
+    };
+  }
+
+  if (nodeId === 'SEMANTIC_REFINEMENT') {
+    const hasLightweightSummary = Number.isFinite(Number(output.metadata.userFactCount));
+    const sources = hasLightweightSummary ? [] : semanticSources(output.metadata, execution.status);
+    const inputCount = Number(output.metadata.inputCount);
+    const outputCount = Number(output.metadata.outputCount);
+    const userFactCount = Number(output.metadata.userFactCount);
+    const userNoticeCount = Number(output.metadata.userNoticeCount);
+    const suggestionInputCount = Number(output.metadata.imageSuggestionInputCount);
+    const suggestionKeptCount = Number(output.metadata.imageSuggestionKeptCount);
+    const suggestionMovedCount = Number(output.metadata.imageSuggestionMovedCount);
+    const suggestionDroppedCount = Number(output.metadata.imageSuggestionDroppedCount);
+    const aiCall = isRecord(output.metadata.aiCall) ? output.metadata.aiCall : {};
+    const failures = Array.isArray(output.metadata.failures)
+      ? output.metadata.failures.filter(isRecord)
+      : [];
+    const firstFailure = failures[0] ?? {};
+    const failureType = String(firstFailure.type ?? '');
+    const latencyMs = Number.isFinite(Number(aiCall.latencyMs))
+      ? Number(aiCall.latencyMs)
+      : Number(firstFailure.elapsedMs);
+    const validation = isRecord(output.metadata.validation) ? output.metadata.validation : {};
+    const validationStatus = String(validation.status ?? '');
+    const correctionCount = Number(validation.correctionCount);
+    const correctionCodes = Array.isArray(validation.correctionCodes)
+      ? validation.correctionCodes
+          .map(String)
+          .map((code) => SEMANTIC_CORRECTION_LABELS[code])
+          .filter((label): label is string => Boolean(label))
+      : [];
+    const corrected = validationStatus === 'CORRECTED' && correctionCount > 0;
+    const degraded = output.metadata.degraded === true;
+    const validationLabel = degraded
+      ? failureType === 'AI_RESPONSE_INVALID'
+        ? '未通过：模型返回格式异常'
+        : failureType === 'AI_OUTPUT_TRUNCATED'
+          ? '未通过：模型输出被截断'
+          : failureType === 'AI_TIMEOUT'
+            ? '未通过：模型请求超时'
+            : '未通过：语义决策不可用'
+      : corrected
+        ? `部分通过：已安全忽略 ${correctionCount} 项无效结构`
+        : validationStatus === 'VERIFIED'
+          ? '结构校验通过'
+          : null;
+    const mergedGroupCount = Number(output.metadata.mergedGroupCount);
+    const familyGroupCount = Number(output.metadata.familyGroupCount);
+    const completedSummary =
+      Number.isFinite(mergedGroupCount) && Number.isFinite(familyGroupCount)
+        ? mergedGroupCount > 0 && familyGroupCount > 0
+          ? `已归并 ${mergedGroupCount} 组重复信息，并整理 ${familyGroupCount} 组相关主题`
+          : mergedGroupCount > 0
+            ? `已归并 ${mergedGroupCount} 组语义重复信息`
+            : familyGroupCount > 0
+              ? `已整理 ${familyGroupCount} 组相关主题，保留全部原始表达`
+              : null
+        : null;
+    const lightweightSummary = hasLightweightSummary
+      ? execution.status === 'PARTIAL'
+        ? corrected
+          ? `语义整理已保留有效结果，并安全忽略 ${correctionCount} 项无效结构`
+          : '语义整理未完成，已原样保留用户事实，图片建议未加入信息卡'
+        : `已保留 ${userFactCount} 条用户事实，整理 ${suggestionInputCount} 条图片建议`
+      : null;
+    const summary = !branch
+      ? '等待检查用户事实并整理图片建议'
+      : execution.status === 'PARTIAL'
+        ? (lightweightSummary ?? '语义整理未完成，已保留原始提炼信息')
+        : execution.status === 'FAILED'
+          ? '语义整理失败，已保留原始提炼信息'
+          : lightweightSummary
+            ? lightweightSummary
+            : completedSummary
+              ? completedSummary
+              : sources.length > 0
+                ? `已归并 ${sources.length} 组语义重复信息`
+                : Number.isFinite(inputCount) && Number.isFinite(outputCount)
+                  ? `已检查 ${inputCount} 条信息，未发现需要归并的重复表达`
+                  : '语义整理已完成';
+    return {
+      ...base,
+      summary,
+      fields: hasLightweightSummary
+        ? fields([
+            field('semantic-user-facts', '检查的用户事实', userFactCount),
+            field('semantic-user-notices', '待用户确认的问题', userNoticeCount),
+            field('semantic-image-input', '输入的图片建议', suggestionInputCount),
+            field('semantic-image-kept', '保留的图片建议', suggestionKeptCount),
+            field('semantic-image-moved', '迁移字段的图片建议', suggestionMovedCount),
+            field('semantic-image-dropped', '删除的图片建议', suggestionDroppedCount),
+            field(
+              'semantic-correction-count',
+              '安全忽略的结构问题',
+              corrected ? correctionCount : 0,
+            ),
+            field(
+              'semantic-correction-types',
+              '结构问题类型',
+              correctionCodes.length ? correctionCodes : null,
+            ),
+            field('semantic-validation-status', '语义决策校验', validationLabel),
+            field(
+              'semantic-latency',
+              '语义模型耗时',
+              Number.isFinite(latencyMs) ? `${(latencyMs / 1000).toFixed(1)} 秒` : null,
+            ),
+            field(
+              'semantic-degraded',
+              '处理状态',
+              degraded
+                ? '部分完成，仅保留用户事实'
+                : corrected
+                  ? '部分完成，已保留有效整理结果'
+                  : '整理完成',
+            ),
+          ])
+        : [],
+      sources,
+    };
+  }
+
+  const result = record.result;
+  const resultCandidate = result?.draftResult ?? output.candidate;
+  const resultProvenance = reconciledNodeDetailProvenance(
+    record,
+    resultCandidate,
+    result?.provenance,
+  );
+  return {
+    ...base,
+    summary: result ? '产品信息卡已经生成，可以继续编辑' : '等待生成产品信息卡',
+    fields: [
+      ...candidateFields(resultCandidate, resultProvenance, true),
+      ...fields([
+        field('revision', '结果修订号', result?.revision),
+        field('savedAt', '最近保存时间', result?.savedAt?.toISOString()),
+      ]),
+    ],
+    sources: [],
+    updatedAt: (result?.updatedAt ?? branch?.updatedAt ?? record.updatedAt).toISOString(),
+  };
+};

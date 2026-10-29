@@ -1,0 +1,20 @@
+FROM ghcr.io/astral-sh/uv:0.11.16-python3.12-trixie-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_DEV=1
+
+WORKDIR /app/effect-segment-render
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+COPY shared/ai-runtime /app/shared/ai-runtime
+COPY effect-segment-render/pyproject.toml effect-segment-render/uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project
+COPY effect-segment-render/src ./src
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
+
+CMD ["/app/effect-segment-render/.venv/bin/effect-segment-render-worker"]

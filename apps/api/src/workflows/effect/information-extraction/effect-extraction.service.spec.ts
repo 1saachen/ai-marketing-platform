@@ -1,0 +1,1111 @@
+import { HttpStatus } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { describe, expect, it, vi } from 'vitest';
+
+import type { StoragePort } from '../../../platform/file/storage.port';
+import type { JobProgressStore } from '../../../platform/job/job.ports';
+import type { ProjectService } from '../../../platform/project/project.service';
+import type { WorkflowWorkingService } from '../../../platform/workflow/workflow-working.service';
+import type { EffectExtractionRepository } from './effect-extraction.repository';
+import { WorkerArtifactDto } from './dto/effect-extraction.dto';
+import {
+  EffectExtractionService,
+  extractionImageRecognitionSummary,
+} from './effect-extraction.service';
+
+const projectService = (): ProjectService =>
+  ({ get: vi.fn().mockResolvedValue({ id: 'project-a' }) }) as unknown as ProjectService;
+const storage = {} as StoragePort;
+
+const extractionResult = {
+  productCategory: '食品',
+  productName: '测试产品',
+  coreSpecification: '100g',
+  priceRange: '建议 10-20 元，需确认',
+  visualFeatures: '红色包装',
+  sellingPoints: ['卖点一', '家庭用户', '备餐麻烦', '包装便利', '家庭聚餐'],
+};
+
+const runRecord = {
+  id: 'run-a',
+  projectId: 'project-a',
+  draftId: 'draft-a',
+  productId: 'product-a',
+  status: 'RUNNING' as const,
+  progress: 20,
+  currentNode: 'DOCUMENT',
+  warnings: [],
+  errorMessage: null,
+  createdAt: new Date('2026-08-21T00:00:00.000Z'),
+  updatedAt: new Date('2026-08-21T00:01:00.000Z'),
+  result: null,
+  branches: [
+    {
+      branch: 'DOCUMENT' as const,
+      status: 'SUCCEEDED' as const,
+      warnings: [],
+      errorMessage: null,
+    },
+    {
+      branch: 'IMAGE' as const,
+      status: 'RUNNING' as const,
+      warnings: [],
+      errorMessage: null,
+    },
+  ],
+};
+
+describe('EffectExtractionService', () => {
+  it('rejects starting a new extraction on a published confirmed run', async () => {
+    const denied = new Error('已确认版本不可直接修改，请先进入编辑状态');
+    const repository = {
+      workflowRunIdForDraft: vi.fn().mockResolvedValue('published-run'),
+      startRun: vi.fn(),
+    } as unknown as EffectExtractionRepository;
+    const working = {
+      assertEffectNodeWritable: vi.fn().mockRejectedValue(denied),
+    } as unknown as WorkflowWorkingService;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storage,
+      working,
+    );
+
+    await expect(
+      service.start('project-a', 'product-a', {
+        draftId: 'draft-a',
+        expectedRevision: 1,
+        idempotencyKey: 'request-a',
+      }),
+    ).rejects.toBe(denied);
+    expect(repository.startRun).not.toHaveBeenCalled();
+  });
+
+  it('summarizes successful image recognition with no retained incremental facts', () => {
+    expect(
+      extractionImageRecognitionSummary([
+        {
+          branch: 'IMAGE',
+          structuredOutput: {
+            items: [
+              { candidate: { coreSellingPoints: ['图片候选一'] } },
+              { candidate: { usageScenarios: ['图片候选二'] } },
+              { status: 'FAILED' },
+            ],
+          },
+        },
+        {
+          branch: 'SEMANTIC_REFINEMENT',
+          structuredOutput: {
+            metadata: {
+              imageSuggestionInputCount: 12,
+              imageSuggestionKeptCount: 0,
+            },
+          },
+        },
+      ]),
+    ).toEqual({
+      processedImageCount: 2,
+      candidateSuggestionCount: 12,
+      retainedSuggestionCount: 0,
+    });
+  });
+
+  it('does not invent an image recognition summary for historical runs without counts', () => {
+    expect(
+      extractionImageRecognitionSummary([
+        {
+          branch: 'IMAGE',
+          structuredOutput: { items: [{ candidate: { visualFeatures: '可见外观' } }] },
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it('loads node details through the project-scoped run lookup', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        ...runRecord,
+        inputSnapshot: {
+          schemaVersion: 1,
+          projectId: 'project-a',
+          draftId: 'draft-a',
+          mode: 'SINGLE',
+          sourceRevision: 1,
+          product: {
+            id: 'product-a',
+            name: '测试产品',
+            category: '测试品类',
+            sku: '',
+            commerceUrl: null,
+            effectiveConfig: {
+              aspectRatio: '9:16',
+              durationSeconds: 15,
+              resolution: '1080P',
+              frameRate: 30,
+              subtitleStrategy: '跟随口播',
+              voiceoverStrategy: 'AI 女声',
+              bgmStrategy: '自动匹配',
+              styleTone: '清爽明亮',
+              deliveryChannel: '抖音',
+              disabledElements: [],
+            },
+          },
+          materials: [],
+        },
+      }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.nodeDetail('project-a', 'run-a', 'LOAD_AND_SNAPSHOT');
+
+    expect(repository.run).toHaveBeenCalledWith('project-a', 'run-a');
+    expect(result.detail).toMatchObject({
+      nodeId: 'LOAD_AND_SNAPSHOT',
+      status: 'SUCCEEDED',
+    });
+  });
+
+  it('keeps run lookup project-scoped and falls back to database progress when Redis fails', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({ ...runRecord }),
+    } as unknown as EffectExtractionRepository;
+    const progress = {
+      get: vi.fn().mockRejectedValue(new Error('redis down')),
+    } as unknown as JobProgressStore;
+    const service = new EffectExtractionService(repository, projectService(), progress, storage);
+
+    const result = await service.run('project-a', 'run-a');
+
+    expect(repository.run).toHaveBeenCalledWith('project-a', 'run-a');
+    expect(result.run.progress).toBe(20);
+    expect(result.run.currentNode).toBe('DOCUMENT');
+    expect(result.run.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nodeId: 'LOAD_AND_SNAPSHOT', status: 'SUCCEEDED' }),
+        expect.objectContaining({ nodeId: 'DOCUMENT', status: 'SUCCEEDED' }),
+        expect.objectContaining({ nodeId: 'IMAGE', status: 'RUNNING' }),
+        expect.objectContaining({ nodeId: 'FUSION', status: 'PENDING' }),
+      ]),
+    );
+  });
+
+  it('maps an unfinished branch to failed without exposing its structured output', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        ...runRecord,
+        status: 'FAILED',
+        errorMessage: '模型响应不符合结构',
+        branches: [
+          {
+            branch: 'NORMALIZATION',
+            status: 'RUNNING',
+            warnings: [],
+            errorMessage: null,
+            structuredOutput: { secret: 'must-not-leak' },
+            textStorageKey: 'private/markdown.md',
+          },
+        ],
+      }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      { get: vi.fn().mockResolvedValue(null) } as unknown as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.run('project-a', 'run-a');
+
+    expect(result.run.nodes.find((node) => node.nodeId === 'NORMALIZATION')).toMatchObject({
+      status: 'FAILED',
+      errorMessage: '模型响应不符合结构',
+    });
+    expect(JSON.stringify(result)).not.toContain('must-not-leak');
+    expect(JSON.stringify(result)).not.toContain('private/markdown.md');
+  });
+
+  it('maps a completed normalization branch to failed when final result persistence fails', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        ...runRecord,
+        status: 'FAILED',
+        currentNode: 'NORMALIZATION',
+        errorMessage: 'internal API returned HTTP 400',
+        branches: [
+          {
+            branch: 'NORMALIZATION',
+            status: 'SUCCEEDED',
+            warnings: [],
+            errorMessage: null,
+          },
+        ],
+      }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      { get: vi.fn().mockResolvedValue(null) } as unknown as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.run('project-a', 'run-a');
+
+    expect(result.run.nodes.find((node) => node.nodeId === 'NORMALIZATION')).toMatchObject({
+      status: 'FAILED',
+      errorMessage: '结果保存失败，请重新提炼',
+    });
+    expect(result.run.errorMessage).toBe('结果保存失败，请重新提炼');
+  });
+
+  it('uses the same safe persistence error in the product workspace projection', async () => {
+    const repository = {
+      workspace: vi.fn().mockResolvedValue({
+        id: 'draft-a',
+        projectId: 'project-a',
+        mode: 'SINGLE',
+        revision: 1,
+        globalConfig: {
+          aspectRatio: '9:16',
+          durationSeconds: 15,
+          resolution: '1080P',
+          frameRate: 30,
+          subtitleStrategy: '跟随口播',
+          voiceoverStrategy: 'AI 女声',
+          bgmStrategy: '自动匹配',
+          styleTone: '清爽明亮',
+          deliveryChannel: '抖音',
+          disabledElements: [],
+        },
+        products: [
+          {
+            id: 'product-a',
+            name: '测试产品',
+            category: '测试品类',
+            sku: '',
+            commerceUrl: null,
+            configOverride: {},
+            materials: [],
+            updatedAt: new Date('2026-08-21T00:00:00.000Z'),
+            extractionRuns: [
+              {
+                ...runRecord,
+                status: 'FAILED',
+                progress: 85,
+                currentNode: 'NORMALIZATION',
+                errorMessage: 'internal API returned HTTP 400',
+              },
+            ],
+          },
+        ],
+      }),
+      currentDependencySnapshot: vi.fn().mockResolvedValue(null),
+      insightArtifact: vi.fn().mockResolvedValue(null),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.workspace('project-a', 'draft-a');
+
+    expect(result.products[0]).toMatchObject({
+      status: 'FAILED',
+      errorMessage: '结果保存失败，请重新提炼',
+    });
+  });
+
+  it('projects user facts and image AI suggestions item by item', async () => {
+    const repository = {
+      workspace: vi.fn().mockResolvedValue({
+        id: 'draft-a',
+        projectId: 'project-a',
+        mode: 'SINGLE',
+        revision: 1,
+        globalConfig: {
+          aspectRatio: '9:16',
+          durationSeconds: 15,
+          resolution: '1080p',
+          frameRate: 30,
+          subtitleStrategy: '跟随口播',
+          voiceoverStrategy: 'AI 女声',
+          bgmStrategy: '自动匹配',
+          styleTone: '烟火食欲感',
+          deliveryChannel: '抖音',
+          disabledElements: ['系统禁用词'],
+        },
+        products: [
+          {
+            id: 'product-a',
+            name: '测试产品',
+            category: '测试品类',
+            sku: '',
+            commerceUrl: null,
+            configOverride: {},
+            materials: [
+              {
+                id: 'image-a',
+                originalFileName: '腊肠切面.png',
+              },
+            ],
+            updatedAt: new Date('2026-08-21T00:00:00.000Z'),
+            extractionRuns: [
+              {
+                ...runRecord,
+                status: 'COMPLETED',
+                progress: 100,
+                sourceFingerprint: 'fingerprint-a',
+                branches: [
+                  {
+                    branch: 'DOCUMENT',
+                    structuredOutput: {
+                      items: [
+                        {
+                          candidate: {
+                            productName: '测试产品',
+                            productCategory: '测试品类',
+                            priceRange: '20 元/袋',
+                            sellingPoints: ['用户卖点'],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    branch: 'IMAGE',
+                    structuredOutput: {
+                      items: [
+                        {
+                          sourceId: 'image-a',
+                          candidate: {
+                            visualFeatures: '肥瘦颗粒分明',
+                            sellingPoints: [
+                              '切面纹理清晰',
+                              '外观油润有光泽',
+                              '可迁移建议',
+                              '家庭蒸食准备费时',
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    branch: 'SEMANTIC_REFINEMENT',
+                    structuredOutput: {
+                      metadata: {
+                        userFactNotices: [
+                          {
+                            factId: 'user-sellingPoints-01',
+                            field: 'sellingPoints',
+                            value: '用户卖点',
+                            issue: 'POSSIBLE_OVERLAP',
+                            relatedFactIds: ['user-sellingPoints-02'],
+                            relatedValues: ['同层次要卖点'],
+                            suggestedField: null,
+                          },
+                          {
+                            factId: 'user-sellingPoints-06',
+                            field: 'sellingPoints',
+                            value: '春节团圆与送礼心意',
+                            issue: 'AMBIGUOUS_EXPRESSION',
+                            relatedFactIds: [],
+                            relatedValues: [],
+                            suggestedField: null,
+                          },
+                        ],
+                      },
+                    },
+                  },
+                ],
+                result: {
+                  id: 'result-a',
+                  projectId: 'project-a',
+                  draftId: 'draft-a',
+                  productId: 'product-a',
+                  runId: 'run-a',
+                  schemaVersion: 3,
+                  revision: 1,
+                  draftResult: {
+                    ...extractionResult,
+                    productName: '测试产品',
+                    productCategory: '测试品类',
+                    priceRange: '20 元/袋',
+                    visualFeatures: '肥瘦颗粒分明',
+                    sellingPoints: [
+                      '用户卖点',
+                      '切面纹理清晰',
+                      '外观油润有光泽',
+                      '家庭蒸食准备费时',
+                      '可迁移建议',
+                      '春节团圆与送礼心意',
+                    ],
+                  },
+                  generatedResult: extractionResult,
+                  manualOverrides: {},
+                  sourceFingerprint: 'fingerprint-a',
+                },
+              },
+            ],
+          },
+        ],
+      }),
+      product: vi.fn().mockResolvedValue({ id: 'product-a' }),
+      workflowRunForDraft: vi.fn().mockResolvedValue({
+        workspace: { workflowRunId: 'workflow-a' },
+      }),
+      run: vi.fn().mockResolvedValue({
+        inputSnapshot: {
+          product: {
+            name: '测试产品',
+            category: '测试品类',
+            sku: '',
+            effectiveConfig: {
+              aspectRatio: '9:16',
+              durationSeconds: 15,
+              resolution: '1080p',
+              styleTone: '烟火食欲感',
+              deliveryChannel: '抖音',
+              disabledElements: ['系统禁用词'],
+            },
+          },
+          dependencies: [],
+        },
+      }),
+      currentDependencySnapshot: vi.fn().mockResolvedValue(null),
+      insightArtifact: vi.fn().mockResolvedValue(null),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.workspace('project-a', 'draft-a');
+
+    expect(result.products[0]?.provenance).toMatchObject({
+      fieldOrigins: {
+        productName: 'USER_FACT',
+        priceRange: 'USER_FACT',
+        visualFeatures: 'AI_IMAGE_SUGGESTION',
+      },
+      fieldSourceNames: {
+        productName: ['用户资料'],
+        priceRange: ['用户资料'],
+        visualFeatures: ['腊肠切面.png'],
+      },
+      itemOrigins: {
+        sellingPoints: [
+          {
+            value: '用户卖点',
+            origin: 'USER_FACT',
+            sourceNames: ['用户资料'],
+            semanticNotices: [
+              {
+                issue: 'POSSIBLE_OVERLAP',
+                message:
+                  '建议处理：与“同层次要卖点”内容重叠，可合并共同信息，或补充两者的具体差异。',
+                suggestedField: null,
+                relatedValues: ['同层次要卖点'],
+              },
+            ],
+          },
+          {
+            value: '切面纹理清晰',
+            origin: 'AI_IMAGE_SUGGESTION',
+            sourceNames: ['腊肠切面.png'],
+          },
+          {
+            value: '外观油润有光泽',
+            origin: 'AI_IMAGE_SUGGESTION',
+            sourceNames: ['腊肠切面.png'],
+          },
+          {
+            value: '家庭蒸食准备费时',
+            origin: 'AI_IMAGE_SUGGESTION',
+            sourceNames: ['腊肠切面.png'],
+          },
+          {
+            value: '可迁移建议',
+            origin: 'AI_IMAGE_SUGGESTION',
+            sourceNames: ['腊肠切面.png'],
+          },
+          {
+            value: '春节团圆与送礼心意',
+            origin: 'USER_FACT',
+            sourceNames: ['用户资料'],
+            semanticNotices: [
+              {
+                issue: 'AMBIGUOUS_EXPRESSION',
+                message: '建议完善：请补充具体对象、使用场景或可验证特征，使表达更明确。',
+                suggestedField: null,
+                relatedValues: [],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(result.products[0]?.provenance)).not.toContain('系统未自动');
+  });
+
+  it('keeps the snapshot running after claim until a persisted branch starts', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        ...runRecord,
+        currentNode: null,
+        branches: [],
+      }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      { get: vi.fn().mockResolvedValue(null) } as unknown as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.run('project-a', 'run-a');
+
+    expect(result.run.nodes[0]).toMatchObject({
+      nodeId: 'LOAD_AND_SNAPSHOT',
+      status: 'RUNNING',
+    });
+  });
+
+  it('preserves partial, skipped and failed branch states and their public warnings', async () => {
+    const warning = {
+      code: 'SOURCE_WARNING',
+      message: '部分文档无法解析',
+      branch: 'DOCUMENT' as const,
+      sourceId: 'material-a',
+      structuredOutput: { prompt: 'must-not-leak' },
+      textStorageKey: 'private/source.md',
+    };
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        ...runRecord,
+        branches: [
+          {
+            branch: 'DOCUMENT',
+            status: 'PARTIAL',
+            warnings: [warning],
+            errorMessage: null,
+          },
+          {
+            branch: 'COMMERCE',
+            status: 'SKIPPED',
+            warnings: [],
+            errorMessage: null,
+          },
+        ],
+      }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      { get: vi.fn().mockResolvedValue(null) } as unknown as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.run('project-a', 'run-a');
+
+    expect(result.run.nodes.find((node) => node.nodeId === 'DOCUMENT')).toMatchObject({
+      status: 'PARTIAL',
+      warnings: [
+        {
+          code: 'SOURCE_WARNING',
+          message: '部分文档无法解析',
+          branch: 'DOCUMENT',
+          sourceId: 'material-a',
+        },
+      ],
+    });
+    expect(result.run.nodes.find((node) => node.nodeId === 'COMMERCE')).toMatchObject({
+      status: 'SKIPPED',
+    });
+    expect(result.run.nodes.some((node) => node.nodeId === ('FORM' as never))).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('must-not-leak');
+    expect(JSON.stringify(result)).not.toContain('private/source.md');
+  });
+
+  it('shows a document timeout once and removes duplicate branch warnings', async () => {
+    const timeoutWarning = {
+      code: 'SOURCE_WARNING',
+      message: '文档 AI 抽取超时',
+      branch: 'DOCUMENT' as const,
+      sourceId: null,
+    };
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        ...runRecord,
+        branches: [
+          {
+            branch: 'DOCUMENT',
+            status: 'FAILED',
+            warnings: [timeoutWarning, timeoutWarning],
+            errorMessage: '文档 AI 抽取超时',
+          },
+        ],
+      }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      { get: vi.fn().mockResolvedValue(null) } as unknown as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.run('project-a', 'run-a');
+    const document = result.run.nodes.find((node) => node.nodeId === 'DOCUMENT');
+
+    expect(document).toMatchObject({
+      status: 'FAILED',
+      errorMessage: '文档 AI 抽取超时',
+      warnings: [],
+    });
+    expect(JSON.stringify(document).match(/文档 AI 抽取超时/gu)).toHaveLength(1);
+  });
+
+  it('recognizes a legacy generic document error as timeout from its safe duration', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        ...runRecord,
+        branches: [
+          {
+            branch: 'DOCUMENT',
+            status: 'FAILED',
+            warnings: [
+              {
+                code: 'SOURCE_WARNING',
+                message: 'Ark structured-output request failed',
+                branch: 'DOCUMENT',
+                sourceId: null,
+              },
+            ],
+            errorCode: 'DOCUMENT_FAILED',
+            errorMessage: 'Ark structured-output request failed',
+            startedAt: new Date('2026-08-24T09:06:39.000Z'),
+            completedAt: new Date('2026-08-24T09:12:41.000Z'),
+          },
+        ],
+      }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      { get: vi.fn().mockResolvedValue(null) } as unknown as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.run('project-a', 'run-a');
+    const document = result.run.nodes.find((node) => node.nodeId === 'DOCUMENT');
+
+    expect(document).toMatchObject({
+      status: 'FAILED',
+      errorMessage: '文档 AI 抽取超时',
+    });
+    expect(document?.warnings).toEqual([]);
+    expect(JSON.stringify(document).match(/文档 AI 抽取超时/gu)).toHaveLength(1);
+    expect(JSON.stringify(document)).not.toContain('Ark structured-output request failed');
+  });
+
+  it('hides historical form branches and their obsolete warnings', async () => {
+    const retiredWarning = {
+      code: 'SOURCE_WARNING',
+      message: '表单尚未填写品类，将由其他资料补充',
+      branch: 'FORM' as const,
+      sourceId: null,
+    };
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        ...runRecord,
+        status: 'COMPLETED',
+        progress: 100,
+        warnings: [retiredWarning],
+        branches: [
+          {
+            branch: 'FORM',
+            status: 'PARTIAL',
+            warnings: [retiredWarning],
+            errorMessage: null,
+          },
+          {
+            branch: 'FUSION',
+            status: 'SUCCEEDED',
+            warnings: [{ ...retiredWarning, branch: 'FUSION' }],
+            errorMessage: null,
+          },
+        ],
+      }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      { get: vi.fn().mockResolvedValue(null) } as unknown as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.run('project-a', 'run-a');
+
+    expect(result.run.warnings).toEqual([]);
+    expect(result.run.nodes.some((node) => node.nodeId === ('FORM' as never))).toBe(false);
+    expect(result.run.nodes.find((node) => node.nodeId === 'FUSION')).toMatchObject({
+      status: 'SUCCEEDED',
+      warnings: [],
+    });
+  });
+
+  it('uses newer Redis progress without allowing it to lower database progress', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({ ...runRecord }),
+    } as unknown as EffectExtractionRepository;
+    const progress = {
+      get: vi.fn().mockResolvedValue({ progress: 65, currentNode: 'FUSION' }),
+    } as unknown as JobProgressStore;
+    const service = new EffectExtractionService(repository, projectService(), progress, storage);
+
+    const result = await service.run('project-a', 'run-a');
+
+    expect(result.run.progress).toBe(65);
+    expect(result.run.currentNode).toBe('FUSION');
+  });
+
+  it('rejects malformed manual result updates before touching persistence', async () => {
+    const repository = {
+      result: vi.fn(),
+      updateResult: vi.fn(),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storage,
+    );
+
+    await expect(
+      service.updateResult('project-a', 'result-a', 1, { productName: 'only one field' }),
+    ).rejects.toMatchObject({ status: HttpStatus.BAD_REQUEST });
+    expect(repository.result).not.toHaveBeenCalled();
+  });
+
+  it('keeps manually edited unified selling points as field-level overrides', async () => {
+    const editedResult = {
+      ...extractionResult,
+      sellingPoints: ['卖点一', '人工补充卖点', '适合煲仔饭'],
+    };
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        runId: 'run-a',
+        generatedResult: extractionResult,
+      }),
+      run: vi.fn().mockResolvedValue({
+        inputSnapshot: {},
+      }),
+      updateResult: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        runId: 'run-a',
+        productId: 'product-a',
+        revision: 2,
+        draftResult: editedResult,
+        savedAt: new Date('2026-08-25T08:00:00.000Z'),
+      }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storage,
+    );
+
+    const result = await service.updateResult('project-a', 'result-a', 1, editedResult);
+
+    expect(repository.updateResult).toHaveBeenCalledWith('project-a', 'result-a', 1, editedResult, {
+      sellingPoints: editedResult.sellingPoints,
+    });
+    expect(result.result).toEqual(editedResult);
+  });
+
+  it('maps a stale revision to a conflict and does not create a response run', async () => {
+    const repository = {
+      startRun: vi.fn().mockResolvedValue({ kind: 'REVISION_CONFLICT' }),
+    } as unknown as EffectExtractionRepository;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storage,
+    );
+
+    await expect(
+      service.start('project-a', 'product-a', {
+        draftId: 'draft-a',
+        expectedRevision: 3,
+        idempotencyKey: 'click-a',
+        refreshImageRecognition: true,
+      }),
+    ).rejects.toMatchObject({ status: HttpStatus.CONFLICT });
+    expect(repository.startRun).toHaveBeenCalledWith(
+      'project-a',
+      'draft-a',
+      'product-a',
+      3,
+      'click-a',
+      true,
+    );
+  });
+
+  it('does not fail a heartbeat when Redis progress caching is unavailable', async () => {
+    const repository = {
+      progress: vi.fn().mockResolvedValue(true),
+    } as unknown as EffectExtractionRepository;
+    const progress = {
+      set: vi.fn().mockRejectedValue(new Error('redis down')),
+    } as unknown as JobProgressStore;
+    const service = new EffectExtractionService(repository, projectService(), progress, storage);
+
+    await expect(service.progress('project-a', 'run-a', 'attempt-a', 45, 'IMAGE')).resolves.toEqual(
+      { accepted: true },
+    );
+  });
+
+  it('replays an artifact upload idempotently without writing object storage again', async () => {
+    const repository = {
+      authorizedRun: vi.fn().mockResolvedValue({ inputSnapshot: {}, productId: 'product-a' }),
+      artifactByKey: vi.fn().mockResolvedValue({
+        id: 'artifact-a',
+        artifactKind: 'DOCLING_MARKDOWN',
+        sourceId: 'material-a',
+        storageKey: 'stored/doc.md',
+        sizeBytes: 42,
+      }),
+    } as unknown as EffectExtractionRepository;
+    const storagePort = { put: vi.fn(), delete: vi.fn() } as unknown as StoragePort;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storagePort,
+    );
+
+    await expect(
+      service.storeArtifact(
+        'project-a',
+        'run-a',
+        'attempt-a',
+        {
+          artifactKind: 'DOCLING_MARKDOWN',
+          sourceId: 'material-a',
+          idempotencyKey: 'docling:material-a',
+        },
+        {
+          path: 'Z:/missing-but-force-removable.md',
+          originalname: 'result.md',
+          mimetype: 'text/markdown',
+          size: 42,
+        },
+      ),
+    ).resolves.toEqual({
+      artifactId: 'artifact-a',
+      storageKey: 'stored/doc.md',
+      sizeBytes: 42,
+      replayed: true,
+    });
+    expect(storagePort.put).not.toHaveBeenCalled();
+  });
+
+  it('accepts COMMERCE_MARKDOWN in the worker artifact DTO', async () => {
+    const dto = plainToInstance(WorkerArtifactDto, {
+      projectId: '2f67a1e4-3ccd-4505-a0aa-0a868d3439c0',
+      artifactKind: 'COMMERCE_MARKDOWN',
+      idempotencyKey: 'commerce:product-a',
+    });
+
+    await expect(validate(dto)).resolves.toEqual([]);
+  });
+
+  it('rejects raw HTML and unknown worker artifact kinds', async () => {
+    const dto = plainToInstance(WorkerArtifactDto, {
+      projectId: '2f67a1e4-3ccd-4505-a0aa-0a868d3439c0',
+      artifactKind: 'COMMERCE_RAW_HTML',
+      idempotencyKey: 'commerce:product-a',
+    });
+
+    const errors = await validate(dto);
+    expect(errors).toEqual([
+      expect.objectContaining({
+        property: 'artifactKind',
+        constraints: expect.objectContaining({ isIn: expect.any(String) }),
+      }),
+    ]);
+  });
+
+  it('replays a project-scoped commerce artifact idempotently', async () => {
+    const repository = {
+      authorizedRun: vi.fn().mockResolvedValue({ inputSnapshot: {}, productId: 'product-a' }),
+      artifactByKey: vi.fn().mockResolvedValue({
+        id: 'artifact-commerce',
+        artifactKind: 'COMMERCE_MARKDOWN',
+        sourceId: null,
+        storageKey: 'stored/commerce.md',
+        sizeBytes: 128,
+      }),
+    } as unknown as EffectExtractionRepository;
+    const storagePort = { put: vi.fn(), delete: vi.fn() } as unknown as StoragePort;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storagePort,
+    );
+
+    await expect(
+      service.storeArtifact(
+        'project-a',
+        'run-a',
+        'attempt-a',
+        {
+          artifactKind: 'COMMERCE_MARKDOWN',
+          idempotencyKey: 'commerce:product-a',
+        },
+        {
+          path: 'Z:/missing-but-force-removable.md',
+          originalname: 'commerce.md',
+          mimetype: 'text/plain',
+          size: 128,
+        },
+      ),
+    ).resolves.toEqual({
+      artifactId: 'artifact-commerce',
+      storageKey: 'stored/commerce.md',
+      sizeBytes: 128,
+      replayed: true,
+    });
+    expect(repository.authorizedRun).toHaveBeenCalledWith('project-a', 'run-a', 'attempt-a');
+    expect(repository.artifactByKey).toHaveBeenCalledWith(
+      'project-a',
+      'run-a',
+      'commerce:product-a',
+    );
+    expect(storagePort.put).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-text commerce artifacts before storage', async () => {
+    const repository = {
+      authorizedRun: vi.fn(),
+      artifactByKey: vi.fn(),
+    } as unknown as EffectExtractionRepository;
+    const storagePort = { put: vi.fn(), delete: vi.fn() } as unknown as StoragePort;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storagePort,
+    );
+
+    await expect(
+      service.storeArtifact(
+        'project-a',
+        'run-a',
+        'attempt-a',
+        {
+          artifactKind: 'COMMERCE_MARKDOWN',
+          idempotencyKey: 'commerce:product-a',
+        },
+        {
+          path: 'Z:/missing-commerce.bin',
+          originalname: 'commerce.bin',
+          mimetype: 'application/octet-stream',
+          size: 128,
+        },
+      ),
+    ).rejects.toMatchObject({ status: HttpStatus.BAD_REQUEST });
+    expect(repository.authorizedRun).not.toHaveBeenCalled();
+    expect(storagePort.put).not.toHaveBeenCalled();
+  });
+
+  it('does not access storage when the commerce artifact lease is outside the project scope', async () => {
+    const repository = {
+      authorizedRun: vi.fn().mockResolvedValue(null),
+      artifactByKey: vi.fn(),
+    } as unknown as EffectExtractionRepository;
+    const storagePort = { put: vi.fn(), delete: vi.fn() } as unknown as StoragePort;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      {} as JobProgressStore,
+      storagePort,
+    );
+
+    await expect(
+      service.storeArtifact(
+        'project-b',
+        'run-a',
+        'attempt-a',
+        {
+          artifactKind: 'COMMERCE_MARKDOWN',
+          idempotencyKey: 'commerce:product-a',
+        },
+        {
+          path: 'Z:/missing-commerce.md',
+          originalname: 'commerce.md',
+          mimetype: 'text/markdown',
+          size: 128,
+        },
+      ),
+    ).rejects.toMatchObject({ status: HttpStatus.CONFLICT });
+    expect(repository.authorizedRun).toHaveBeenCalledWith('project-b', 'run-a', 'attempt-a');
+    expect(repository.artifactByKey).not.toHaveBeenCalled();
+    expect(storagePort.put).not.toHaveBeenCalled();
+  });
+
+  it('completes a current worker result without adding production fields', async () => {
+    const storedResult = {
+      id: 'result-a',
+      projectId: 'project-a',
+      draftId: 'draft-a',
+      productId: 'product-a',
+      revision: 1,
+      draftResult: extractionResult,
+    };
+    const repository = {
+      complete: vi.fn().mockResolvedValue({ kind: 'COMPLETED', result: storedResult }),
+      workflowRunForDraft: vi.fn().mockResolvedValue(null),
+    } as unknown as EffectExtractionRepository;
+    const progressStore = {
+      delete: vi.fn().mockResolvedValue(undefined),
+    } as unknown as JobProgressStore;
+    const service = new EffectExtractionService(
+      repository,
+      projectService(),
+      progressStore,
+      storage,
+    );
+
+    await expect(
+      service.complete('project-a', 'run-a', 'attempt-a', {
+        result: extractionResult,
+        provenance: {},
+        conflictReport: [],
+        warnings: [],
+      }),
+    ).resolves.toEqual({ extractResultId: 'result-a' });
+    expect(repository.complete).toHaveBeenCalledWith(
+      'project-a',
+      'run-a',
+      'attempt-a',
+      expect.objectContaining({ result: extractionResult }),
+    );
+  });
+});

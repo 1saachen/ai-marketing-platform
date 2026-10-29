@@ -1,0 +1,131 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  addEffectPromptItem,
+  deleteEffectPromptItem,
+  getEffectPromptResult,
+  updateEffectPromptItem,
+  updateEffectPromptSharedPrompt,
+  validateEffectPromptResult,
+} from './effect-prompt-generation.api';
+
+const ok = (data: unknown = {}): Response =>
+  new Response(JSON.stringify({ success: true, data }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe('effect prompt generation API', () => {
+  it('encodes product pagination and the server-side query', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(ok()));
+    vi.stubGlobal('fetch', fetchMock);
+    await getEffectPromptResult(
+      'project / 1',
+      'workflow / 1',
+      'product / 1',
+      2,
+      20,
+      '家庭 场景',
+      'HOOK',
+      'PRIMARY_OR_COMPATIBLE',
+    );
+    const url = String(fetchMock.mock.calls[0]![0]);
+    expect(url).toContain(
+      '/projects/project%20%2F%201/workflows/effect/prompt-generation/products/product%20%2F%201/result',
+    );
+    expect(url).toContain('page=2');
+    expect(url).toContain('pageSize=20');
+    expect(url).toContain('workflowRunId=workflow+%2F+1');
+    expect(url).toContain('query=%E5%AE%B6%E5%BA%AD+%E5%9C%BA%E6%99%AF');
+    expect(url).toContain('purpose=HOOK');
+    expect(url).toContain('purposeMatch=PRIMARY_OR_COMPATIBLE');
+  });
+
+  it('uses primary-purpose matching by default', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(ok()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getEffectPromptResult('project-1', 'workflow-1', 'product-1', 1, 50, '', 'EFFECT');
+
+    const url = String(fetchMock.mock.calls[0]![0]);
+    expect(url).toContain('purpose=EFFECT');
+    expect(url).toContain('pageSize=50');
+    expect(url).toContain('purposeMatch=PRIMARY');
+    expect(url).not.toContain('origin=');
+  });
+
+  it.each(['AI', 'MANUAL'] as const)(
+    'sends the persisted %s source with pagination and purpose',
+    async (origin) => {
+      const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(ok()));
+      vi.stubGlobal('fetch', fetchMock);
+      await getEffectPromptResult(
+        'project-1',
+        'workflow-1',
+        'product-1',
+        2,
+        5,
+        '厨房',
+        'EFFECT',
+        'PRIMARY_OR_COMPATIBLE',
+        undefined,
+        origin,
+      );
+      const url = new URL(String(fetchMock.mock.calls[0]![0]), 'http://localhost');
+      expect(Object.fromEntries(url.searchParams)).toMatchObject({
+        origin,
+        page: '2',
+        pageSize: '5',
+        query: '厨房',
+        purpose: 'EFFECT',
+        purposeMatch: 'PRIMARY_OR_COMPATIBLE',
+      });
+    },
+  );
+
+  it('uses result CAS for edit, delete and validation mutations', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(ok()));
+    vi.stubGlobal('fetch', fetchMock);
+    const dimensions = {
+      narrative: '痛点前置型',
+      scene: '家庭',
+      persona: '都市白领',
+      productRelation: '广式腊肠真空锁鲜',
+      camera: '慢推近景',
+      emotion: '温馨治愈',
+    };
+
+    await addEffectPromptItem('project-1', 'result-1', {
+      content: 'Prompt',
+      dimensions,
+      targetDurationSeconds: 5,
+      expectedRevision: 7,
+    });
+    await updateEffectPromptItem('project-1', 'result-1', 'item-1', {
+      content: 'Prompt',
+      dimensions,
+      targetDurationSeconds: 5,
+      expectedRevision: 8,
+    });
+    await deleteEffectPromptItem('project-1', 'result-1', 'item-1', 9);
+    await updateEffectPromptSharedPrompt('project-1', 'result-1', {
+      content: '保持产品外观一致',
+      expectedRevision: 10,
+    });
+    await validateEffectPromptResult('project-1', 'result-1', { expectedRevision: 11 });
+
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).headers).toMatchObject({ 'If-Match': '7' });
+    expect((fetchMock.mock.calls[1]![1] as RequestInit).headers).toMatchObject({ 'If-Match': '8' });
+    expect((fetchMock.mock.calls[2]![1] as RequestInit).method).toBe('DELETE');
+    expect((fetchMock.mock.calls[2]![1] as RequestInit).headers).toMatchObject({ 'If-Match': '9' });
+    expect(String(fetchMock.mock.calls[3]![0])).toContain('/results/result-1/shared-prompt');
+    expect((fetchMock.mock.calls[3]![1] as RequestInit).headers).toMatchObject({
+      'If-Match': '10',
+    });
+    expect((fetchMock.mock.calls[4]![1] as RequestInit).headers).toMatchObject({
+      'If-Match': '11',
+    });
+  });
+});

@@ -1,0 +1,529 @@
+import type {
+  AdvanceEffectImportDraftData,
+  AdvanceEffectImportDraftRequest,
+  ApiResponse,
+  BatchDeleteEffectImportProductsData,
+  BatchDeleteEffectImportProductsRequest,
+  BatchRetryEffectImportProductsData,
+  BatchRetryEffectImportProductsRequest,
+  BatchRestoreEffectImportProductsData,
+  BatchRestoreEffectImportProductsRequest,
+  CancelEffectManifestData,
+  CommitEffectManifestData,
+  CommitEffectManifestRequest,
+  CompleteEffectImportUploadSessionData,
+  CompleteEffectImportUploadSessionRequest,
+  CreateEffectImportMaterialRequest,
+  CreateEffectImportProductRequest,
+  CreateEffectImportUploadSessionRequest,
+  EffectImportUploadSession,
+  EffectImportDeleteData,
+  EffectImportDraft,
+  EffectImportMaterialMutationData,
+  EffectImportMode,
+  EffectImportProductListData,
+  EffectImportProductListQuery,
+  EffectImportProductMutationData,
+  EffectImportRemovedProductListData,
+  RestoreEffectImportProductData,
+  EffectManifestFormat,
+  GetEffectImportWorkspaceData,
+  PreviewEffectManifestData,
+  ReplaceEffectImportMaterialContentRequest,
+  SwitchEffectImportModeData,
+  SwitchEffectImportModeRequest,
+  UpdateEffectImportDraftData,
+  UpdateEffectImportDraftRequest,
+  UpdateEffectImportProductRequest,
+  ValidateEffectImportDraftData,
+  ValidateEffectImportDraftRequest,
+  ValidateEffectImportLinkData,
+  ValidateEffectImportLinkRequest,
+  ValidateEffectImportProductData,
+} from '@ai-marketing/contracts';
+
+import { isNetworkError, requestJson, requestRaw } from '../../../../api/http-client';
+
+const basePath = (projectId: string): string =>
+  `/projects/${encodeURIComponent(projectId)}/workflows/effect/source-import`;
+
+const draftPath = (projectId: string, mode: EffectImportMode): string =>
+  `${basePath(projectId)}/drafts/${mode}`;
+
+export const effectImportMaterialContentPath = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  materialId: string,
+): string =>
+  `${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}/materials/${encodeURIComponent(materialId)}/content`;
+
+const revisionHeaders = (revision: number): Record<string, string> => ({
+  'If-Match': String(revision),
+});
+
+const WORKSPACE_RETRY_DELAYS_MS = [150, 450, 900, 1800] as const;
+
+const isTransientWorkspaceError = (error: unknown): boolean => {
+  if (isNetworkError(error)) return true;
+  if (typeof error !== 'object' || error === null || !('status' in error)) return false;
+  const status = (error as { status?: unknown }).status;
+  return status === 502 || status === 503 || status === 504;
+};
+
+const waitForWorkspaceRetry = (delayMs: number, signal?: AbortSignal): Promise<void> => {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException('工作区加载已取消', 'AbortError'));
+  }
+  return new Promise<void>((resolve, reject) => {
+    const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new DOMException('工作区加载已取消', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+};
+
+export const getEffectImportWorkspace = async (
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ApiResponse<GetEffectImportWorkspaceData>> => {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestJson(`${basePath(projectId)}`, {
+        operation: '加载资料包工作区',
+        signal,
+      });
+    } catch (error) {
+      const delay = WORKSPACE_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || !isTransientWorkspaceError(error)) throw error;
+      await waitForWorkspaceRetry(delay, signal);
+    }
+  }
+};
+
+export const switchEffectImportMode = (
+  projectId: string,
+  input: SwitchEffectImportModeRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<SwitchEffectImportModeData>> =>
+  requestJson(`${basePath(projectId)}/mode`, {
+    method: 'PATCH',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '切换导入模式',
+    signal,
+  });
+
+export const getEffectImportDraft = (
+  projectId: string,
+  mode: EffectImportMode,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportDraft>> =>
+  requestJson(draftPath(projectId, mode), {
+    operation: '加载导入草稿',
+    signal,
+  });
+
+export const updateEffectImportDraft = (
+  projectId: string,
+  mode: EffectImportMode,
+  input: UpdateEffectImportDraftRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<UpdateEffectImportDraftData>> =>
+  requestJson(draftPath(projectId, mode), {
+    method: 'PUT',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '保存全局视频配置',
+    signal,
+  });
+
+export const listEffectImportProducts = (
+  projectId: string,
+  mode: EffectImportMode,
+  query: EffectImportProductListQuery,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportProductListData>> => {
+  const search = new URLSearchParams();
+  if (query.keyword) search.set('keyword', query.keyword);
+  if (query.category) search.set('category', query.category);
+  if (query.page) search.set('page', String(query.page));
+  if (query.pageSize) search.set('pageSize', String(query.pageSize));
+  const suffix = search.size ? `?${search.toString()}` : '';
+  return requestJson(`${draftPath(projectId, mode)}/products${suffix}`, {
+    operation: '加载产品列表',
+    signal,
+  });
+};
+
+export const createEffectImportProduct = (
+  projectId: string,
+  mode: EffectImportMode,
+  input: CreateEffectImportProductRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportProductMutationData>> =>
+  requestJson(`${draftPath(projectId, mode)}/products`, {
+    method: 'POST',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '新增产品',
+    signal,
+  });
+
+export const updateEffectImportProduct = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  input: UpdateEffectImportProductRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportProductMutationData>> =>
+  requestJson(`${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}`, {
+    method: 'PATCH',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '保存产品资料',
+    signal,
+  });
+
+export const deleteEffectImportProduct = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  expectedRevision: number,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportDeleteData>> =>
+  requestJson(`${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}`, {
+    method: 'DELETE',
+    body: { expectedRevision },
+    headers: revisionHeaders(expectedRevision),
+    operation: '删除产品',
+    signal,
+  });
+
+export const batchDeleteEffectImportProducts = (
+  projectId: string,
+  mode: EffectImportMode,
+  input: BatchDeleteEffectImportProductsRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<BatchDeleteEffectImportProductsData>> =>
+  requestJson(`${draftPath(projectId, mode)}/products/batch-delete`, {
+    method: 'POST',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '批量删除产品',
+    signal,
+  });
+
+export const listRemovedEffectImportProducts = (
+  projectId: string,
+  mode: EffectImportMode,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportRemovedProductListData>> =>
+  requestJson(`${draftPath(projectId, mode)}/products/removed`, {
+    operation: '加载最近删除产品',
+    signal,
+  });
+
+export const restoreEffectImportProduct = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  expectedRevision: number,
+  signal?: AbortSignal,
+): Promise<ApiResponse<RestoreEffectImportProductData>> =>
+  requestJson(`${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}/restore`, {
+    method: 'POST',
+    body: { expectedRevision },
+    headers: revisionHeaders(expectedRevision),
+    operation: '恢复产品',
+    signal,
+  });
+
+export const batchRestoreEffectImportProducts = (
+  projectId: string,
+  mode: EffectImportMode,
+  input: BatchRestoreEffectImportProductsRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<BatchRestoreEffectImportProductsData>> =>
+  requestJson(`${draftPath(projectId, mode)}/products/batch-restore`, {
+    method: 'POST',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '批量恢复产品',
+    signal,
+  });
+
+export const batchRetryEffectImportProducts = (
+  projectId: string,
+  mode: EffectImportMode,
+  input: BatchRetryEffectImportProductsRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<BatchRetryEffectImportProductsData>> =>
+  requestJson(`${draftPath(projectId, mode)}/products/batch-retry`, {
+    method: 'POST',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '重试失败资料',
+    signal,
+  });
+
+export const validateEffectImportLink = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  input: ValidateEffectImportLinkRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<ValidateEffectImportLinkData>> =>
+  requestJson(
+    `${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}/validate-link`,
+    { method: 'POST', body: input, operation: '校验电商链接', signal },
+  );
+
+export const uploadEffectImportMaterial = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  file: File,
+  input: CreateEffectImportMaterialRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportMaterialMutationData>> => {
+  const form = new FormData();
+  form.set('file', file);
+  form.set('type', input.type);
+  form.set('expectedRevision', String(input.expectedRevision));
+  if (input.expectedFileName) form.set('expectedFileName', input.expectedFileName);
+  return requestJson(
+    `${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}/materials`,
+    {
+      method: 'POST',
+      body: form,
+      headers: revisionHeaders(input.expectedRevision),
+      operation: '上传产品资料',
+      signal,
+    },
+  );
+};
+
+export const createEffectImportUploadSession = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  input: CreateEffectImportUploadSessionRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportUploadSession>> =>
+  requestJson(
+    `${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}/upload-sessions`,
+    {
+      method: 'POST',
+      body: input,
+      headers: revisionHeaders(input.expectedRevision),
+      operation: '创建批量上传会话',
+      signal,
+    },
+  );
+
+export const uploadEffectImportSessionItem = (
+  projectId: string,
+  sessionId: string,
+  clientFileId: string,
+  file: File,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportUploadSession>> => {
+  const form = new FormData();
+  form.set('file', file);
+  return requestJson(
+    `${basePath(projectId)}/upload-sessions/${encodeURIComponent(sessionId)}/items/${encodeURIComponent(clientFileId)}/content`,
+    { method: 'PUT', body: form, operation: '上传会话文件', signal },
+  );
+};
+
+export const completeEffectImportUploadSession = (
+  projectId: string,
+  sessionId: string,
+  input: CompleteEffectImportUploadSessionRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<CompleteEffectImportUploadSessionData>> =>
+  requestJson(`${basePath(projectId)}/upload-sessions/${encodeURIComponent(sessionId)}/complete`, {
+    method: 'POST',
+    body: input,
+    operation: '提交批量上传资料包',
+    signal,
+  });
+
+export const replaceEffectImportMaterial = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  materialId: string,
+  file: File,
+  input: ReplaceEffectImportMaterialContentRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportMaterialMutationData>> => {
+  const form = new FormData();
+  form.set('file', file);
+  form.set('expectedRevision', String(input.expectedRevision));
+  return requestJson(
+    `${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}/materials/${encodeURIComponent(materialId)}/content`,
+    {
+      method: 'PUT',
+      body: form,
+      headers: revisionHeaders(input.expectedRevision),
+      operation: '重新上传资料',
+      signal,
+    },
+  );
+};
+
+export const deleteEffectImportMaterial = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  materialId: string,
+  expectedRevision: number,
+  signal?: AbortSignal,
+): Promise<ApiResponse<EffectImportDeleteData>> =>
+  requestJson(
+    `${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}/materials/${encodeURIComponent(materialId)}`,
+    {
+      method: 'DELETE',
+      body: { expectedRevision },
+      headers: revisionHeaders(expectedRevision),
+      operation: '删除资料',
+      signal,
+    },
+  );
+
+export const previewEffectManifest = (
+  projectId: string,
+  manifest: File,
+  files: File[],
+  expectedRevision: number,
+  idempotencyKey: string,
+  signal?: AbortSignal,
+): Promise<ApiResponse<PreviewEffectManifestData>> => {
+  const form = new FormData();
+  form.set('manifest', manifest);
+  files.forEach((file) => form.append('files', file));
+  form.set('expectedRevision', String(expectedRevision));
+  form.set('idempotencyKey', idempotencyKey);
+  return requestJson(`${draftPath(projectId, 'BATCH')}/manifest-imports/preview`, {
+    method: 'POST',
+    body: form,
+    headers: revisionHeaders(expectedRevision),
+    operation: '预览批量清单',
+    signal,
+  });
+};
+
+export const commitEffectManifest = (
+  projectId: string,
+  importId: string,
+  input: CommitEffectManifestRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<CommitEffectManifestData>> =>
+  requestJson(
+    `${draftPath(projectId, 'BATCH')}/manifest-imports/${encodeURIComponent(importId)}/commit`,
+    {
+      method: 'POST',
+      body: input,
+      headers: revisionHeaders(input.expectedRevision),
+      operation: '确认导入清单',
+      signal,
+    },
+  );
+
+export const cancelEffectManifest = (
+  projectId: string,
+  importId: string,
+  expectedRevision: number,
+  signal?: AbortSignal,
+): Promise<ApiResponse<CancelEffectManifestData>> =>
+  requestJson(`${draftPath(projectId, 'BATCH')}/manifest-imports/${encodeURIComponent(importId)}`, {
+    method: 'DELETE',
+    body: { expectedRevision },
+    headers: revisionHeaders(expectedRevision),
+    operation: '取消清单预览',
+    signal,
+  });
+
+export const downloadEffectManifestTemplate = async (
+  projectId: string,
+  format: EffectManifestFormat,
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; fileName: string }> => {
+  const response = await requestRaw(`${basePath(projectId)}/manifest-template?format=${format}`, {
+    operation: '下载清单模板',
+    signal,
+  });
+  const disposition = response.headers.get('content-disposition') ?? '';
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+  const plain = /filename="?([^";]+)"?/i.exec(disposition)?.[1];
+  const fileName = encoded
+    ? decodeURIComponent(encoded)
+    : (plain ?? `效果类资料包清单模板.${format}`);
+  return { blob: await response.blob(), fileName };
+};
+
+export const downloadEffectProductPackageTemplate = async (
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; fileName: string }> => {
+  const response = await requestRaw(`${basePath(projectId)}/product-package-template`, {
+    operation: '下载资料包模板',
+    signal,
+  });
+  const disposition = response.headers.get('content-disposition') ?? '';
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+  const plain = /filename="?([^";]+)"?/i.exec(disposition)?.[1];
+  const fileName = encoded ? decodeURIComponent(encoded) : (plain ?? '效果类产品资料包模板.docx');
+  return { blob: await response.blob(), fileName };
+};
+
+export const validateEffectImportDraft = (
+  projectId: string,
+  mode: EffectImportMode,
+  input: ValidateEffectImportDraftRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<ValidateEffectImportDraftData>> =>
+  requestJson(`${draftPath(projectId, mode)}/validate`, {
+    method: 'POST',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '校验资料包',
+    signal,
+  });
+
+export const validateEffectImportProduct = (
+  projectId: string,
+  mode: EffectImportMode,
+  productId: string,
+  input: ValidateEffectImportDraftRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<ValidateEffectImportProductData>> =>
+  requestJson(`${draftPath(projectId, mode)}/products/${encodeURIComponent(productId)}/validate`, {
+    method: 'POST',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '完成产品资料校验',
+    signal,
+  });
+
+export const advanceEffectImportDraft = (
+  projectId: string,
+  mode: EffectImportMode,
+  input: AdvanceEffectImportDraftRequest,
+  signal?: AbortSignal,
+): Promise<ApiResponse<AdvanceEffectImportDraftData>> =>
+  requestJson(`${draftPath(projectId, mode)}/advance`, {
+    method: 'POST',
+    body: input,
+    headers: revisionHeaders(input.expectedRevision),
+    operation: '进入 AI 信息提炼',
+    signal,
+  });

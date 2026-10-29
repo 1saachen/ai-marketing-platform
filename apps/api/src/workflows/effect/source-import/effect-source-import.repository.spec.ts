@@ -1,0 +1,611 @@
+import { DEFAULT_EFFECT_VIDEO_CONFIG } from '@ai-marketing/contracts';
+import { describe, expect, it, vi } from 'vitest';
+
+import type { PrismaService } from '../../../database/prisma.service';
+import { EffectSourceImportRepository } from './effect-source-import.repository';
+
+describe('EffectSourceImportRepository project isolation', () => {
+  it('reads the exact current or historical Effect material while retaining project, mode and product isolation', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const repository = new EffectSourceImportRepository(
+      { effectImportMaterial: { findFirst } } as unknown as PrismaService,
+      {} as never,
+    );
+    await repository.readableMaterial('project-a', 'SINGLE', 'product-a', 'material-a');
+    expect(findFirst).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-a',
+        productId: 'product-a',
+        id: 'material-a',
+        product: {
+          projectId: 'project-a',
+          status: 'ACTIVE',
+          draft: {
+            projectId: 'project-a',
+            mode: 'SINGLE',
+            workspace: {
+              workflowRun: {
+                projectId: 'project-a',
+                workflow: 'EFFECT',
+                workflowSpace: 'EFFECT',
+              },
+            },
+          },
+        },
+      },
+      include: { fileObject: true },
+    });
+  });
+  it('retires only disposed, untransferred preview metadata after successful storage cleanup', async () => {
+    const transaction = {
+      storageCleanupTask: {
+        findFirst: vi.fn().mockResolvedValue({ storageKey: 'preview/a' }),
+        deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      effectManifestStagedFile: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    };
+    const db = {
+      $transaction: (callback: (tx: typeof transaction) => unknown) => callback(transaction),
+    };
+    const repository = new EffectSourceImportRepository(
+      db as unknown as PrismaService,
+      {} as never,
+    );
+    expect(await repository.deleteStorageCleanup('project-a', 'cleanup-a')).toEqual({ count: 1 });
+    expect(transaction.effectManifestStagedFile.deleteMany).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-a',
+        storageKey: 'preview/a',
+        transferredAt: null,
+        manifestImport: { status: { in: ['EXPIRED', 'CANCELLED', 'COMMITTED'] } },
+      },
+    });
+    transaction.storageCleanupTask.findFirst.mockResolvedValue(null as never);
+    expect(await repository.deleteStorageCleanup('project-b', 'cleanup-a')).toEqual({ count: 0 });
+    expect(transaction.effectManifestStagedFile.deleteMany).toHaveBeenCalledTimes(1);
+  });
+  it('restores a complete active Effect workspace without starting any write transaction', async () => {
+    const workspace = { id: 'workspace-a', drafts: [{ mode: 'SINGLE' }, { mode: 'BATCH' }] };
+    const db = {
+      effectImportWorkspace: { findFirst: vi.fn().mockResolvedValue(workspace) },
+      $transaction: vi.fn(),
+    };
+    const repository = new EffectSourceImportRepository(
+      db as unknown as PrismaService,
+      {} as never,
+    );
+    expect(await repository.initialize('project-a', DEFAULT_EFFECT_VIDEO_CONFIG)).toBe(workspace);
+    expect(await repository.initialize('project-a', DEFAULT_EFFECT_VIDEO_CONFIG)).toBe(workspace);
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(db.effectImportWorkspace.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          projectId: 'project-a',
+          workflowRun: {
+            activeKey: 'ACTIVE',
+            workflow: 'EFFECT',
+            workflowSpace: 'EFFECT',
+          },
+        },
+      }),
+    );
+  });
+  it('keeps confirmed artifacts untouched while autosaving a product edit', async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const updateProduct = vi.fn().mockResolvedValue({ id: 'product-a' });
+    const commitValidatedArtifactsInTransaction = vi.fn();
+    const transaction = {
+      effectImportProduct: {
+        count: vi.fn().mockResolvedValue(1),
+        update: updateProduct,
+      },
+      effectImportDraft: { updateMany },
+    };
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: (callback: (client: typeof transaction) => unknown) => callback(transaction),
+      } as unknown as PrismaService,
+      { commitValidatedArtifactsInTransaction } as never,
+    );
+
+    await repository.updateProduct('project-a', 'draft-a', 'product-a', 7, { name: '新名称' });
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { projectId: 'project-a', id: 'draft-a', revision: 7 },
+      data: expect.objectContaining({
+        revision: { increment: 1 },
+        validatedRevision: null,
+      }),
+    });
+    expect(updateProduct).toHaveBeenCalledOnce();
+    expect(commitValidatedArtifactsInTransaction).not.toHaveBeenCalled();
+  });
+
+  it('initializes the active run and workspace through idempotent upserts', async () => {
+    const workflowRunUpsert = vi.fn().mockResolvedValue({ id: 'run-a' });
+    const workspaceUpsert = vi.fn().mockResolvedValue({
+      id: 'workspace-a',
+      workflowRunId: 'run-a',
+    });
+    const transaction = {
+      effectImportWorkspace: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        upsert: workspaceUpsert,
+        findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'workspace-a' }),
+      },
+      workflowRun: {
+        upsert: workflowRunUpsert,
+        update: vi.fn().mockResolvedValue({}),
+      },
+      effectImportDraft: { createMany: vi.fn().mockResolvedValue({ count: 2 }) },
+    };
+    const repository = new EffectSourceImportRepository(
+      {
+        effectImportWorkspace: { findFirst: vi.fn().mockResolvedValue(null) },
+        $transaction: (callback: (client: typeof transaction) => unknown) => callback(transaction),
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await repository.initialize('project-a', DEFAULT_EFFECT_VIDEO_CONFIG);
+
+    expect(workflowRunUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          projectId_workflow_workflowSpace_activeKey: {
+            projectId: 'project-a',
+            workflow: 'EFFECT',
+            workflowSpace: 'EFFECT',
+            activeKey: 'ACTIVE',
+          },
+        },
+      }),
+    );
+    expect(workspaceUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { projectId_workflowRunId: { projectId: 'project-a', workflowRunId: 'run-a' } },
+        create: { projectId: 'project-a', workflowRunId: 'run-a' },
+      }),
+    );
+    expect(transaction.effectImportDraft.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skipDuplicates: true,
+        data: expect.arrayContaining([
+          expect.objectContaining({ projectId: 'project-a', workspaceId: 'workspace-a' }),
+        ]),
+      }),
+    );
+  });
+
+  it('scopes product lookup by project and draft', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const repository = new EffectSourceImportRepository(
+      {
+        effectImportProduct: { findFirst },
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await repository.product('project-a', 'draft-a', 'product-a');
+
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { projectId: 'project-a', draftId: 'draft-a', id: 'product-a', status: 'ACTIVE' },
+      include: { materials: { include: { fileObject: true } } },
+    });
+  });
+
+  it('scopes material lookup by project and product', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const repository = new EffectSourceImportRepository(
+      {
+        effectImportMaterial: { findFirst },
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await repository.material('project-b', 'product-b', 'material-b');
+
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { projectId: 'project-b', productId: 'product-b', id: 'material-b' },
+      include: { fileObject: true },
+    });
+  });
+
+  it('keeps search, count and category facets inside the same project draft', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    const repository = new EffectSourceImportRepository(
+      {
+        effectImportProduct: { findMany, count },
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await repository.listProducts('project-c', 'draft-c', {
+      keyword: 'sku',
+      category: '食品',
+      skip: 0,
+      take: 20,
+    });
+
+    expect(findMany).toHaveBeenCalledTimes(2);
+    for (const [call] of findMany.mock.calls as Array<[{ where: Record<string, unknown> }]>) {
+      expect(call.where).toMatchObject({ projectId: 'project-c', draftId: 'draft-c' });
+    }
+    expect(count.mock.calls[0]?.[0].where).toMatchObject({
+      projectId: 'project-c',
+      draftId: 'draft-c',
+    });
+  });
+
+  it('protects objects held by extraction runs', async () => {
+    const extractionCount = vi.fn().mockResolvedValue(1);
+    const repository = new EffectSourceImportRepository(
+      {
+        effectExtractionFileHold: { count: extractionCount },
+        effectImportMaterial: { count: vi.fn().mockResolvedValue(0) },
+        workingArtifactFile: { count: vi.fn().mockResolvedValue(0) },
+        workingArtifactRevisionFile: { count: vi.fn().mockResolvedValue(0) },
+        workingArtifactRevisionSnapshot: { count: vi.fn().mockResolvedValue(0) },
+        effectImportUploadItem: { count: vi.fn().mockResolvedValue(0) },
+        asset: { count: vi.fn().mockResolvedValue(0) },
+        assetVersion: { count: vi.fn().mockResolvedValue(0) },
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await expect(repository.isStorageHeld('project-a', 'source/object')).resolves.toBe(true);
+    expect(extractionCount).toHaveBeenCalledWith({
+      where: { projectId: 'project-a', storageKey: 'source/object' },
+    });
+  });
+
+  it('protects media referenced only by a confirmed revision snapshot', async () => {
+    const revisionCount = vi.fn().mockResolvedValue(1);
+    const repository = new EffectSourceImportRepository(
+      {
+        effectExtractionFileHold: { count: vi.fn().mockResolvedValue(0) },
+        effectImportMaterial: { count: vi.fn().mockResolvedValue(0) },
+        workingArtifactFile: { count: vi.fn().mockResolvedValue(0) },
+        workingArtifactRevisionFile: { count: revisionCount },
+        workingArtifactRevisionSnapshot: { count: vi.fn().mockResolvedValue(0) },
+        effectImportUploadItem: { count: vi.fn().mockResolvedValue(0) },
+        asset: { count: vi.fn().mockResolvedValue(0) },
+        assetVersion: { count: vi.fn().mockResolvedValue(0) },
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await expect(repository.isStorageHeld('project-a', 'source/object')).resolves.toBe(true);
+    expect(revisionCount).toHaveBeenCalledWith({
+      where: { projectId: 'project-a', fileObject: { storageKey: 'source/object' } },
+    });
+  });
+
+  it('uses the compound project key for product mutations', async () => {
+    const update = vi.fn().mockResolvedValue({ id: 'product-a', materials: [] });
+    const transaction = {
+      effectImportProduct: { count: vi.fn().mockResolvedValue(1), update },
+      effectImportDraft: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    };
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: (callback: (client: typeof transaction) => unknown) => callback(transaction),
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await repository.updateProduct('project-a', 'draft-a', 'product-a', 3, { name: 'new' });
+
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { projectId_id: { projectId: 'project-a', id: 'product-a' } },
+      }),
+    );
+  });
+
+  it('does not let cancellation overwrite a committed manifest or fetch files for cleanup', async () => {
+    const findUniqueOrThrow = vi.fn();
+    const transaction = {
+      effectManifestImport: {
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+        findUniqueOrThrow,
+      },
+    };
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: (callback: (client: typeof transaction) => unknown) => callback(transaction),
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await expect(
+      repository.cancelManifest('project-a', 'draft-a', 'manifest-a'),
+    ).resolves.toBeNull();
+    expect(transaction.effectManifestImport.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          projectId: 'project-a',
+          draftId: 'draft-a',
+          id: 'manifest-a',
+          status: 'PREVIEW',
+        }),
+      }),
+    );
+    expect(findUniqueOrThrow).not.toHaveBeenCalled();
+  });
+
+  it('rolls back the manifest claim when the draft revision is stale', async () => {
+    const create = vi.fn();
+    const transaction = {
+      effectManifestImport: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      effectImportDraft: {
+        findFirst: vi.fn().mockResolvedValue({ workspace: { workflowRunId: 'workflow-run-a' } }),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+      effectImportProduct: { create },
+    };
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: async (callback: (client: typeof transaction) => unknown) =>
+          callback(transaction),
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await expect(
+      repository.commitManifest('project-a', 'draft-a', 'manifest-a', 2, 'commit-key', []),
+    ).resolves.toBeNull();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('creates upload session items explicitly inside the same transaction', async () => {
+    const createSession = vi.fn().mockResolvedValue({ id: 'session-a' });
+    const createMany = vi.fn().mockResolvedValue({ count: 2 });
+    const completedSession = { id: 'session-a', items: [{ id: 'item-a' }, { id: 'item-b' }] };
+    const transaction = {
+      effectImportProduct: { findFirst: vi.fn().mockResolvedValue({ id: 'product-a' }) },
+      effectImportUploadSession: {
+        create: createSession,
+        findUniqueOrThrow: vi.fn().mockResolvedValue(completedSession),
+      },
+      effectImportUploadItem: { createMany },
+    };
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: (callback: (client: typeof transaction) => unknown) => callback(transaction),
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await expect(
+      repository.createUploadSession('project-a', 'run-a', 'draft-a', 'product-a', 7, [
+        {
+          id: 'item-a',
+          clientFileId: 'client-a',
+          type: 'PRODUCT_IMAGE',
+          expectedFileName: null,
+          originalFileName: 'a.png',
+          mimeType: 'image/png',
+          sizeBytes: 100,
+        },
+        {
+          id: 'item-b',
+          clientFileId: 'client-b',
+          type: 'PRODUCT_DOCUMENT',
+          expectedFileName: null,
+          originalFileName: 'b.docx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          sizeBytes: 200,
+        },
+      ]),
+    ).resolves.toEqual(completedSession);
+    expect(createSession).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        projectId: 'project-a',
+        workflowRunId: 'run-a',
+        draftId: 'draft-a',
+        productId: 'product-a',
+        expectedRevision: 7,
+      }),
+    });
+    expect(createMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining([
+        expect.objectContaining({ projectId: 'project-a', sessionId: 'session-a', id: 'item-a' }),
+        expect.objectContaining({ projectId: 'project-a', sessionId: 'session-a', id: 'item-b' }),
+      ]),
+    });
+  });
+
+  it('creates the FileObject before assigning it to an uploaded session item', async () => {
+    const updateItem = vi.fn().mockResolvedValue({ id: 'item-a' });
+    const transaction = {
+      effectImportUploadItem: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'item-a',
+          fileObjectId: null,
+          session: { workflowRunId: 'run-a' },
+        }),
+        update: updateItem,
+      },
+      fileObject: { update: vi.fn() },
+    };
+    const upsertFileObjectInTransaction = vi.fn().mockResolvedValue({ id: 'file-a' });
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: (callback: (client: typeof transaction) => unknown) => callback(transaction),
+      } as unknown as PrismaService,
+      { upsertFileObjectInTransaction } as never,
+    );
+
+    await expect(
+      repository.storeUploadSessionItem('project-a', 'session-a', 'client-a', {
+        originalFileName: '商品.png',
+        mimeType: 'image/png',
+        sizeBytes: 100,
+        storageKey: 'projects/project-a/01-working/file.png',
+        sha256: 'a'.repeat(64),
+        fileObjectId: 'file-a',
+      }),
+    ).resolves.toEqual({ count: 1 });
+    expect(upsertFileObjectInTransaction).toHaveBeenCalledWith(
+      transaction,
+      'project-a',
+      'run-a',
+      expect.objectContaining({ id: 'file-a', nodeId: 'SOURCE_IMPORT' }),
+    );
+    expect(updateItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'item-a' },
+        data: expect.objectContaining({ fileObjectId: 'file-a', status: 'UPLOADED' }),
+      }),
+    );
+  });
+
+  it('detaches and orphans an uploaded FileObject when a session item is removed', async () => {
+    const updateItem = vi.fn().mockResolvedValue({ id: 'item-a' });
+    const orphanFile = vi.fn().mockResolvedValue({ id: 'file-a' });
+    const transaction = {
+      effectImportUploadItem: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'item-a', fileObjectId: 'file-a' }),
+        update: updateItem,
+      },
+      fileObject: { update: orphanFile },
+    };
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: (callback: (client: typeof transaction) => unknown) => callback(transaction),
+      } as unknown as PrismaService,
+      {} as never,
+    );
+
+    await expect(
+      repository.removeUploadSessionItem('project-a', 'session-a', 'client-a'),
+    ).resolves.toEqual({ count: 1 });
+    expect(updateItem).toHaveBeenCalledWith({
+      where: { id: 'item-a' },
+      data: { status: 'REMOVED', fileObjectId: null },
+    });
+    expect(orphanFile).toHaveBeenCalledWith({
+      where: { id: 'file-a' },
+      data: { status: 'ORPHANED', orphanedAt: expect.any(Date) },
+    });
+  });
+
+  it('commits a ready material and FileObject without a working artifact', async () => {
+    const material = { id: 'material-a', storageKey: '01-working/new.png' };
+    const transaction = {
+      effectImportProduct: {
+        findFirst: vi.fn().mockResolvedValue({ workflowRunId: 'run-a' }),
+      },
+      effectImportDraft: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      effectImportMaterial: { create: vi.fn().mockResolvedValue(material) },
+    };
+    const upsertFileObjectInTransaction = vi.fn().mockResolvedValue({ id: 'file-a' });
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: async (callback: (client: typeof transaction) => unknown) =>
+          callback(transaction),
+      } as unknown as PrismaService,
+      { upsertFileObjectInTransaction } as never,
+    );
+    const projection = {
+      workflowRunId: 'run-a',
+      nodeId: 'SOURCE_IMPORT',
+      fileObject: {
+        id: 'file-a',
+        nodeId: 'SOURCE_IMPORT',
+        originalFileName: 'image.png',
+        mimeType: 'image/png',
+        sizeBytes: 100,
+        storageKey: '01-working/new.png',
+        sha256: 'a'.repeat(64),
+      },
+    };
+
+    await expect(
+      repository.createMaterialWithFileObject(
+        'project-a',
+        'draft-a',
+        'product-a',
+        4,
+        { id: 'material-a', type: 'PRODUCT_IMAGE', status: 'READY' },
+        projection,
+      ),
+    ).resolves.toEqual(material);
+    expect(upsertFileObjectInTransaction).toHaveBeenCalledWith(
+      transaction,
+      'project-a',
+      'run-a',
+      projection.fileObject,
+    );
+  });
+
+  it('completes a ten-file upload batch with one draft bump and no package commit', async () => {
+    const items = Array.from({ length: 10 }, (_, index) => ({
+      id: `item-${index}`,
+      projectId: 'project-a',
+      workflowRunId: 'run-a',
+      sessionId: 'session-a',
+      clientFileId: `client-${index}`,
+      type: 'PRODUCT_IMAGE' as const,
+      expectedFileName: null,
+      status: 'UPLOADED' as const,
+      originalFileName: `image-${index}.png`,
+      mimeType: 'image/png',
+      sizeBytes: 100 + index,
+      storageKey: `01-working/image-${index}.png`,
+      sha256: String(index).padStart(64, '0'),
+      fileObjectId: `file-${index}`,
+      errorCode: null,
+      errorMessage: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
+    const session = {
+      id: 'session-a',
+      projectId: 'project-a',
+      workflowRunId: 'run-a',
+      draftId: 'draft-a',
+      productId: 'product-a',
+      expectedRevision: 7,
+      status: 'UPLOADING' as const,
+      completionKey: null,
+      expiresAt: new Date(Date.now() + 60_000),
+      completedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      items,
+    };
+    const createMaterial = vi.fn().mockImplementation(({ data }) => ({ id: data.fileObjectId }));
+    const updateDraft = vi.fn().mockResolvedValue({ count: 1 });
+    const transaction = {
+      effectImportUploadSession: {
+        findFirst: vi.fn().mockResolvedValue(session),
+        update: vi.fn().mockResolvedValue({
+          ...session,
+          status: 'COMPLETED',
+          completionKey: 'complete-a',
+          completedAt: new Date(),
+        }),
+      },
+      effectImportDraft: { updateMany: updateDraft },
+      effectImportMaterial: { create: createMaterial },
+    };
+    const upsertFileObjectInTransaction = vi.fn().mockResolvedValue({});
+    const upsertArtifactInTransaction = vi.fn().mockResolvedValue({ record: { id: 'package-a' } });
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: (callback: (client: typeof transaction) => unknown) => callback(transaction),
+      } as unknown as PrismaService,
+      { upsertFileObjectInTransaction, upsertArtifactInTransaction } as never,
+    );
+    await expect(
+      repository.completeUploadSession('project-a', 'session-a', 'complete-a'),
+    ).resolves.toMatchObject({ revision: 8, unchanged: false });
+    expect(updateDraft).toHaveBeenCalledTimes(1);
+    expect(createMaterial).toHaveBeenCalledTimes(10);
+    expect(upsertFileObjectInTransaction).not.toHaveBeenCalled();
+    expect(upsertArtifactInTransaction).not.toHaveBeenCalled();
+  });
+});

@@ -1,0 +1,373 @@
+import type {
+  EffectImportProduct,
+  EffectPromptDimensions,
+  EffectPromptFragmentType,
+  EffectSegmentRenderUpdateKind,
+  EffectSegmentRenderBatch,
+  EffectSegmentRenderOutput,
+  EffectSegmentRenderTask as ApiEffectSegmentRenderTask,
+  GetEffectSegmentRenderWorkspaceData,
+  WorkingArtifactCommitStatus,
+} from '@ai-marketing/contracts';
+import { EFFECT_PROMPT_DIMENSIONS, EFFECT_SEGMENT_RENDER_LIMITS } from '@ai-marketing/contracts';
+
+export const effectSegmentRepairUnavailableReason = (
+  task: Pick<EffectSegmentRenderTask, 'status' | 'output' | 'repair' | 'durationSeconds'>,
+): string => {
+  if (task.status !== 'COMPLETED' || !task.output) return '素材尚未完成';
+  if (task.repair) return '请先处理当前返修任务';
+  if (
+    task.durationSeconds < EFFECT_SEGMENT_RENDER_LIMITS.minReferenceVideoSeconds ||
+    task.durationSeconds > EFFECT_SEGMENT_RENDER_LIMITS.maxReferenceVideoSeconds
+  )
+    return '画面返修支持 4～30 秒的视频';
+  if (!['video/mp4', 'video/quicktime'].includes(task.output.mimeType.toLowerCase()))
+    return '画面返修支持 MP4、MOV 视频';
+  if (task.output.sizeBytes > EFFECT_SEGMENT_RENDER_LIMITS.maxReferenceVideoBytes)
+    return '参考视频不能超过 200 MB';
+  return '';
+};
+
+export const EFFECT_SEGMENT_RENDER_PAGE_SIZE = 20;
+
+/** Resolve only against the current Run's products, never cached branch identities. */
+export const effectSegmentRenderCurrentProductId = (
+  products: readonly Pick<EffectImportProduct, 'id' | 'status'>[],
+  selectedProductId: string,
+): string => {
+  const active = products.filter((product) => product.status === 'ACTIVE');
+  return active.find((product) => product.id === selectedProductId)?.id ?? active[0]?.id ?? '';
+};
+
+export type EffectSegmentRenderStatus =
+  'AUTO_RETRY' | 'COMPLETED' | 'FAILED' | 'QUEUED' | 'RENDERING';
+
+export type EffectSegmentRenderSource = 'PROMPT';
+
+export type EffectSegmentRenderOrigin = 'AI_GENERATED' | 'EXTERNAL_IMPORT';
+
+export type EffectSegmentRenderBatchStatus =
+  'COMPLETED' | 'FAILED' | 'NOT_STARTED' | 'PARTIAL' | 'QUEUED' | 'RUNNING';
+
+export type EffectSegmentRenderRepairStatus = 'FAILED' | 'QUEUED' | 'READY' | 'RENDERING';
+
+export type EffectSegmentRenderRepair = {
+  version?: number;
+  sourceVersion: number;
+  startMs: number;
+  endMs: number;
+  instruction: string;
+  status: EffectSegmentRenderRepairStatus;
+  candidateVersion: number | null;
+  candidate?: EffectSegmentRenderOutput | null;
+  errorMessage: string | null;
+  errorCode?: string | null;
+};
+
+export type EffectSegmentRenderTask = {
+  creativeCore?: string;
+  dimensions?: Partial<EffectPromptDimensions>;
+  id: string;
+  renderCode: string;
+  productId: string;
+  productName: string;
+  promptId: string;
+  promptCode: string;
+  promptText: string;
+  fragmentType: EffectPromptFragmentType;
+  compatibleFragmentTypes: EffectPromptFragmentType[];
+  durationSeconds: number;
+  source: EffectSegmentRenderSource;
+  origin: EffectSegmentRenderOrigin;
+  independentImport?: boolean;
+  mediaAspectRatio?: string;
+  mediaResolution?: string;
+  mediaShortSidePixels?: number;
+  sourceName: string;
+  status: EffectSegmentRenderStatus;
+  progress: number;
+  retryCount: number;
+  maxAutoRetries: number;
+  abnormal: boolean;
+  needsUpdate: boolean;
+  updateKind?: EffectSegmentRenderUpdateKind;
+  refreshSignature?: string | undefined;
+  errorCode?: string | null;
+  errorMessage: string | null;
+  providerTaskId?: string | null;
+  output?: EffectSegmentRenderOutput | null;
+  activeVersion: number;
+  repair: EffectSegmentRenderRepair | null;
+  updatedAt: string;
+};
+
+export type EffectSegmentRenderWorkspace = {
+  projectId: string;
+  workflowRunId: string;
+  productId: string;
+  sourcePromptArtifactId: string | null;
+  sourcePromptRevision: number | null;
+  promptCount: number;
+  promptReady?: boolean;
+  promptArtifactRevision?: number | null;
+  settingsRevision?: number | null;
+  batchId?: string | null;
+  batchRevision?: number | null;
+  stale?: boolean;
+  refreshScope?: 'NONE' | 'SELECTIVE' | 'FULL';
+  pendingPromptIds?: string[];
+  pendingRemovedTaskIds?: string[];
+  refreshSignature?: string | undefined;
+  canSaveFrozenResults?: boolean | undefined;
+  autoCommitPending?: boolean | undefined;
+  progressTaskIds?: string[] | undefined;
+  progressSynchronizedCount?: number | undefined;
+  progressRemovedCount?: number | undefined;
+  committedWorkflowRunId?: string | undefined;
+  commitStatus?: WorkingArtifactCommitStatus | null;
+  workingArtifactRevision?: number | null;
+  batchStatus: EffectSegmentRenderBatchStatus;
+  tasks: EffectSegmentRenderTask[];
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+};
+
+/** Presentation only: keep the full compatible-purpose set for filtering and persistence. */
+export const effectSegmentRenderAdditionalPurposes = (
+  task: Pick<EffectSegmentRenderTask, 'fragmentType' | 'compatibleFragmentTypes'>,
+): EffectPromptFragmentType[] =>
+  [...new Set(task.compatibleFragmentTypes)].filter((purpose) => purpose !== task.fragmentType);
+
+/** Card text only; never rewrite the Prompt used for rendering or source inspection. */
+export const effectSegmentRenderCardTitle = (
+  task: Pick<
+    EffectSegmentRenderTask,
+    'creativeCore' | 'independentImport' | 'promptText' | 'promptCode' | 'renderCode'
+  >,
+  confirmedCreativeCore?: string,
+): string => {
+  const creativeCore =
+    (!task.independentImport && confirmedCreativeCore?.trim()) || task.creativeCore?.trim();
+  if (creativeCore) return creativeCore;
+  return (
+    task.promptText
+      .trim()
+      .replace(/^【视频概览】\s*[:：]?\s*/u, '')
+      .replace(/^目标\s*[:：]\s*/u, '')
+      .replace(/\s+/gu, ' ')
+      .trim() ||
+    task.promptCode ||
+    task.renderCode
+  );
+};
+
+export type EffectSegmentRenderPromptDetails = {
+  creativeCore: string;
+  dimensions: EffectPromptDimensions;
+};
+
+const effectSegmentRenderTaskFromApi = (
+  task: ApiEffectSegmentRenderTask,
+): EffectSegmentRenderTask => ({
+  ...task,
+  compatibleFragmentTypes: [...task.compatiblePurposes],
+  ...(task.independentImport
+    ? { creativeCore: task.creativeCore ?? '', dimensions: task.dimensions ?? {} }
+    : {}),
+  activeVersion: task.output?.version ?? 1,
+  repair: task.repair
+    ? {
+        ...task.repair,
+        candidateVersion: task.repair.candidate?.version ?? null,
+      }
+    : null,
+});
+
+export const effectSegmentRenderWorkspaceFromApi = (
+  data: GetEffectSegmentRenderWorkspaceData,
+): EffectSegmentRenderWorkspace => ({
+  projectId: data.projectId,
+  workflowRunId: data.workflowRunId,
+  productId: data.productId,
+  sourcePromptArtifactId: data.batch?.sourcePrompt.artifactId ?? null,
+  sourcePromptRevision: data.batch?.sourcePrompt.revision ?? null,
+  promptCount: data.promptCount,
+  promptReady: data.promptReady,
+  promptArtifactRevision: data.promptArtifactRevision,
+  settingsRevision: data.settingsRevision,
+  batchId: data.batch?.id ?? null,
+  batchRevision: data.batch?.revision ?? null,
+  stale: data.batch?.stale ?? false,
+  refreshScope: data.batch?.refreshScope ?? 'NONE',
+  pendingPromptIds: data.batch?.pendingPromptIds ?? [],
+  pendingRemovedTaskIds: data.batch?.pendingRemovedTaskIds ?? [],
+  refreshSignature: data.batch?.refreshSignature,
+  canSaveFrozenResults: data.batch?.canSaveFrozenResults,
+  autoCommitPending: data.batch?.autoCommitPending,
+  progressTaskIds: data.batch?.progressTaskIds,
+  progressSynchronizedCount: data.batch?.progressSynchronizedCount,
+  progressRemovedCount: data.batch?.progressRemovedCount,
+  committedWorkflowRunId: data.batch?.committedWorkflowRunId,
+  commitStatus: data.batch?.commitStatus ?? null,
+  workingArtifactRevision: data.batch?.workingArtifactRevision ?? null,
+  batchStatus: data.batch?.status ?? 'NOT_STARTED',
+  tasks: data.batch?.tasks.map(effectSegmentRenderTaskFromApi) ?? [],
+  startedAt: data.batch?.createdAt ?? null,
+  completedAt: data.batch?.status === 'COMPLETED' ? data.batch.updatedAt : null,
+  updatedAt: data.batch?.updatedAt ?? new Date().toISOString(),
+});
+
+export const effectSegmentRenderWorkspaceWithBatch = (
+  current: EffectSegmentRenderWorkspace,
+  batch: EffectSegmentRenderBatch,
+): EffectSegmentRenderWorkspace => ({
+  ...current,
+  productId: batch.productId,
+  promptArtifactRevision:
+    batch.latestPromptRevision === undefined
+      ? (current.promptArtifactRevision ?? null)
+      : batch.latestPromptRevision,
+  promptCount: batch.latestPromptCount ?? current.promptCount,
+  sourcePromptArtifactId: batch.sourcePrompt.artifactId,
+  sourcePromptRevision: batch.sourcePrompt.revision,
+  batchId: batch.id,
+  batchRevision: batch.revision,
+  stale: batch.stale,
+  refreshScope: batch.refreshScope,
+  pendingPromptIds: batch.pendingPromptIds ?? [],
+  pendingRemovedTaskIds: batch.pendingRemovedTaskIds ?? [],
+  refreshSignature: batch.refreshSignature,
+  canSaveFrozenResults: batch.canSaveFrozenResults,
+  autoCommitPending: batch.autoCommitPending,
+  progressTaskIds: batch.progressTaskIds,
+  progressSynchronizedCount: batch.progressSynchronizedCount,
+  progressRemovedCount: batch.progressRemovedCount,
+  committedWorkflowRunId: batch.committedWorkflowRunId,
+  commitStatus: batch.commitStatus,
+  workingArtifactRevision: batch.workingArtifactRevision,
+  batchStatus: batch.status,
+  tasks: batch.tasks.map(effectSegmentRenderTaskFromApi),
+  startedAt: batch.createdAt,
+  completedAt: batch.status === 'COMPLETED' ? batch.updatedAt : null,
+  updatedAt: batch.updatedAt,
+});
+
+export type EffectSegmentRenderSummary = {
+  total: number;
+  completed: number;
+  running: number;
+  failed: number;
+};
+
+export const isEffectSegmentRenderExportable = (task: EffectSegmentRenderTask): boolean =>
+  task.status === 'COMPLETED';
+
+export const isEffectSegmentRenderBusy = (status: EffectSegmentRenderStatus): boolean =>
+  status === 'AUTO_RETRY' || status === 'QUEUED' || status === 'RENDERING';
+
+export const effectSegmentRenderSummary = (
+  tasks: readonly EffectSegmentRenderTask[],
+): EffectSegmentRenderSummary =>
+  tasks.reduce<EffectSegmentRenderSummary>(
+    (summary, task) => {
+      summary.total += 1;
+      if (task.status === 'COMPLETED') summary.completed += 1;
+      else if (isEffectSegmentRenderBusy(task.status)) summary.running += 1;
+      else if (task.status === 'FAILED') summary.failed += 1;
+      return summary;
+    },
+    { total: 0, completed: 0, running: 0, failed: 0 },
+  );
+
+export const filterEffectSegmentRenderTasks = (
+  tasks: readonly EffectSegmentRenderTask[],
+  keyword: string,
+  creativeCoreByPromptId: Readonly<Record<string, string>> = {},
+): EffectSegmentRenderTask[] => {
+  const normalized = keyword.trim().toLocaleLowerCase('zh-CN');
+  if (!normalized) return [...tasks];
+  return tasks.filter((task) =>
+    [
+      task.renderCode,
+      task.promptCode ?? '',
+      task.productName,
+      task.sourceName,
+      task.promptText,
+      creativeCoreByPromptId[task.promptId] ?? '',
+    ]
+      .join(' ')
+      .toLocaleLowerCase('zh-CN')
+      .includes(normalized),
+  );
+};
+
+export const effectSegmentRenderCreativeCoreMap = (payload: unknown): Record<string, string> => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return {};
+  const items = (payload as { items?: unknown }).items;
+  if (!Array.isArray(items)) return {};
+  return Object.fromEntries(
+    items.flatMap((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const { id, creativeCore } = item as { id?: unknown; creativeCore?: unknown };
+      if (typeof id !== 'string' || typeof creativeCore !== 'string') return [];
+      const normalized = creativeCore.replace(/\s+/gu, ' ').trim();
+      return normalized ? [[id, normalized] as const] : [];
+    }),
+  );
+};
+
+export const effectSegmentRenderPromptDetailsMap = (
+  payload: unknown,
+): Record<string, EffectSegmentRenderPromptDetails> => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return {};
+  const items = (payload as { items?: unknown }).items;
+  if (!Array.isArray(items)) return {};
+  return Object.fromEntries(
+    items.flatMap((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const { id, creativeCore, dimensions } = item as {
+        id?: unknown;
+        creativeCore?: unknown;
+        dimensions?: unknown;
+      };
+      if (
+        typeof id !== 'string' ||
+        typeof creativeCore !== 'string' ||
+        !dimensions ||
+        typeof dimensions !== 'object' ||
+        Array.isArray(dimensions)
+      )
+        return [];
+      const normalizedCreativeCore = creativeCore.replace(/\s+/gu, ' ').trim();
+      const normalizedDimensions = Object.fromEntries(
+        EFFECT_PROMPT_DIMENSIONS.map(({ key }) => {
+          const value = (dimensions as Record<string, unknown>)[key];
+          return [key, typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : ''];
+        }),
+      ) as EffectPromptDimensions;
+      if (
+        !normalizedCreativeCore ||
+        EFFECT_PROMPT_DIMENSIONS.some(({ key }) => !normalizedDimensions[key])
+      )
+        return [];
+      return [
+        [id, { creativeCore: normalizedCreativeCore, dimensions: normalizedDimensions }] as const,
+      ];
+    }),
+  );
+};
+
+export const effectSegmentRenderPageCount = (
+  total: number,
+  pageSize = EFFECT_SEGMENT_RENDER_PAGE_SIZE,
+): number => Math.max(1, Math.ceil(total / pageSize));
+
+export const effectSegmentRenderPage = (
+  tasks: readonly EffectSegmentRenderTask[],
+  page: number,
+  pageSize = EFFECT_SEGMENT_RENDER_PAGE_SIZE,
+): EffectSegmentRenderTask[] => {
+  const safePage = Math.max(1, page);
+  return tasks.slice((safePage - 1) * pageSize, safePage * pageSize);
+};

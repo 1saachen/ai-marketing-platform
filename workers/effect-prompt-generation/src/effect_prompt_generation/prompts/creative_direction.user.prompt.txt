@@ -1,0 +1,30 @@
+目标 Prompt 数量：{target_count}
+目标创意方向数量：{target_direction_count}
+容量参考：平均每个方向约 {execution_route_count} 条独立事件，不是每方向配额。由你按真实创意容量选择 1～5 条，不为凑数复制事件。
+
+本批事实密度要求：
+{fact_density_instruction}
+
+已确认事实：
+{facts_json}
+
+事实视觉使用策略：
+{fact_visual_strategy_json}
+
+批次共用提示词（只约束，不复述）：
+{shared_prompt_json}
+
+{visual_style_baseline_section}
+
+投放渠道（只影响节奏和表达习惯，不得作为正文元数据复述）：
+{delivery_channel_json}
+
+产品专属创意版图（territoryId、主动作与目标承载数均为权威分配）：
+{creative_landscape_json}
+
+上一次规划的修订上下文（首次为空）：
+{revision_context_json}
+
+输出范围：{direction_output_instruction}
+
+创意方向应覆盖多种合理叙事、场景、人物关系、产品动作、镜头和情绪，但不得通过虚构场景或虚构事实追求数量。每个方向的 executionRoutes 数量可以不同：只能自然支持一条独立事件的就只写一条，能支持更多真实需求、关系和结果的可写到五条。路线数量就是你对该方向的可用创意容量判断，同一方向内的主视觉事件应肉眼可辨地不同，仍共同服务其事实关系。参考平均容量探索足够候选，但不足时如实给出实际路线，不以替代机位、相同动作换道具或更复杂操作补数量。

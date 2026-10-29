@@ -1,0 +1,2024 @@
+import { createHash } from 'node:crypto';
+
+import type { EffectPromptItem } from '@ai-marketing/contracts';
+import {
+  DEFAULT_EFFECT_PROMPT_SETTINGS,
+  EFFECT_PROMPT_FRAGMENT_TYPES,
+  EFFECT_PROMPT_LIMITS,
+  normalizeEffectPromptSettings,
+} from '@ai-marketing/contracts';
+import { describe, expect, it, vi } from 'vitest';
+
+import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
+import { EffectPromptService } from './effect-prompt.service';
+import {
+  compileEffectPromptSharedPrompt,
+  pendingEffectPromptSemanticEvaluation,
+  recomputePromptQuality,
+} from './effect-prompt.quality';
+
+const completionGateFixture = (duplicate = false) => {
+  const settings = { targetCount: 10, defaultDurationSeconds: 5 };
+  const fragmentTypes = [
+    'HOOK',
+    'HOOK',
+    'HOOK',
+    'PRODUCT_DISPLAY',
+    'PRODUCT_DISPLAY',
+    'PRODUCT_DISPLAY',
+    'EFFECT',
+    'EFFECT',
+    'CTA',
+    'CTA',
+  ] as const;
+  const contents = [
+    '晨光厨房里，成年人拿起杯盖靠近窗边，近景缓慢推进，停在尚未揭晓的局部。',
+    duplicate
+      ? '晨光厨房里，成年人拿起杯盖靠近窗边，近景缓慢推进，停在尚未揭晓的局部。'
+      : '晨光厨房里，成年人拿起杯盖靠近窗边，近景缓慢推进，停在尚未揭晓的局部细节。',
+    '通勤车厢内，成年人握住松动提带尝试调整，侧面近景跟随手腕，提带仍轻轻晃动。',
+    '夜间书桌前，一只手揭开收纳盒一角，微距焦点落在内部阴影，动作停在半开状态。',
+    '午后阳台上，成年人轻推花架边缘，低位近景保持盆栽轮廓，花架在窗前停住。',
+    '狭窄玄关里，成年人尝试把杂乱物品放入抽屉，抽屉受阻停住，问题仍然存在。',
+    '门店展示台上，产品首帧居中，一只手扶正盒身，平视近景保持轮廓清楚后停稳。',
+    '午后餐桌上，成年人转动产品露出表面纹理，微距焦点保持在真实材质并停止动作。',
+    '明亮台面上，一只手把产品轻放在画面左侧，固定近景保持右侧连续留白并停稳。',
+    '安静背景前，产品稳定居中，蒸汽逐渐变缓，固定近景保持上方留白与静物构图。',
+  ];
+  const now = '2026-08-27T00:00:00.000Z';
+  const items = fragmentTypes.map((fragmentType, index) => ({
+    id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    code: `P${String(index + 1).padStart(3, '0')}`,
+    origin: 'AI' as const,
+    fragmentType,
+    primaryPurpose: fragmentType,
+    compatiblePurposes: [fragmentType],
+    classificationStatus: 'VERIFIED' as const,
+    productRelevance: 85,
+    targetDurationSeconds: 5,
+    creativeCore: `创意主线-${index}`,
+    dimensions: {
+      narrative: `叙事-${index}`,
+      scene: index === 1 ? '场景-0' : `场景-${index}`,
+      persona: index === 1 ? '人物-0' : `人物-${index}`,
+      productRelation: `产品关联-${index}`,
+      camera: index === 1 ? '镜头-0' : `镜头-${index}`,
+      emotion: index === 1 ? '情绪-0' : `情绪-${index}`,
+    },
+    content: contents[index]!,
+    insightBindings: [],
+    manualEdited: false,
+    createdAt: now,
+    updatedAt: now,
+  }));
+  return recomputePromptQuality(items, settings, undefined, undefined, undefined, {
+    status: 'VERIFIED',
+    evaluatedCount: items.length,
+    duplicateGroupCount: 0,
+    duplicateCount: 0,
+    duplicateRate: 0,
+  });
+};
+
+describe('prompt result source filtering', () => {
+  it('restores a deleted batch assessment for display without writes, AI calls or changed revisions', async () => {
+    const generated = completionGateFixture();
+    generated.metrics.semanticEvaluation = {
+      status: 'VERIFIED',
+      duplicateRate: 20,
+      duplicateCount: 2,
+      evaluatedCount: 10,
+      duplicateGroupCount: 1,
+    };
+    const draft = structuredClone(generated);
+    draft.items.pop();
+    draft.metrics.semanticEvaluation = pendingEffectPromptSemanticEvaluation();
+    const record = { id: 'result-a', revision: 15, draftResult: draft, generatedResult: generated };
+    const before = structuredClone(record);
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      latestResult: vi.fn().mockResolvedValue(record),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      { get: vi.fn().mockResolvedValue({ id: 'project-a' }) } as never,
+      {} as never,
+    );
+    for (const origin of [undefined, 'AI', 'MANUAL'] as const) {
+      const output = await service.result(
+        'project-a',
+        'workflow-a',
+        'product-a',
+        1,
+        5,
+        '',
+        undefined,
+        'PRIMARY',
+        origin,
+      );
+      expect(output.revision).toBe(15);
+      expect(output.result.metrics.semanticEvaluation).toEqual(
+        generated.metrics.semanticEvaluation,
+      );
+      expect(output.result.metrics.acceptedCount).toBe(9);
+    }
+    expect(record).toEqual(before);
+  });
+
+  it('filters the entire batch before pagination without changing metrics or edited AI origins', async () => {
+    const draft = completionGateFixture();
+    draft.items[1]!.origin = 'MANUAL';
+    draft.items[8]!.origin = 'MANUAL';
+    draft.items[0]!.manualEdited = true;
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      latestResult: vi.fn().mockResolvedValue({ id: 'result-a', revision: 1, draftResult: draft }),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const cacheQueries: unknown[] = [];
+    const cache = {
+      read: vi.fn(
+        async (_scope: unknown, _key: string, load: () => Promise<unknown>, query: unknown) => {
+          cacheQueries.push(query);
+          return load();
+        },
+      ),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      projects as never,
+      {} as never,
+      undefined,
+      undefined,
+      cache as never,
+    );
+    const all = await service.result('project-a', 'workflow-a', 'product-a', 1, 100);
+    const manual = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      2,
+      1,
+      '',
+      undefined,
+      'PRIMARY',
+      'MANUAL',
+    );
+    const ai = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      100,
+      '',
+      undefined,
+      'PRIMARY',
+      'AI',
+    );
+    const combined = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '晨光',
+      'HOOK',
+      'PRIMARY_OR_COMPATIBLE',
+      'MANUAL',
+    );
+    const empty = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '',
+      'EFFECT',
+      'PRIMARY',
+      'MANUAL',
+    );
+    expect(all.total).toBe(10);
+    expect(manual.total).toBe(2);
+    expect(manual.items.map((item) => item.code)).toEqual(['P009']);
+    expect(ai.total).toBe(8);
+    expect(ai.items.some((item) => item.code === 'P001' && item.manualEdited)).toBe(true);
+    expect(combined.items.map((item) => item.code)).toEqual(['P002']);
+    expect(empty.total).toBe(0);
+    expect(empty.items).toEqual([]);
+    for (const result of [all, manual, ai, combined, empty]) {
+      expect(result.sourceCounts).toEqual({ AI: 8, MANUAL: 2 });
+    }
+    expect(manual.result.metrics).toEqual(all.result.metrics);
+    expect(cacheQueries).toContainEqual(expect.objectContaining({ origin: 'MANUAL', page: 2 }));
+    expect(cacheQueries).toContainEqual(expect.objectContaining({ origin: 'AI' }));
+  });
+});
+
+const currentInputSnapshot = (overrides: Record<string, unknown> = {}) => ({
+  projectId: 'project-a',
+  workflowRunId: 'workflow-a',
+  productId: 'product-a',
+  operation: 'BATCH_GENERATE',
+  targetItemId: null,
+  settings: { targetCount: 50, defaultDurationSeconds: 5 },
+  insightArtifact: {
+    id: 'insight-a',
+    revision: 1,
+    contentHash: 'insight-hash-current',
+    result: { productName: '广式腊肠' },
+  },
+  retainedManualItems: [],
+  selectionPolicy: 'MMR_CONTENT',
+  baseResultRevision: null,
+  ...overrides,
+});
+
+describe('EffectPromptService settings contract', () => {
+  it('saves next-batch settings without requiring an isolated item edit', async () => {
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      products: vi.fn().mockResolvedValue([{ id: 'product-a' }]),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const workingRepository = {
+      saveNodeState: vi.fn().mockResolvedValue({
+        record: { revision: 2, savedAt: new Date('2026-10-16T00:00:00.000Z') },
+        conflict: false,
+        unchanged: false,
+      }),
+    };
+    const workingService = {
+      assertEffectNodeWritable: vi.fn().mockRejectedValue(new Error('EDIT_REQUIRED')),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      projects as never,
+      workingRepository as never,
+      undefined,
+      workingService as never,
+    );
+
+    const result = await service.saveSettings(
+      'project-a',
+      'product-a',
+      'workflow-a',
+      1,
+      DEFAULT_EFFECT_PROMPT_SETTINGS,
+    );
+    expect(result.settingsRevision).toBe(2);
+    expect(workingRepository.saveNodeState).toHaveBeenCalledOnce();
+    expect(workingService.assertEffectNodeWritable).not.toHaveBeenCalled();
+  });
+  it('does not mark a completed result stale when a legacy settings state normalizes to the run settings', async () => {
+    const insightSnapshot = {
+      id: 'insight-a',
+      revision: 1,
+      contentHash: 'a'.repeat(64),
+      result: { productName: '测试产品' },
+    };
+    const legacySettings = { targetCount: 10, defaultDurationSeconds: 5 };
+    const settingsHash = workflowStateHash(normalizeEffectPromptSettings(legacySettings));
+    const result = {
+      id: 'result-a',
+      projectId: 'project-a',
+      workflowRunId: 'workflow-a',
+      productId: 'product-a',
+      runId: 'run-a',
+      revision: 1,
+      draftResult: completionGateFixture(),
+      settingsHash,
+    };
+    const run = {
+      id: 'run-a',
+      operation: 'BATCH_GENERATE',
+      status: 'COMPLETED',
+      progress: 100,
+      currentNode: 'COMPLETED',
+      errorCode: null,
+      errorMessage: null,
+      updatedAt: new Date('2026-09-04T00:00:00.000Z'),
+      inputSnapshot: currentInputSnapshot({
+        settings: legacySettings,
+        insightArtifact: insightSnapshot,
+      }),
+      result,
+      stages: [],
+    };
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      products: vi
+        .fn()
+        .mockResolvedValue([
+          { id: 'product-a', updatedAt: run.updatedAt, promptRuns: [{ id: 'run-a' }] },
+        ]),
+      backgroundBatchRun: vi.fn().mockResolvedValue(null),
+      run: vi.fn().mockResolvedValue(run),
+      latestResult: vi.fn(),
+      settingsNode: vi.fn().mockResolvedValue({
+        revision: 1,
+        state: legacySettings,
+        executionInputHash: 'legacy-raw-state-hash',
+      }),
+      insightArtifact: vi.fn().mockResolvedValue({
+        ...insightSnapshot,
+        payload: {},
+        freshness: 'CURRENT',
+        availability: 'AVAILABLE',
+      }),
+      promptArtifact: vi.fn().mockResolvedValue(null),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    const output = await service.workspace('project-a', 'workflow-a');
+
+    expect(output.products[0]?.status).toBe('COMPLETED');
+    expect(output.products[0]?.settings).toEqual(normalizeEffectPromptSettings(legacySettings));
+    repository.backgroundBatchRun.mockResolvedValue({
+      ...run,
+      id: 'background-task',
+      workflowRunId: 'background-child',
+      status: 'RUNNING',
+      progress: 42,
+      result: { id: 'background-draft-must-not-replace-parent' },
+    } as never);
+    const pending = await service.workspace('project-a', 'workflow-a');
+    expect(pending.products[0]?.runId).toBe('background-task');
+    expect(pending.products[0]?.status).toBe('PROCESSING');
+    expect(pending.products[0]?.progress).toBe(42);
+    expect(pending.products[0]?.resultId).toBe(output.products[0]?.resultId);
+    expect(pending.products[0]?.resultRevision).toBe(output.products[0]?.resultRevision);
+    expect(pending.products[0]?.metrics).toEqual(output.products[0]?.metrics);
+  });
+
+  it('rejects mock completion unless the deployment explicitly opts in', async () => {
+    const previous = process.env.EFFECT_PROMPT_ALLOW_MOCK_COMPLETION;
+    delete process.env.EFFECT_PROMPT_ALLOW_MOCK_COMPLETION;
+    const repository = { complete: vi.fn() };
+    const service = new EffectPromptService(repository as never, {} as never, {} as never);
+    try {
+      await expect(
+        service.complete('project-a', 'run-a', 'attempt-a', {
+          result: completionGateFixture(),
+          executionMode: 'MOCK',
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(repository.complete).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.EFFECT_PROMPT_ALLOW_MOCK_COMPLETION;
+      else process.env.EFFECT_PROMPT_ALLOW_MOCK_COMPLETION = previous;
+    }
+  });
+
+  it('reuses only the current run fact visual strategy checkpoint with the same insight content hash', async () => {
+    const templateHash = 'a'.repeat(64);
+    const matching = {
+      nodeId: 'FACT_VISUAL_STRATEGY_COMPILATION',
+      sourceFingerprint: 'insight-hash-current',
+      allocationHash: 'c'.repeat(64),
+      templateHash,
+      plan: {
+        sourceContentHash: 'insight-hash-current',
+        templateHash,
+        strategyHash: 'b'.repeat(64),
+        policies: [{ factId: 'fact-1' }],
+      },
+    };
+    const stale = {
+      ...matching,
+      sourceFingerprint: 'insight-hash-old',
+      allocationHash: 'd'.repeat(64),
+    };
+    const repository = {
+      claim: vi.fn().mockResolvedValue({
+        kind: 'CLAIMED',
+        run: { sourceFingerprint: 'run-source' },
+        attemptToken: 'attempt-a',
+        input: currentInputSnapshot(),
+        checkpointStages: [
+          { nodeId: 'FACT_VISUAL_STRATEGY_COMPILATION', metadata: { checkpoint: stale } },
+          { nodeId: 'FACT_VISUAL_STRATEGY_COMPILATION', metadata: { checkpoint: matching } },
+        ],
+      }),
+    };
+    const service = new EffectPromptService(repository as never, {} as never, {} as never);
+
+    const output = await service.claim('project-a', 'run-a');
+
+    expect(output.stageCheckpoints).toEqual([matching]);
+  });
+
+  it('ignores legacy visual strategy checkpoints that the current worker cannot validate', async () => {
+    const legacy = {
+      nodeId: 'FACT_VISUAL_STRATEGY_COMPILATION',
+      sourceFingerprint: 'insight-hash-current',
+      allocationHash: 'c'.repeat(64),
+      templateHash: 'legacy-template',
+      plan: {
+        sourceContentHash: 'insight-hash-current',
+        templateHash: 'legacy-template',
+        strategyHash: 'b'.repeat(64),
+        policies: [{ factId: 'fact-1' }],
+      },
+    };
+    const repository = {
+      claim: vi.fn().mockResolvedValue({
+        kind: 'CLAIMED',
+        run: { sourceFingerprint: 'run-source' },
+        attemptToken: 'attempt-a',
+        input: currentInputSnapshot(),
+        checkpointStages: [
+          { nodeId: 'FACT_VISUAL_STRATEGY_COMPILATION', metadata: { checkpoint: legacy } },
+        ],
+      }),
+    };
+    const service = new EffectPromptService(repository as never, {} as never, {} as never);
+
+    const output = await service.claim('project-a', 'run-a');
+
+    expect(output.stageCheckpoints).toEqual([]);
+  });
+
+  it('forwards partial same-run direction reviews without losing completed batches', async () => {
+    const checkpoint = {
+      nodeId: 'COHERENT_CREATIVE_GENERATION',
+      sourceFingerprint: 'a'.repeat(64),
+      allocationHash: 'b'.repeat(64),
+      templateHash: 'c'.repeat(64),
+      plan: {
+        directions: [],
+        sourceHash: 'a'.repeat(64),
+        planHash: 'b'.repeat(64),
+        templateHash: 'c'.repeat(64),
+        reusedCheckpoint: false,
+        reviewProgress: {
+          runId: 'run-a',
+          requestFingerprint: 'd'.repeat(64),
+          planningAttempt: 0,
+          semanticRevisionCount: 0,
+          completedBatches: { batchA: { items: [], requiresRevision: false } },
+        },
+      },
+    };
+    const repository = {
+      claim: vi.fn().mockResolvedValue({
+        kind: 'CLAIMED',
+        run: { sourceFingerprint: 'run-source' },
+        attemptToken: 'attempt-a',
+        input: currentInputSnapshot(),
+        checkpointStages: [{ nodeId: 'COHERENT_CREATIVE_GENERATION', metadata: { checkpoint } }],
+      }),
+    };
+    const service = new EffectPromptService(repository as never, {} as never, {} as never);
+
+    const output = await service.claim('project-a', 'run-a');
+
+    expect(output.stageCheckpoints).toEqual([checkpoint]);
+  });
+
+  it('rejects new single-item regeneration requests without queuing a task', async () => {
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      startRun: vi.fn(),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      { get: vi.fn().mockResolvedValue({ id: 'project-a' }) } as never,
+      {} as never,
+    );
+    await expect(
+      service.start('project-a', 'product-a', {
+        workflowRunId: 'workflow-a',
+        operation: 'ITEM_REGENERATE',
+        targetItemId: '11111111-1111-4111-8111-111111111111',
+        targetDurationSeconds: 12,
+        expectedSettingsRevision: 2,
+        expectedResultRevision: 3,
+        idempotencyKey: 'removed-regeneration',
+      }),
+    ).rejects.toThrow('单条 Prompt 重新生成已移除');
+    expect(repository.startRun).not.toHaveBeenCalled();
+  });
+
+  it('starts ITEM_EVALUATE without accepting regeneration instructions', async () => {
+    const targetItemId = '11111111-1111-4111-8111-111111111111';
+    const run = {
+      id: 'run-evaluate',
+      projectId: 'project-a',
+      workflowRunId: 'workflow-a',
+      productId: 'product-a',
+      operation: 'ITEM_REGENERATE',
+      targetItemId,
+      inputSnapshot: {
+        ...currentInputSnapshot({ operation: 'ITEM_EVALUATE', targetItemId }),
+      },
+      status: 'QUEUED',
+      progress: 0,
+      currentNode: null,
+      warnings: [],
+      errorMessage: null,
+      errorCode: null,
+      attemptCount: 0,
+      stages: [],
+      result: null,
+      createdAt: new Date('2026-08-27T00:00:00.000Z'),
+      updatedAt: new Date('2026-08-27T00:00:00.000Z'),
+    };
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      startRun: vi.fn().mockResolvedValue({ kind: 'CREATED', run }),
+      run: vi.fn().mockResolvedValue(run),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      { get: vi.fn().mockResolvedValue({ id: 'project-a' }) } as never,
+      {} as never,
+    );
+
+    const output = await service.start('project-a', 'product-a', {
+      workflowRunId: 'workflow-a',
+      operation: 'ITEM_EVALUATE',
+      targetItemId,
+      expectedSettingsRevision: 2,
+      expectedResultRevision: 3,
+      idempotencyKey: 'evaluate-a',
+    });
+
+    expect(repository.startRun).toHaveBeenCalledWith(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      expect.objectContaining({
+        operation: 'ITEM_EVALUATE',
+        targetItemId,
+        regenerationInstruction: null,
+        replacementDimensions: null,
+      }),
+    );
+    expect(output.run.operation).toBe('ITEM_EVALUATE');
+    expect(output.run.nodes.map(({ nodeId }) => nodeId)).toContain('ITEM_EVALUATE');
+  });
+
+  it('accepts the fourth diversity-supplement shard round', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        id: 'run-current',
+        inputSnapshot: currentInputSnapshot(),
+        operation: 'BATCH_GENERATE',
+      }),
+      saveShard: vi.fn().mockResolvedValue(true),
+    };
+    const service = new EffectPromptService(repository as never, {} as never, {} as never);
+    const input = {
+      status: 'SUCCEEDED' as const,
+      combinationPlan: [],
+      items: [],
+      creativePlan: [],
+      creativeItems: [],
+      warnings: [],
+    };
+
+    await expect(
+      service.saveShard('project-a', 'run-current', 'attempt-a', 4, 0, 'CREATIVE', input),
+    ).resolves.toEqual({ accepted: true });
+    await expect(
+      service.saveShard('project-a', 'run-current', 'attempt-a', 5, 0, 'CREATIVE', input),
+    ).rejects.toThrow('分片标识无效');
+  });
+
+  it('projects persisted shards only into their phase-specific fields', async () => {
+    const creativePlan = [{ slotId: 'creative-task-a' }];
+    const creativeItems = [{ slotId: 'creative-a', content: '创意候选正文' }];
+    const classificationPlan = ['creative-a'];
+    const evaluations = [{ slotId: 'creative-a', primaryPurpose: 'HOOK' }];
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        id: 'run-current',
+        inputSnapshot: currentInputSnapshot(),
+        operation: 'BATCH_GENERATE',
+      }),
+      shards: vi.fn().mockResolvedValue([
+        {
+          phase: 'BLUEPRINT',
+          round: 0,
+          shardIndex: 0,
+          status: 'SUCCEEDED',
+          combinationPlan: creativePlan,
+          items: creativeItems,
+          warnings: [],
+          errorCode: null,
+          errorMessage: null,
+          updatedAt: new Date('2026-08-28T00:00:00.000Z'),
+        },
+        {
+          phase: 'PROMPT',
+          round: 0,
+          shardIndex: 0,
+          status: 'SUCCEEDED',
+          combinationPlan: classificationPlan,
+          items: evaluations,
+          warnings: [],
+          errorCode: null,
+          errorMessage: null,
+          updatedAt: new Date('2026-08-28T00:00:00.000Z'),
+        },
+      ]),
+    };
+    const service = new EffectPromptService(repository as never, {} as never, {} as never);
+
+    const output = await service.shards('project-a', 'run-current', 'attempt-a');
+
+    expect(output.shards).toEqual([
+      expect.objectContaining({
+        phase: 'CREATIVE',
+        creativePlan,
+        creativeItems,
+        classificationPlan: [],
+        evaluations: [],
+      }),
+      expect.objectContaining({
+        phase: 'CLASSIFICATION',
+        creativePlan: [],
+        creativeItems: [],
+        classificationPlan,
+        evaluations,
+      }),
+    ]);
+    expect(
+      output.shards.every((shard) => !('combinationPlan' in shard) && !('items' in shard)),
+    ).toBe(true);
+  });
+
+  it('rejects item-only regeneration fields on a batch run', async () => {
+    const repository = { workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }) };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    await expect(
+      service.start('project-a', 'product-a', {
+        workflowRunId: 'workflow-a',
+        operation: 'BATCH_GENERATE',
+        regenerationInstruction: '不应允许',
+        expectedSettingsRevision: 2,
+        idempotencyKey: 'batch-a',
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('persists an exhausted incomplete batch as a needs-review draft', async () => {
+    const now = '2026-08-26T00:00:00.000Z';
+    const shortResult = recomputePromptQuality(
+      [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          code: 'P001',
+          origin: 'AI',
+          fragmentType: 'HOOK',
+          primaryPurpose: 'HOOK',
+          compatiblePurposes: ['HOOK'],
+          classificationStatus: 'VERIFIED',
+          productRelevance: 80,
+          targetDurationSeconds: 5,
+          creativeCore: '家庭厨房中的产品切面悬念',
+          dimensions: {
+            narrative: '痛点前置',
+            scene: '家庭厨房',
+            persona: '穿围裙的成年人',
+            productRelation: '真实切面',
+            camera: '中近景缓慢推进',
+            emotion: '惊喜发现',
+          },
+          content: '家庭厨房里，穿围裙的成年人拿起产品转向镜头，镜头缓慢推进并停在真实切面。',
+          insightBindings: [],
+          manualEdited: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      DEFAULT_EFFECT_PROMPT_SETTINGS,
+    );
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        inputSnapshot: {
+          selectionPolicy: 'MMR_CONTENT',
+          operation: 'BATCH_GENERATE',
+          settings: DEFAULT_EFFECT_PROMPT_SETTINGS,
+        },
+      }),
+      complete: vi
+        .fn()
+        .mockResolvedValue({ kind: 'COMPLETED', result: { id: 'result-a', revision: 1 } }),
+    };
+    const service = new EffectPromptService(repository as never, {} as never, {} as never);
+    const validate = vi
+      .spyOn(service, 'validateResult')
+      .mockResolvedValue({ valid: false } as never);
+
+    await expect(
+      service.complete('project-a', 'run-a', 'attempt-a', {
+        result: shortResult,
+        executionMode: 'ARK',
+      }),
+    ).resolves.toEqual({ promptResultId: 'result-a' });
+    expect(validate).toHaveBeenCalledWith('project-a', 'result-a', 1);
+    expect(repository.complete).toHaveBeenCalledWith(
+      'project-a',
+      'run-a',
+      'attempt-a',
+      expect.objectContaining({ qualityStatus: 'NEEDS_REVIEW' }),
+    );
+  });
+
+  it('does not auto-commit a single-item regeneration preview', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        inputSnapshot: {
+          selectionPolicy: 'MMR_CONTENT',
+          operation: 'ITEM_REGENERATE',
+          settings: DEFAULT_EFFECT_PROMPT_SETTINGS,
+        },
+      }),
+      complete: vi.fn().mockResolvedValue({ kind: 'PREVIEW_COMPLETED', result: null }),
+    };
+    const service = new EffectPromptService(repository as never, {} as never, {} as never);
+    const validate = vi.spyOn(service, 'validateResult');
+
+    await expect(
+      service.complete('project-a', 'run-a', 'attempt-a', {
+        result: recomputePromptQuality([], DEFAULT_EFFECT_PROMPT_SETTINGS),
+        executionMode: 'ARK',
+      }),
+    ).resolves.toEqual({ promptResultId: null });
+    expect(validate).not.toHaveBeenCalled();
+  });
+
+  it('uses the extracted product name for the committed Prompt working artifact', async () => {
+    const repository = {
+      run: vi.fn().mockResolvedValue({
+        id: 'run-a',
+        inputSnapshot: {
+          productId: 'product-a',
+          insightArtifact: {
+            id: 'insight-a',
+            revision: 1,
+            contentHash: 'a'.repeat(64),
+            result: { productName: '广式腊肠' },
+          },
+        },
+      }),
+    };
+    const service = new EffectPromptService(repository as never, {} as never, {} as never);
+
+    const input = await (
+      service as unknown as {
+        artifactInput: (record: unknown, draft: unknown) => Promise<{ name: string } | null>;
+      }
+    ).artifactInput(
+      {
+        projectId: 'project-a',
+        productId: 'product-a',
+        runId: 'run-a',
+        id: 'result-a',
+      },
+      { qualityStatus: 'PASS' },
+    );
+
+    expect(input?.name).toBe('广式腊肠 差异化 Prompt 批次');
+  });
+
+  it('returns the shared settingsRevision field after CAS save', async () => {
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      products: vi.fn().mockResolvedValue([{ id: 'product-a' }]),
+      latestResult: vi.fn().mockResolvedValue(null),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const savedAt = new Date('2026-08-25T00:00:00.000Z');
+    const workingRepository = {
+      saveNodeState: vi.fn().mockResolvedValue({
+        conflict: false,
+        unchanged: false,
+        record: { revision: 7, savedAt },
+      }),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      projects as never,
+      workingRepository as never,
+    );
+
+    await expect(
+      service.saveSettings('project-a', 'product-a', 'workflow-a', 6, {
+        ...DEFAULT_EFFECT_PROMPT_SETTINGS,
+      }),
+    ).resolves.toEqual({
+      productId: 'product-a',
+      settings: DEFAULT_EFFECT_PROMPT_SETTINGS,
+      settingsRevision: 7,
+      unchanged: false,
+      savedAt: savedAt.toISOString(),
+    });
+  });
+
+  it('rejects a Prompt target count above the hard limit of 100', async () => {
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      products: vi.fn().mockResolvedValue([{ id: 'product-a' }]),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const workingRepository = { saveNodeState: vi.fn() };
+    const service = new EffectPromptService(
+      repository as never,
+      projects as never,
+      workingRepository as never,
+    );
+
+    await expect(
+      service.saveSettings('project-a', 'product-a', 'workflow-a', null, {
+        targetCount: 101,
+        defaultDurationSeconds: 5,
+      }),
+    ).rejects.toThrow('Prompt 批次设置不符合允许范围');
+    expect(workingRepository.saveNodeState).not.toHaveBeenCalled();
+  });
+
+  it('requires at least twenty Prompts for newly saved batch settings', async () => {
+    const repository = { workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }) };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const workingRepository = { saveNodeState: vi.fn() };
+    const service = new EffectPromptService(
+      repository as never,
+      projects as never,
+      workingRepository as never,
+    );
+    for (const targetCount of [10, 19]) {
+      await expect(
+        service.saveSettings('project-a', 'product-a', 'workflow-a', null, {
+          targetCount,
+          defaultDurationSeconds: 5,
+        }),
+      ).rejects.toThrow('新批次至少生成 20 条 Prompt');
+    }
+    expect(workingRepository.saveNodeState).not.toHaveBeenCalled();
+  });
+
+  it('saves the single shared-prompt editor content and keeps the batch in draft', async () => {
+    const draft = recomputePromptQuality([], DEFAULT_EFFECT_PROMPT_SETTINGS);
+    const savedAt = new Date('2026-08-26T08:00:00.000Z');
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        productId: 'product-a',
+        revision: 3,
+        draftResult: draft,
+      }),
+      mutateResult: vi
+        .fn()
+        .mockImplementation(
+          (
+            _projectId: string,
+            _resultId: string,
+            _revision: number,
+            mutation: { sharedPrompt: unknown },
+          ) => ({
+            kind: 'UPDATED',
+            result: {
+              id: 'result-a',
+              productId: 'product-a',
+              revision: 4,
+              savedAt,
+              updatedAt: savedAt,
+            },
+            draft: { ...draft, sharedPrompt: mutation.sharedPrompt },
+          }),
+        ),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    const output = await service.updateSharedPrompt(
+      'project-a',
+      'result-a',
+      3,
+      '  保持产品外观前后一致。  ',
+    );
+
+    const expected = compileEffectPromptSharedPrompt([], '保持产品外观前后一致。');
+    expect(repository.mutateResult).toHaveBeenCalledWith('project-a', 'result-a', 3, {
+      kind: 'SHARED_PROMPT',
+      sharedPrompt: expected,
+    });
+    expect(output.result.sharedPrompt).toEqual(expected);
+    expect(output.revision).toBe(4);
+  });
+
+  it('preserves the system-owned prefix when saving the single shared-prompt editor', async () => {
+    const renderProfile = {
+      ...recomputePromptQuality([], DEFAULT_EFFECT_PROMPT_SETTINGS).renderProfile,
+      sharedConstraints: {
+        disabledElements: ['品牌水印'],
+        contentHash: createHash('sha256')
+          .update(JSON.stringify(['品牌水印']))
+          .digest('hex'),
+      },
+    };
+    const sharedPrompt = compileEffectPromptSharedPrompt(['品牌水印'], '保持产品外观一致。');
+    const draft = recomputePromptQuality(
+      [],
+      DEFAULT_EFFECT_PROMPT_SETTINGS,
+      undefined,
+      renderProfile,
+      sharedPrompt,
+    );
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        productId: 'product-a',
+        revision: 3,
+        draftResult: draft,
+      }),
+      mutateResult: vi.fn().mockResolvedValue({
+        kind: 'UPDATED',
+        result: {
+          id: 'result-a',
+          productId: 'product-a',
+          revision: 4,
+          savedAt: new Date('2026-08-26T08:00:00.000Z'),
+          updatedAt: new Date('2026-08-26T08:00:00.000Z'),
+        },
+        draft,
+      }),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      { get: vi.fn().mockResolvedValue({ id: 'project-a' }) } as never,
+      {} as never,
+    );
+
+    await service.updateSharedPrompt(
+      'project-a',
+      'result-a',
+      3,
+      '画面中不得出现以下内容：品牌水印。\n保持产品外观前后一致，并保持背景简洁。',
+    );
+
+    expect(repository.mutateResult).toHaveBeenCalledWith('project-a', 'result-a', 3, {
+      kind: 'SHARED_PROMPT',
+      sharedPrompt: compileEffectPromptSharedPrompt(
+        ['品牌水印'],
+        '保持产品外观前后一致，并保持背景简洁。',
+        sharedPrompt.sections,
+      ),
+    });
+    await expect(
+      service.updateSharedPrompt('project-a', 'result-a', 3, '保持背景简洁。'),
+    ).rejects.toThrow('共用提示词中的系统内容不能删除或修改');
+  });
+
+  it('returns only the node-specific metadata whitelist from the public detail API', async () => {
+    const repository = {
+      runForNodeDetail: vi.fn().mockResolvedValue({
+        id: 'run-a',
+        projectId: 'project-a',
+        workflowRunId: 'workflow-a',
+        productId: 'product-a',
+        operation: 'BATCH_GENERATE',
+        targetItemId: null,
+        status: 'COMPLETED',
+        progress: 100,
+        currentNode: 'COMPLETED',
+        warnings: [],
+        errorMessage: null,
+        createdAt: new Date('2026-08-25T00:00:00.000Z'),
+        updatedAt: new Date('2026-08-25T00:01:00.000Z'),
+        inputSnapshot: currentInputSnapshot(),
+        shards: [],
+        result: null,
+        stages: [
+          {
+            nodeId: 'RESULT_SAVE',
+            status: 'SUCCEEDED',
+            summary: '保存完成',
+            warnings: [],
+            errorMessage: null,
+            updatedAt: new Date('2026-08-25T00:01:00.000Z'),
+            metadata: {
+              batchSize: 50,
+              qualityStatus: 'PASS',
+              model: 'private-model',
+              promptTemplate: 'private-template',
+              rawResponse: 'private-response',
+              token: 'private-token',
+              storageKey: 'private-storage-key',
+              internalId: 'private-internal-id',
+            },
+          },
+        ],
+      }),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    const output = await service.nodeDetail('project-a', 'run-a', 'RESULT_SAVE');
+    expect(output.detail.fields).toEqual([
+      { label: '已保存 Prompt', value: 50 },
+      { label: '质量状态', value: 'PASS' },
+    ]);
+    expect(output.detail.blocks).toEqual([]);
+    const serialized = JSON.stringify(output);
+    for (const value of [
+      'private-model',
+      'private-template',
+      'private-response',
+      'private-token',
+      'private-storage-key',
+      'private-internal-id',
+    ])
+      expect(serialized).not.toContain(value);
+  });
+
+  it('rejects manual additions before they can exceed the shared result limit', async () => {
+    const timestamp = '2026-08-25T00:00:00.000Z';
+    const items = Array.from({ length: EFFECT_PROMPT_LIMITS.maxCount }, (_, index) => ({
+      id: `item-${index}`,
+      code: `P${String(index + 1).padStart(3, '0')}`,
+      origin: 'AI' as const,
+      fragmentType: EFFECT_PROMPT_FRAGMENT_TYPES[index % EFFECT_PROMPT_FRAGMENT_TYPES.length]!,
+      primaryPurpose: EFFECT_PROMPT_FRAGMENT_TYPES[index % EFFECT_PROMPT_FRAGMENT_TYPES.length]!,
+      compatiblePurposes: [
+        EFFECT_PROMPT_FRAGMENT_TYPES[index % EFFECT_PROMPT_FRAGMENT_TYPES.length]!,
+      ],
+      classificationStatus: 'VERIFIED' as const,
+      productRelevance: 80,
+      targetDurationSeconds: 5,
+      creativeCore: `创意主线-${index}`,
+      dimensions: {
+        narrative: `叙事-${index}`,
+        scene: `场景-${index}`,
+        persona: `人物-${index}`,
+        productRelation: `产品关联-${index}`,
+        camera: `镜头-${index}`,
+        emotion: `情绪-${index}`,
+      },
+      content: `家庭场景中人物拿起产品并转向镜头，近景展示外观细节 ${index}`,
+      insightBindings: [],
+      manualEdited: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }));
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        draftResult: { items },
+      }),
+      mutateResult: vi.fn(),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    await expect(
+      service.addItem('project-a', 'result-a', 1, {
+        content: '新增 Prompt',
+        targetDurationSeconds: 5,
+        creativeCore: '家庭场景中的产品展示',
+        dimensions: {
+          narrative: '痛点前置型',
+          scene: '家庭',
+          persona: '都市白领',
+          productRelation: '锁鲜',
+          camera: '慢推近景',
+          emotion: '温馨治愈',
+        },
+      }),
+    ).rejects.toThrow(`Prompt 数量已达到 ${EFFECT_PROMPT_LIMITS.maxCount} 条上限`);
+    expect(repository.mutateResult).not.toHaveBeenCalled();
+  });
+
+  it.each([4, 15, 16, 30])(
+    'saves the exact %s-second manual item without starting AI',
+    async (duration) => {
+      const draftResult = completionGateFixture();
+      const repository = {
+        result: vi.fn().mockResolvedValue({
+          id: 'result-a',
+          productId: 'product-a',
+          workflowRunId: 'workflow-a',
+          draftResult,
+        }),
+        mutateResult: vi
+          .fn()
+          .mockImplementation(
+            async (
+              _projectId: string,
+              _resultId: string,
+              _revision: number,
+              mutation: { item: EffectPromptItem },
+            ) => ({
+              kind: 'UPDATED' as const,
+              result: {
+                id: 'result-a',
+                productId: 'product-a',
+                revision: 2,
+                savedAt: new Date('2026-09-03T00:00:00.000Z'),
+                updatedAt: new Date('2026-09-03T00:00:00.000Z'),
+              },
+              draft: recomputePromptQuality(
+                [...draftResult.items, mutation.item],
+                draftResult.settings,
+                draftResult.metrics,
+                draftResult.renderProfile,
+                draftResult.sharedPrompt,
+              ),
+            }),
+          ),
+      };
+      const service = new EffectPromptService(
+        repository as never,
+        { get: vi.fn().mockResolvedValue({ id: 'project-a' }) } as never,
+        {} as never,
+      );
+      const start = vi.spyOn(service, 'start');
+
+      const output = await service.addItem('project-a', 'result-a', 1, {
+        content: '家庭厨房中，一双手把广式腊肠放入蒸锅，镜头停在锅盖合上的瞬间。',
+        targetDurationSeconds: duration,
+      });
+
+      const mutation = repository.mutateResult.mock.calls[0]?.[3];
+      expect(mutation.kind).toBe('ADD');
+      expect(mutation.item.targetDurationSeconds).toBe(duration);
+      expect(output.result.items).toContainEqual(
+        expect.objectContaining({ origin: 'MANUAL', targetDurationSeconds: duration }),
+      );
+      expect(mutation.item.dimensions).toEqual({
+        narrative: '',
+        scene: '',
+        persona: '',
+        productRelation: '',
+        camera: '',
+        emotion: '',
+      });
+      expect(mutation.item.creativeCore).toBe('');
+      expect(mutation.item.classificationStatus).toBe('VERIFIED');
+      expect(output.result.metrics.hardIssueCounts).not.toContainEqual(
+        expect.objectContaining({ code: 'CLASSIFICATION_PENDING' }),
+      );
+      expect(output.affectedItemId).toBe(mutation.item.id);
+      const displayOrder = [...output.result.items].sort((left, right) =>
+        left.code.localeCompare(right.code, 'zh-CN', { numeric: true }),
+      );
+      expect(output.affectedItemIndex).toBe(
+        displayOrder.findIndex(({ id }) => id === mutation.item.id),
+      );
+      expect(start).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts complete user-authored creative structure without starting AI', async () => {
+    const draftResult = completionGateFixture();
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        productId: 'product-a',
+        workflowRunId: 'workflow-a',
+        draftResult,
+      }),
+      mutateResult: vi
+        .fn()
+        .mockImplementation(
+          async (
+            _projectId: string,
+            _resultId: string,
+            _revision: number,
+            mutation: { item: EffectPromptItem },
+          ) => ({
+            kind: 'UPDATED' as const,
+            result: {
+              id: 'result-a',
+              productId: 'product-a',
+              revision: 2,
+              savedAt: new Date('2026-09-03T00:00:00.000Z'),
+              updatedAt: new Date('2026-09-03T00:00:00.000Z'),
+            },
+            draft: recomputePromptQuality(
+              [...draftResult.items, mutation.item],
+              draftResult.settings,
+              draftResult.metrics,
+              draftResult.renderProfile,
+              draftResult.sharedPrompt,
+            ),
+          }),
+        ),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      { get: vi.fn().mockResolvedValue({ id: 'project-a' }) } as never,
+      {} as never,
+    );
+    const start = vi.spyOn(service, 'start');
+
+    const output = await service.addItem('project-a', 'result-a', 1, {
+      content: '餐桌上，一双手把蒸熟的广式腊肠夹入碗中。',
+      primaryPurpose: 'EFFECT',
+      compatiblePurposes: ['EFFECT', 'HOOK'],
+      creativeCore: '用家常装盘突出方便搭配',
+      dimensions: {
+        narrative: '动作展示',
+        scene: '家庭餐桌',
+        persona: '成年人手部',
+        productRelation: '蒸熟后直接装盘',
+        camera: '中近景跟随',
+        emotion: '温暖日常',
+      },
+      targetDurationSeconds: 5,
+    });
+
+    expect(start).not.toHaveBeenCalled();
+    expect(output.result.items.find(({ id }) => id === output.affectedItemId)).toMatchObject({
+      classificationStatus: 'VERIFIED',
+      fragmentType: 'EFFECT',
+      primaryPurpose: 'EFFECT',
+      compatiblePurposes: ['EFFECT', 'HOOK'],
+      content: '餐桌上，一双手把蒸熟的广式腊肠夹入碗中。',
+      creativeCore: '用家常装盘突出方便搭配',
+      dimensions: {
+        narrative: '动作展示',
+        scene: '家庭餐桌',
+        persona: '成年人手部',
+        productRelation: '蒸熟后直接装盘',
+        camera: '中近景跟随',
+        emotion: '温暖日常',
+      },
+    });
+  });
+
+  it.each([
+    { creativeCore: '只填写了创意主线' },
+    { dimensions: { scene: '自然光下的桌面' } },
+    { creativeCore: '', dimensions: { scene: '' } },
+  ])('accepts independently optional creative notes: %j', async (notes) => {
+    const draftResult = completionGateFixture();
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        productId: 'product-a',
+        workflowRunId: 'workflow-a',
+        draftResult,
+      }),
+      mutateResult: vi
+        .fn()
+        .mockImplementation(
+          async (
+            _projectId: string,
+            _resultId: string,
+            _revision: number,
+            mutation: { item: EffectPromptItem },
+          ) => ({
+            kind: 'UPDATED',
+            result: {
+              id: 'result-a',
+              productId: 'product-a',
+              revision: 2,
+              savedAt: new Date(),
+              updatedAt: new Date(),
+            },
+            draft: recomputePromptQuality(
+              [...draftResult.items, mutation.item],
+              draftResult.settings,
+              draftResult.metrics,
+            ),
+          }),
+        ),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      { get: vi.fn().mockResolvedValue({ id: 'project-a' }) } as never,
+      {} as never,
+    );
+
+    const output = await service.addItem('project-a', 'result-a', 1, {
+      content: '餐桌上，一双手把蒸熟的广式腊肠夹入碗中。',
+      ...notes,
+      targetDurationSeconds: 5,
+    });
+    expect(output.result.items.find(({ id }) => id === output.affectedItemId)).toMatchObject({
+      origin: 'MANUAL',
+      classificationStatus: 'VERIFIED',
+      creativeCore: notes.creativeCore ?? '',
+      dimensions: {
+        scene: notes.dimensions?.scene ?? '',
+        narrative: '',
+        persona: '',
+        camera: '',
+        productRelation: '',
+        emotion: '',
+      },
+    });
+  });
+
+  it('rejects changes to an existing Prompt duration even within the manual duration range', async () => {
+    const draftResult = completionGateFixture();
+    const repository = {
+      result: vi.fn().mockResolvedValue({ draftResult }),
+      mutateResult: vi.fn(),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    await expect(
+      service.updateItem('project-a', 'result-a', draftResult.items[0]!.id, 1, {
+        content: draftResult.items[0]!.content,
+        targetDurationSeconds: 16,
+        creativeCore: draftResult.items[0]!.creativeCore,
+        dimensions: draftResult.items[0]!.dimensions,
+      }),
+    ).rejects.toThrow('已有 Prompt 的片段时长不可修改');
+    expect(repository.mutateResult).not.toHaveBeenCalled();
+  });
+
+  it('keeps a valid manual edit as a draft until the user completes Prompt validation', async () => {
+    const draftResult = completionGateFixture();
+    const editedResult = {
+      ...draftResult,
+      items: draftResult.items.map((item, index) =>
+        index === 0 ? { ...item, content: `${item.content} 已编辑。` } : item,
+      ),
+    };
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        productId: 'product-a',
+        workflowRunId: 'workflow-a',
+        revision: 1,
+        draftResult,
+      }),
+      mutateResult: vi.fn().mockResolvedValue({
+        kind: 'UPDATED',
+        result: {
+          id: 'result-a',
+          productId: 'product-a',
+          revision: 2,
+          draftResult: editedResult,
+          savedAt: new Date('2026-09-24T00:00:00.000Z'),
+        },
+        draft: editedResult,
+      }),
+      commitValidatedResult: vi.fn(),
+    };
+    const service = new EffectPromptService(
+      repository as never,
+      { get: vi.fn().mockResolvedValue({ id: 'project-a' }) } as never,
+      {} as never,
+    );
+    const start = vi.spyOn(service, 'start');
+
+    const result = await service.updateItem('project-a', 'result-a', draftResult.items[0]!.id, 1, {
+      content: `${draftResult.items[0]!.content} 已编辑。`,
+      primaryPurpose: 'EFFECT',
+      compatiblePurposes: ['EFFECT', 'CTA'],
+      creativeCore: draftResult.items[0]!.creativeCore,
+      targetDurationSeconds: draftResult.items[0]!.targetDurationSeconds,
+      dimensions: draftResult.items[0]!.dimensions,
+    });
+
+    expect(result.revision).toBe(2);
+    expect(repository.mutateResult).toHaveBeenCalledOnce();
+    expect(repository.mutateResult.mock.calls[0]?.[3]).toMatchObject({
+      kind: 'UPDATE',
+      item: {
+        primaryPurpose: 'EFFECT',
+        compatiblePurposes: ['EFFECT', 'CTA'],
+      },
+    });
+    expect(repository.commitValidatedResult).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('combines multi-keyword search with explicit primary or compatible purpose matching', async () => {
+    const timestamp = '2026-08-25T00:00:00.000Z';
+    const makeItem = (
+      id: string,
+      fragmentType: 'HOOK' | 'CTA',
+      content: string,
+    ): EffectPromptItem => ({
+      id,
+      code: id,
+      origin: 'AI' as const,
+      fragmentType,
+      primaryPurpose: fragmentType,
+      compatiblePurposes: id === 'hook-kitchen' ? [fragmentType, 'EFFECT'] : [fragmentType],
+      classificationStatus: 'VERIFIED' as const,
+      productRelevance: 80,
+      targetDurationSeconds: 5,
+      creativeCore: id === 'hook-kitchen' ? '用果肉悬念引出酸甜口感' : `创意主线-${id}`,
+      dimensions: {
+        narrative: `叙事-${id}`,
+        scene: `场景-${id}`,
+        persona: `人物-${id}`,
+        productRelation: `产品关联-${id}`,
+        camera: id === 'hook-kitchen' ? '近景缓慢推进' : `镜头-${id}`,
+        emotion: `情绪-${id}`,
+      },
+      content,
+      insightBindings:
+        id === 'hook-kitchen'
+          ? [
+              {
+                factId: 'fact-selling-point',
+                field: 'CORE_SELLING_POINT' as const,
+                value: '酸甜咸鲜复合口感',
+                valueHash: 'a'.repeat(64),
+                role: 'PRIMARY' as const,
+              },
+            ]
+          : [],
+      manualEdited: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    const pendingEffect: EffectPromptItem = {
+      ...makeItem('pending-effect', 'CTA', '等待用途评估的人工内容'),
+      fragmentType: 'EFFECT',
+      primaryPurpose: 'EFFECT',
+      compatiblePurposes: ['EFFECT'],
+      classificationStatus: 'PENDING',
+    };
+    const draftResult = recomputePromptQuality(
+      [
+        makeItem('hook-kitchen', 'HOOK', '家庭厨房中人物拿起产品并转向镜头'),
+        makeItem('hook-outdoor', 'HOOK', '户外草地上人物打开产品并转向镜头'),
+        makeItem('cta-kitchen', 'CTA', '家庭厨房中人物摆放产品并展示转化字幕'),
+        pendingEffect,
+      ],
+      DEFAULT_EFFECT_PROMPT_SETTINGS,
+    );
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      latestResult: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        productId: 'product-a',
+        revision: 1,
+        draftResult,
+      }),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    const output = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '家庭 近景',
+      'HOOK',
+    );
+
+    expect(output.total).toBe(1);
+    expect(output.items.map(({ id }) => id)).toEqual(['hook-kitchen']);
+
+    const primaryPurposeOnly = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '',
+      'EFFECT',
+    );
+    expect(primaryPurposeOnly.total).toBe(0);
+
+    const includingCompatiblePurpose = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '',
+      'EFFECT',
+      'PRIMARY_OR_COMPATIBLE',
+    );
+    expect(includingCompatiblePurpose.items.map(({ id }) => id)).toEqual(['hook-kitchen']);
+
+    const businessFields = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '果肉悬念 卖点 酸甜咸鲜 5秒',
+    );
+    expect(businessFields.items.map(({ id }) => id)).toEqual(['hook-kitchen']);
+
+    const purposeLabel = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '钩子片段',
+    );
+    expect(purposeLabel.total).toBe(2);
+
+    const allTermsRequired = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '家庭 户外',
+    );
+    expect(allTermsRequired.total).toBe(0);
+  });
+
+  it('sorts the default result list by stable Prompt code before pagination', async () => {
+    const timestamp = '2026-08-25T00:00:00.000Z';
+    const makeItem = (
+      id: string,
+      code: string,
+      fragmentType: (typeof EFFECT_PROMPT_FRAGMENT_TYPES)[number],
+    ) => ({
+      id,
+      code,
+      origin: 'AI' as const,
+      fragmentType,
+      primaryPurpose: fragmentType,
+      compatiblePurposes: [fragmentType],
+      classificationStatus: 'VERIFIED' as const,
+      productRelevance: 80,
+      targetDurationSeconds: 5,
+      creativeCore: `创意主线-${id}`,
+      dimensions: {
+        narrative: `叙事-${id}`,
+        scene: `场景-${id}`,
+        persona: `人物-${id}`,
+        productRelation: `产品关联-${id}`,
+        camera: `镜头-${id}`,
+        emotion: `情绪-${id}`,
+      },
+      content: `人物在场景中拿起产品并完成动作-${id}`,
+      insightBindings: [],
+      manualEdited: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    const draftResult = recomputePromptQuality(
+      [
+        makeItem('cta', 'P003', 'CTA'),
+        makeItem('hook-later', 'P010', 'HOOK'),
+        makeItem('cta-close', 'P004', 'CTA'),
+        makeItem('product', 'P002', 'PRODUCT_DISPLAY'),
+        makeItem('hook-first', 'P001', 'HOOK'),
+        makeItem('hook-pain', 'P005', 'HOOK'),
+        makeItem('effect', 'P006', 'EFFECT'),
+      ],
+      DEFAULT_EFFECT_PROMPT_SETTINGS,
+    );
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      latestResult: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        productId: 'product-a',
+        revision: 1,
+        draftResult,
+      }),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    const output = await service.result('project-a', 'workflow-a', 'product-a', 1, 10);
+
+    expect(output.items.map(({ code }) => code)).toEqual([
+      'P001',
+      'P002',
+      'P003',
+      'P004',
+      'P005',
+      'P006',
+      'P010',
+    ]);
+  });
+
+  it('returns safe generated candidates as a read-only preview when the batch failed', async () => {
+    const generatedAt = '2026-08-27T04:00:00.000Z';
+    const repository = {
+      workflowRun: vi.fn().mockResolvedValue({ id: 'workflow-a' }),
+      latestResult: vi.fn().mockResolvedValue(null),
+      latestFailedRunForPreview: vi.fn().mockResolvedValue({
+        id: 'run-failed',
+        sourceFingerprint: 'f'.repeat(64),
+        inputSnapshot: {
+          projectId: 'project-a',
+          workflowRunId: 'workflow-a',
+          productId: 'product-a',
+          operation: 'BATCH_GENERATE',
+          targetItemId: null,
+          settings: DEFAULT_EFFECT_PROMPT_SETTINGS,
+          insightArtifact: {
+            id: 'insight-a',
+            revision: 1,
+            contentHash: 'a'.repeat(64),
+            result: { aspectRatio: '9:16', resolution: '1080P', disabledElements: ['品牌水印'] },
+          },
+          retainedManualItems: [],
+          baseResultRevision: null,
+        },
+        shards: [
+          {
+            items: [
+              {
+                slotId: 'r0-s0001',
+                ordinal: 1,
+                fragmentType: 'HOOK',
+                targetDurationSeconds: 5,
+                creativeCore: '家庭厨房中的切面悬念',
+                dimensions: {
+                  narrative: '痛点前置',
+                  scene: '家庭厨房',
+                  persona: '穿围裙的成年人',
+                  productRelation: '真实切面',
+                  camera: '中近景缓慢推进',
+                  emotion: '惊喜发现',
+                },
+                content: '家庭厨房中，成年人拿起广式腊肠转向镜头，镜头缓慢推进并停在清晰切面。',
+                insightBindings: [],
+                executionInvalidReasons: [],
+                generatedAt,
+              },
+              {
+                slotId: 'r0-s0003',
+                ordinal: 3,
+                fragmentType: 'HOOK',
+                targetDurationSeconds: 5,
+                creativeCore: '窗边桌面的细节悬念',
+                dimensions: {
+                  narrative: '细节悬念',
+                  scene: '窗边桌面',
+                  persona: '仅手部',
+                  productRelation: '局部质感',
+                  camera: '固定机位缓慢推进',
+                  emotion: '安静好奇',
+                },
+                content: '窗边桌面上，一只手拿起产品，固定机位缓慢推进后停在局部细节。',
+                insightBindings: [],
+                executionInvalidReasons: ['PROMPT_LENGTH_MISMATCH', 'MISSING_CAMERA_EXECUTION'],
+                generatedAt,
+              },
+              {
+                slotId: 'r0-s0002',
+                ordinal: 2,
+                fragmentType: 'HOOK',
+                targetDurationSeconds: 5,
+                creativeCore: '餐桌上的产品悬念',
+                dimensions: {
+                  narrative: '悬念引入',
+                  scene: '餐桌',
+                  persona: '成年人',
+                  productRelation: '产品外观',
+                  camera: '固定近景',
+                  emotion: '好奇',
+                },
+                content: '餐桌上产品突然漂浮，镜头跟随并展示异常画面。',
+                insightBindings: [],
+                executionInvalidReasons: ['PHYSICS_BREAK'],
+                generatedAt,
+              },
+            ],
+          },
+        ],
+      }),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    const output = await service.result('project-a', 'workflow-a', 'product-a', 1, 10);
+
+    expect(output).toMatchObject({
+      resultId: null,
+      revision: null,
+      isPartialPreview: true,
+      previewRunId: 'run-failed',
+      total: 2,
+    });
+    expect(output.items).toHaveLength(2);
+    expect(output.items[0]?.content).toContain('广式腊肠');
+    expect(output.items.some(({ content }) => content.includes('窗边桌面'))).toBe(true);
+    expect(output.result.qualityStatus).toBe('NEEDS_REVIEW');
+    const aiOnly = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '',
+      undefined,
+      'PRIMARY',
+      'AI',
+    );
+    const manualOnly = await service.result(
+      'project-a',
+      'workflow-a',
+      'product-a',
+      1,
+      10,
+      '',
+      undefined,
+      'PRIMARY',
+      'MANUAL',
+    );
+    expect(aiOnly.total).toBe(2);
+    expect(manualOnly.total).toBe(0);
+    expect(manualOnly.items).toEqual([]);
+    expect(manualOnly.isPartialPreview).toBe(true);
+    expect(aiOnly.sourceCounts).toEqual({ AI: 2, MANUAL: 0 });
+    expect(manualOnly.sourceCounts).toEqual({ AI: 2, MANUAL: 0 });
+  });
+
+  it('does not recreate removed quality gates during completion', async () => {
+    const draft = completionGateFixture();
+    expect(draft.qualityStatus).toBe('PASS');
+    const insightSnapshot = {
+      id: 'insight-a',
+      revision: 1,
+      contentHash: 'a'.repeat(64),
+      result: {},
+    };
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        productId: 'product-a',
+        workflowRunId: 'workflow-a',
+        runId: 'run-a',
+        revision: 1,
+        draftResult: draft,
+        settingsHash: 'settings-current',
+      }),
+      run: vi.fn().mockResolvedValue({
+        status: 'COMPLETED',
+        inputSnapshot: { insightArtifact: insightSnapshot },
+      }),
+      insightArtifact: vi.fn().mockResolvedValue({
+        ...insightSnapshot,
+        freshness: 'CURRENT',
+        availability: 'AVAILABLE',
+      }),
+      settingsNode: vi.fn().mockResolvedValue({ executionInputHash: 'settings-stale' }),
+      commitValidatedResult: vi.fn().mockResolvedValue({ kind: 'DEPENDENCY_CONFLICT' }),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    await expect(service.validateResult('project-a', 'result-a', 1)).rejects.toThrow(
+      '上游信息卡或 Prompt 设置已经变化，请重新生成',
+    );
+    expect(repository.commitValidatedResult).toHaveBeenCalledOnce();
+  });
+
+  it('allows the user to commit an exact safe batch with non-blocking coverage advice', async () => {
+    const draft = completionGateFixture();
+    const missingFact = {
+      factId: 'CORE_SELLING_POINT:missing',
+      field: 'CORE_SELLING_POINT' as const,
+      value: '尚未覆盖的卖点',
+      valueHash: 'b'.repeat(64),
+    };
+    draft.metrics.insightCoverage = {
+      ...draft.metrics.insightCoverage,
+      required: [missingFact],
+      missing: [missingFact],
+    };
+    draft.qualityStatus = 'NEEDS_REVIEW';
+    const insightSnapshot = {
+      id: 'insight-a',
+      revision: 1,
+      contentHash: 'a'.repeat(64),
+      result: { productName: '测试产品' },
+    };
+    const settings = normalizeEffectPromptSettings(draft.settings);
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        projectId: 'project-a',
+        productId: 'product-a',
+        workflowRunId: 'workflow-a',
+        runId: 'run-a',
+        revision: 1,
+        draftResult: draft,
+        settingsHash: workflowStateHash(settings),
+      }),
+      run: vi.fn().mockResolvedValue({
+        id: 'run-a',
+        status: 'COMPLETED',
+        inputSnapshot: { insightArtifact: insightSnapshot },
+      }),
+      insightArtifact: vi.fn().mockResolvedValue({
+        ...insightSnapshot,
+        freshness: 'CURRENT',
+        availability: 'AVAILABLE',
+      }),
+      settingsNode: vi.fn().mockResolvedValue({ state: settings }),
+      commitValidatedResult: vi.fn().mockResolvedValue({
+        kind: 'COMMITTED',
+        artifact: {
+          artifactId: 'artifact-a',
+          artifactKey: 'prompt-batch:product-a',
+          revision: 2,
+          unchanged: false,
+        },
+      }),
+      activeRunCount: vi.fn().mockResolvedValue(0),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+    vi.spyOn(service, 'workspace').mockResolvedValue({
+      products: [{ commitStatus: 'COMMITTED' }],
+    } as never);
+
+    const output = await service.validateResult('project-a', 'result-a', 1);
+
+    expect(output.valid).toBe(true);
+    expect(output.issues).toEqual([]);
+    expect(output.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'INSIGHT_COVERAGE_INCOMPLETE' })]),
+    );
+    expect(repository.commitValidatedResult).toHaveBeenCalledOnce();
+  });
+
+  it.each(['MANUAL_LONG', 'MANUAL_EMPTY', 'AI_EMPTY'] as const)(
+    'validates the confirmed %s batch boundary',
+    async (mode) => {
+      const draft = completionGateFixture();
+      if (mode === 'MANUAL_LONG')
+        draft.items[0] = { ...draft.items[0]!, origin: 'MANUAL', targetDurationSeconds: 30 };
+      else draft.items = [];
+      const missingFact = {
+        factId: 'CORE_SELLING_POINT:missing',
+        field: 'CORE_SELLING_POINT' as const,
+        value: '尚未覆盖的卖点',
+        valueHash: 'b'.repeat(64),
+      };
+      draft.metrics.insightCoverage = {
+        ...draft.metrics.insightCoverage,
+        required: [missingFact],
+        missing: [missingFact],
+      };
+      draft.qualityStatus = 'NEEDS_REVIEW';
+      const insightSnapshot = {
+        id: 'insight-a',
+        revision: 1,
+        contentHash: 'a'.repeat(64),
+        result: { productName: '测试产品' },
+      };
+      const settings = normalizeEffectPromptSettings(draft.settings);
+      const repository = {
+        result: vi.fn().mockResolvedValue({
+          id: 'result-a',
+          projectId: 'project-a',
+          productId: 'product-a',
+          workflowRunId: 'workflow-a',
+          runId: 'run-a',
+          revision: 1,
+          draftResult: draft,
+          manualOverrides: mode === 'MANUAL_EMPTY' ? { added: [], deleted: ['deleted-item'] } : {},
+          settingsHash: workflowStateHash(settings),
+        }),
+        run: vi.fn().mockResolvedValue({
+          id: 'run-a',
+          status: 'COMPLETED',
+          inputSnapshot: { insightArtifact: insightSnapshot },
+        }),
+        insightArtifact: vi.fn().mockResolvedValue({
+          ...insightSnapshot,
+          freshness: 'CURRENT',
+          availability: 'AVAILABLE',
+        }),
+        settingsNode: vi.fn().mockResolvedValue({ state: settings }),
+        commitValidatedResult: vi.fn().mockResolvedValue({
+          kind: 'COMMITTED',
+          artifact: {
+            artifactId: 'artifact-a',
+            artifactKey: 'prompt-batch:product-a',
+            revision: 2,
+            unchanged: false,
+          },
+        }),
+        activeRunCount: vi.fn().mockResolvedValue(0),
+      };
+      const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+      const service = new EffectPromptService(repository as never, projects as never, {} as never);
+      vi.spyOn(service, 'workspace').mockResolvedValue({
+        products: [{ commitStatus: 'COMMITTED' }],
+      } as never);
+
+      const output = await service.validateResult('project-a', 'result-a', 1);
+
+      expect(output.valid).toBe(mode !== 'AI_EMPTY');
+      if (mode === 'AI_EMPTY') {
+        expect(output.issues).toContainEqual(expect.objectContaining({ code: 'COUNT_MISMATCH' }));
+        expect(repository.commitValidatedResult).not.toHaveBeenCalled();
+        return;
+      }
+      expect(output.issues).toEqual([]);
+      expect(output.warnings).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: 'INSIGHT_COVERAGE_INCOMPLETE' })]),
+      );
+      expect(repository.commitValidatedResult).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps exact prompt repetition as a blocking completion issue', async () => {
+    const draft = completionGateFixture(true);
+    const insightSnapshot = {
+      id: 'insight-a',
+      revision: 1,
+      contentHash: 'a'.repeat(64),
+      result: {},
+    };
+    const repository = {
+      result: vi.fn().mockResolvedValue({
+        id: 'result-a',
+        productId: 'product-a',
+        workflowRunId: 'workflow-a',
+        runId: 'run-a',
+        revision: 1,
+        draftResult: draft,
+        settingsHash: 'settings-current',
+      }),
+      run: vi.fn().mockResolvedValue({
+        status: 'COMPLETED',
+        inputSnapshot: { insightArtifact: insightSnapshot },
+      }),
+      insightArtifact: vi.fn().mockResolvedValue({
+        ...insightSnapshot,
+        freshness: 'CURRENT',
+        availability: 'AVAILABLE',
+      }),
+      settingsNode: vi.fn().mockResolvedValue({ executionInputHash: 'settings-stale' }),
+      commitValidatedResult: vi.fn().mockResolvedValue({ kind: 'DEPENDENCY_CONFLICT' }),
+    };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    const output = await service.validateResult('project-a', 'result-a', 1);
+
+    expect(output.valid).toBe(false);
+    expect(output.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'EXACT_DUPLICATE' })]),
+    );
+  });
+
+  it('projects the persisted failed branch as the only failure and closes aborted siblings', async () => {
+    const now = new Date('2026-08-27T04:10:00.000Z');
+    const record = {
+      id: 'run-a',
+      projectId: 'project-a',
+      workflowRunId: 'workflow-a',
+      productId: 'product-a',
+      operation: 'BATCH_GENERATE',
+      targetItemId: null,
+      inputSnapshot: currentInputSnapshot(),
+      status: 'FAILED',
+      progress: 80,
+      currentNode: 'EXACT_SELECTION_AND_SUPPLEMENT',
+      warnings: [],
+      errorCode: 'AI_REQUEST_REJECTED',
+      errorMessage: 'Prompt AI 请求被拒绝',
+      attemptCount: 2,
+      stages: [
+        {
+          nodeId: 'CREATIVE_EVALUATION_CLASSIFICATION',
+          status: 'FAILED',
+          summary: 'Prompt AI 请求被拒绝',
+          warnings: [],
+          errorMessage: 'Prompt AI 请求被拒绝',
+        },
+        {
+          nodeId: 'EXACT_SELECTION_AND_SUPPLEMENT',
+          status: 'RUNNING',
+          summary: '正在生成候选 Prompt',
+          warnings: [],
+          errorMessage: null,
+        },
+      ],
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const repository = { run: vi.fn().mockResolvedValue(record) };
+    const projects = { get: vi.fn().mockResolvedValue({ id: 'project-a' }) };
+    const service = new EffectPromptService(repository as never, projects as never, {} as never);
+
+    const output = await service.run('project-a', 'run-a');
+
+    expect(output.run.currentNode).toBe('CREATIVE_EVALUATION_CLASSIFICATION');
+    expect(
+      output.run.nodes.find(({ nodeId }) => nodeId === 'CREATIVE_EVALUATION_CLASSIFICATION'),
+    ).toMatchObject({ status: 'FAILED' });
+    expect(
+      output.run.nodes.find(({ nodeId }) => nodeId === 'EXACT_SELECTION_AND_SUPPLEMENT'),
+    ).toMatchObject({
+      status: 'SKIPPED',
+      summary: '任务已停止，该分支未完成',
+      errorMessage: null,
+    });
+  });
+});

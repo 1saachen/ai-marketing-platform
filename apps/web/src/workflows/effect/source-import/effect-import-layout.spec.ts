@@ -1,0 +1,398 @@
+import { describe, expect, it } from 'vitest';
+
+import pageSource from './EffectImportNodePage.vue?raw';
+import feedbackSource from '../../../platform/workflow/components/WorkflowNavigationFeedback.vue?raw';
+import activationSource from '../../../platform/workflow/workflow-node-activation.ts?raw';
+import { effectImportMaterialContentPath } from './api/effect-import.api';
+import manifestDialogSource from './components/BatchManifestImportDialog.vue?raw';
+import contentViewerSource from '../../../platform/file/components/ImportContentViewer.vue?raw';
+import dropzoneSource from '../../../platform/file/components/ImportDropzone.vue?raw';
+import viewerAdapterSource from './components/EffectImportDocumentReaderDialog.vue?raw';
+import globalConfigSource from './components/GlobalVideoConfigPanel.vue?raw';
+import productEditorSource from './components/ProductImportEditor.vue?raw';
+import { EFFECT_IMPORT_PROTOTYPE_STYLE_TONES } from './effect-import-options';
+
+describe('effect import single-product prototype grid', () => {
+  it('keeps the edit button and changes active Runs without blanking the whole page', () => {
+    expect(pageSource).toContain('<WorkflowNodeEditActions');
+    expect(pageSource).toContain('const refreshActiveRunInPlace =');
+    expect(pageSource).toContain('const previousStep = activeStep.value');
+    expect(pageSource).not.toContain('activeStep.value = previousStep');
+    expect(pageSource).toContain('activeStep.value === previousStep');
+    expect(pageSource).toContain('<WorkflowNavigationFeedback');
+    expect(feedbackSource).toContain('正在切换编辑状态');
+    expect(pageSource).toContain('@branch-activated="handlePromptWorkflowRunChange"');
+    // A full update in the mix or output node forks a child Run, and those pages report it here so
+    // the canvas follows instead of leaving the user on the published branch.
+    expect(
+      pageSource.match(/@workflow-run-change="refreshActiveRunInPlace\(currentProjectId\)"/gu),
+    ).toHaveLength(2);
+    expect(pageSource).toContain('@workflow-run-change="handleSegmentRenderWorkflowRunChange"');
+    expect(pageSource).toContain(
+      'void refreshActiveRunInPlace(currentProjectId.value, { showCurtain: false })',
+    );
+    expect(pageSource).toContain('activeRunRefreshQueue.invalidate()');
+    expect(pageSource).toContain('@workflow-run-change="handleTemplateMixWorkflowRunChange"');
+    expect(pageSource).toContain('@workflow-run-change="handleFinalOutputWorkflowRunChange"');
+  });
+
+  it('keeps the same template and branch when moving between mix and output', () => {
+    expect(pageSource).toContain('branchNavigation.value = effectTemplateStepNavigation(');
+    expect(pageSource).toContain('templateMixNode.value?.getCurrentTemplateId() ?? null');
+    expect(pageSource).toContain('@back="returnToOutputTemplateMix"');
+    expect(pageSource).toMatch(
+      /workflowRunId === workspace\.value\?\.workflowRunId\s*&&\s*activeStep\.value === 4/,
+    );
+    expect(pageSource).toMatch(
+      /@navigation-consumed="\s*branchNavigation = consumeEffectNavigation\(branchNavigation, \$event\)\s*"/,
+    );
+    expect(pageSource).toMatch(
+      /@preview-consumed="\s*mixPreviewTarget = consumeEffectNavigation\(mixPreviewTarget, \$event\)\s*"/,
+    );
+  });
+
+  it('copies the active branch only after flushing pending drafts', () => {
+    expect(pageSource).toContain('const forkCurrentBranch = async (): Promise<void> => {');
+    expect(pageSource).toContain(
+      'await createEffectWorkflowBranch(projectId, runId, crypto.randomUUID())',
+    );
+    expect(pageSource).toContain("showNotice('请先保存或取消当前编辑，再新建分支', 'warning')");
+    expect(pageSource).toContain("showNotice('节点草稿保存失败，已阻止新建分支', 'error')");
+    expect(pageSource).toContain('@fork="forkCurrentBranch"');
+    expect(pageSource).toContain(':fork-disabled="Boolean(activeWorkflowRun?.isTemporaryBranch)"');
+  });
+
+  it('saves the current node draft before loading the branch tree so new templates appear immediately', () => {
+    expect(pageSource).toMatch(
+      /const loadBranchTree = async \(\): Promise<void> => \{[\s\S]*?await flushPendingEdits\(\)[\s\S]*?getEffectWorkflowBranchTree\(projectId, controller\.signal\)/,
+    );
+  });
+
+  it('prefetches the tree and revalidates cached content without blanking it on each open', () => {
+    expect(pageSource).toContain('prefetchBranchTree(projectId);');
+    expect(pageSource).toContain('branchPrefetchController?.abort();');
+    expect(pageSource).toMatch(/branchTreeOpen\.value = true;\s+void loadBranchTree\(\);/);
+    expect(pageSource).not.toContain(
+      'const openBranchTree = (): void => {\n  branchTree.value = null;',
+    );
+  });
+
+  it('starts the active Run overview before awaiting the project workspace', () => {
+    const loadProject = pageSource
+      .split('const loadProject = async (')[1]
+      ?.split('/** Keep the current node visible')[0];
+    expect(loadProject).toContain('const overviewPromise = getActiveWorkflowRunOverview(');
+    expect(loadProject).toMatch(
+      /const overviewPromise = getActiveWorkflowRunOverview\([\s\S]*?const workspaceResponse = await getEffectImportWorkspace\(/,
+    );
+  });
+
+  it('creates an upload target automatically instead of showing an empty-state gate', () => {
+    expect(pageSource).toContain('await ensureUploadTarget()');
+    expect(pageSource).not.toContain('尚未创建单产品资料包');
+    expect(pageSource).not.toContain('开始填写产品资料');
+    expect(pageSource).not.toContain('批量草稿还是空的');
+    expect(pageSource).not.toContain('>导入产品清单</button>');
+    expect(pageSource).toContain('正在准备素材上传区…');
+  });
+
+  it('offers a lightweight 24-hour restore entry without adding a manual asset action', () => {
+    expect(pageSource).toContain('最近删除');
+    expect(pageSource).toContain('24 小时内可恢复');
+    expect(pageSource).toContain('restoreEffectImportProduct');
+    expect(pageSource).not.toContain('保存到项目资产库');
+  });
+
+  it('downloads the standard Word product-package template from the header action', () => {
+    expect(pageSource).toContain('@click="downloadProductPackageTemplate"');
+    expect(pageSource).toContain('downloadEffectProductPackageTemplate(');
+    expect(pageSource).toContain('Word 资料包模板已下载');
+    expect(pageSource).not.toContain('@click="downloadTemplate(\'csv\')"');
+  });
+
+  it('uses a balanced two-column desktop workspace without video settings', () => {
+    expect(pageSource).toMatch(
+      /\.import-layout:not\(\.batch-mode\)[\s\S]*:deep\(\.upload-source-card\)[\s\S]*grid-column:\s*1;[\s\S]*grid-row:\s*1\s*\/\s*span 2;/,
+    );
+    expect(pageSource).toContain('grid-template-columns: minmax(0, 1.18fr) minmax(360px, 0.82fr)');
+    expect(pageSource).not.toContain('<GlobalVideoConfigPanel');
+  });
+
+  it('stacks commerce parsing and imported materials in the right desktop column', () => {
+    expect(pageSource).toMatch(
+      /:deep\(\.commerce-parse\)[\s\S]*grid-column:\s*2;[\s\S]*grid-row:\s*1;/,
+    );
+    expect(pageSource).toMatch(
+      /:deep\(\.imported-materials\)[\s\S]*grid-column:\s*2;[\s\S]*grid-row:\s*2;/,
+    );
+  });
+
+  it('removes import-mode switching and normalizes legacy batch workspaces to one product', () => {
+    expect(pageSource).not.toContain('class="import-mode-segment"');
+    expect(pageSource).not.toContain('多品类批量导入');
+    expect(pageSource).not.toContain('@click="switchMode(\'BATCH\')"');
+    expect(pageSource).toContain("if (loadedWorkspace.currentMode === 'BATCH')");
+    expect(pageSource).toContain("{ mode: 'SINGLE', expectedRevision: loadedWorkspace.revision }");
+  });
+
+  it('lets the upload zone consume the left-column height', () => {
+    expect(productEditorSource).toMatch(
+      /\.upload-source-card\s*\{[\s\S]*display:\s*flex;[\s\S]*flex-direction:\s*column;/,
+    );
+    expect(productEditorSource).toMatch(
+      /\.source-dropzone\s*\{[\s\S]*min-height:\s*220px;[\s\S]*flex:\s*1;/,
+    );
+  });
+
+  it('uses the selected balanced-layout node heading', () => {
+    expect(pageSource).toContain('<span>01</span>');
+    expect(pageSource).toContain('<h1>资料导入</h1>');
+    expect(pageSource).toContain('整理产品图片、文本资料与电商链接');
+  });
+
+  it('merges image and document channels into one mixed-file upload entry', () => {
+    expect(productEditorSource.match(/<ImportDropzone/g)).toHaveLength(2);
+    expect(dropzoneSource.match(/type="file"\s+hidden/g)).toHaveLength(1);
+    expect(productEditorSource).toContain('点击或将商品图片、产品文档拖拽到此处');
+    expect(productEditorSource).toContain('支持同时选择图片和文档，系统会自动识别资料类型');
+    expect(productEditorSource).toContain(':accept="unifiedUploadAccept"');
+    expect(productEditorSource).not.toContain('material-type-tabs');
+    expect(pageSource).toContain('resolveUploadMaterialType(file)!');
+    expect(pageSource).toContain('items: manifest.map(({ file, clientFileId, type }) => ({');
+    expect(productEditorSource).toMatch(
+      /\.source-dropzone input\[type='file'\]\s*\{[\s\S]*display:\s*none !important;/,
+    );
+  });
+});
+
+describe('effect import prototype video configuration', () => {
+  it('shows the global resolution accepted by the Ark video API', () => {
+    for (const label of ['视频时长', '画幅比例', '分辨率', '风格基调', '投放渠道', '禁用元素']) {
+      expect(globalConfigSource).toContain(label);
+    }
+    for (const removed of ['帧率', '字幕策略', '口播策略', 'BGM 策略']) {
+      expect(globalConfigSource).not.toContain(removed);
+    }
+    expect(globalConfigSource).toContain('EFFECT_IMPORT_RESOLUTIONS');
+    expect(globalConfigSource).toContain("key: 'resolution' as const");
+    expect(globalConfigSource).toContain('creatable: false');
+    expect(pageSource).not.toContain('ProductConfigOverrideDialog');
+    expect(productEditorSource).not.toContain('单品覆盖配置');
+  });
+
+  it('uses the exact frozen-prototype style tone options in the frontend', () => {
+    expect(EFFECT_IMPORT_PROTOTYPE_STYLE_TONES).toEqual([
+      '烟火食欲感',
+      '高端电影感',
+      '自然电影感',
+      '户外电影感',
+      '清透冰感',
+      '居家纪实',
+      '香槟金电影感',
+      '专业测评感',
+      '温馨生活感',
+      '国潮新中式',
+      '清新田园',
+      '复古胶片',
+      '赛博霓虹',
+      '极简商务',
+      '治愈暖光',
+      '夜景氛围',
+    ]);
+  });
+});
+
+describe('effect import identity boundary', () => {
+  it('leaves the product name to AI extraction and allows direct material upload', () => {
+    expect(productEditorSource).not.toContain('placeholder="请输入产品名称"');
+    expect(productEditorSource).not.toContain("changeField('name', $event)");
+    expect(productEditorSource).not.toContain('请先填写产品名称');
+    expect(productEditorSource).toContain('const uploadDisabled = computed(() => props.disabled)');
+    expect(productEditorSource).toContain(':disabled="uploadDisabled"');
+    expect(productEditorSource).not.toContain('品类');
+    expect(manifestDialogSource).not.toContain('<th>产品名称</th>');
+    expect(manifestDialogSource).not.toContain('<th>品类</th>');
+  });
+
+  it('keeps next-step access locked and places version saving at the far right of the header', () => {
+    expect(pageSource).not.toContain('unnamedProductCount');
+    expect(pageSource).toContain('validateEffectImportDraft(');
+    expect(pageSource).not.toContain('<WorkflowNodeDraftBar');
+    expect(pageSource).not.toContain('title="产品资料草稿"');
+    expect(pageSource).toContain('<WorkflowNodeFooter');
+    expect(pageSource).not.toContain(':status-title=');
+    expect(pageSource).not.toContain(':status-detail=');
+    expect(pageSource).not.toContain('`revision ${draft?.revision ?? 0}`');
+    expect(pageSource).not.toContain('relockDownstreamNode');
+    expect(pageSource).toContain('next-label="下一步：信息提炼"');
+    expect(pageSource).toContain(':show-validate="false"');
+    expect(pageSource).toContain('<WorkflowNodeEditActions');
+    expect(pageSource).toContain('@save="validateDraft"');
+    expect(pageSource).toContain('@begin="beginSourceEdit"');
+    expect(pageSource).toContain('@cancel="cancelSourceEdit"');
+    expect(pageSource).toContain(':saving="validatingDraft"');
+    expect(pageSource).toContain('class="node-heading__actions"');
+    expect(pageSource.indexOf('<WorkflowNodeEditActions')).toBeLessThan(
+      pageSource.indexOf('下载资料包模板'),
+    );
+    expect(pageSource.indexOf('下载资料包模板')).toBeLessThan(
+      pageSource.indexOf('class="save-indicator"'),
+    );
+    expect(pageSource).toContain('@next="advanceDraft"');
+    expect(productEditorSource).not.toContain('完成校验');
+    expect(pageSource).not.toContain('个产品未填写名称');
+  });
+});
+
+describe('effect import material previews', () => {
+  it('renders product images from the project-scoped content URL instead of an extension badge', () => {
+    expect(productEditorSource).toContain("material.type === 'PRODUCT_IMAGE'");
+    expect(productEditorSource).toContain('<EffectImportImagePreview :material="material" />');
+    expect(productEditorSource).not.toContain('failedThumbnailIds');
+    expect(productEditorSource).toMatch(/v-else class="file-extension"/);
+  });
+
+  it('opens ready product documents as read-only content without presenting the action as preview', () => {
+    expect(productEditorSource).toContain("material.type === 'PRODUCT_DOCUMENT'");
+    expect(productEditorSource).toContain("material.status === 'READY'");
+    expect(productEditorSource).toContain('<FileText v-else :size="13" />查看内容');
+    expect(productEditorSource).toContain('<EffectImportContentViewerDialog');
+    expect(pageSource).toContain(':mode="currentMode"');
+    expect(contentViewerSource).toContain('只读查看，不会修改草稿或工作副本');
+    expect(contentViewerSource).toContain('readSourceDocumentAtPath(');
+    expect(contentViewerSource).toContain('parseSourceDocx(');
+    expect(contentViewerSource).toContain('type="application/pdf"');
+    expect(contentViewerSource).not.toContain('v-html');
+    expect(contentViewerSource).not.toContain('保存');
+    expect(effectImportMaterialContentPath('项目 1', 'SINGLE', '产品/1', '素材?1')).toBe(
+      '/projects/%E9%A1%B9%E7%9B%AE%201/workflows/effect/source-import/drafts/SINGLE/products/%E4%BA%A7%E5%93%81%2F1/materials/%E7%B4%A0%E6%9D%90%3F1/content',
+    );
+  });
+
+  it('opens ready product images in the same read-only content viewer without cropping', () => {
+    expect(productEditorSource).toContain("material.type === 'PRODUCT_IMAGE'");
+    expect(productEditorSource).toContain(
+      '<ImageIcon v-if="material.type === \'PRODUCT_IMAGE\'" :size="13" />',
+    );
+    expect(contentViewerSource).toContain('const isImage = computed(() => props.file.isImage)');
+    expect(viewerAdapterSource).toContain("props.material.type === 'PRODUCT_IMAGE'");
+    expect(contentViewerSource).toContain(':href="originalContentUrl"');
+    expect(contentViewerSource).toContain(
+      '<figure v-if="isImage && (imageSource || reusedPreview)"',
+    );
+    expect(contentViewerSource).toContain('await preview.decode()');
+    expect(contentViewerSource).toContain('importImageCache.get(');
+    expect(productEditorSource).toContain(':preview-image="readingImage"');
+    expect(productEditorSource).toContain(
+      'image?.dataset.materialUpdatedAt === material.updatedAt',
+    );
+    expect(contentViewerSource).toContain('按原始比例显示，图片内容不会被裁切');
+    expect(contentViewerSource).toMatch(/\.image-reader > img[\s\S]*object-fit:\s*contain;/);
+  });
+});
+
+describe('effect import commerce link placeholder', () => {
+  it('validates and saves the link into the current product package without claiming to parse it', () => {
+    expect(productEditorSource).toContain('当前仅校验链接格式并保存到资料包，暂不抓取页面内容');
+    expect(productEditorSource).toContain(
+      ':disabled="disabled || linkBusy || !product.commerceUrl?.trim()"',
+    );
+    expect(productEditorSource).toContain("{{ linkBusy ? '正在保存…' : '解析链接' }}");
+    expect(pageSource).toContain('busyCommerceProductIds.value.has(product.id)');
+    expect(pageSource).toContain('if (!(await flushProduct(product.id))) return;');
+    expect(pageSource).toContain('电商链接已保存到当前商品资料包，暂未解析页面内容');
+  });
+
+  it('renders a saved commerce URL as an imported package item', () => {
+    expect(productEditorSource).toContain('const importedItemCount = computed(');
+    expect(productEditorSource).toContain('{{ importedItemCount }} 项资料');
+    expect(productEditorSource).toContain('v-if="savedCommerceUrl"');
+    expect(productEditorSource).toContain('<strong>电商商品链接</strong>');
+    expect(productEditorSource).toContain(
+      '<small :title="savedCommerceUrl">{{ savedCommerceUrl }}</small>',
+    );
+    expect(productEditorSource).toContain("{{ linkBusy ? '保存中' : '已保存' }}");
+  });
+
+  it('supports replacing and deleting the saved commerce URL', () => {
+    expect(productEditorSource).toContain('const replaceCommerceLink = (): void => {');
+    expect(productEditorSource).toContain('commerceInput.value?.select()');
+    expect(productEditorSource).toContain('title="重新填写电商链接"');
+    expect(productEditorSource).toContain('aria-label="删除电商链接"');
+    expect(productEditorSource).toContain("emit('deleteLink', product)");
+    expect(pageSource).toContain('const removeCommerceLink = async');
+    expect(pageSource).toContain('{ commerceUrl: null, expectedRevision }');
+    expect(pageSource).toContain('@delete-link="removeCommerceLink"');
+  });
+});
+
+describe('effect import automatic draft saving', () => {
+  it('keeps visited AI nodes warm and exposes immediate switching feedback', () => {
+    expect(pageSource).toContain('<KeepAlive :max="4">');
+    expect(pageSource).toContain('pendingStep.value = step');
+    expect(feedbackSource).toContain('class="node-switch-progress"');
+    expect(feedbackSource).toContain('正在切换到{{ pendingStepLabel }}');
+    expect(feedbackSource).toContain('保存当前草稿并准备目标节点…');
+  });
+
+  it('moves node activation out of the visual switching critical path', () => {
+    const switchingSource = pageSource.match(/const selectWorkflowStep = async[\s\S]*?\n\};/)?.[0];
+
+    expect(switchingSource).toBeDefined();
+    expect(switchingSource).toContain('activeStep.value = step');
+    expect(switchingSource).toContain('enqueueWorkflowNodeActivation(');
+    expect(switchingSource).not.toContain('await activateWorkflowNode(');
+    expect(activationSource).toContain('for (let attempt = 0; attempt < 2; attempt += 1)');
+    expect(pageSource).toContain('createWorkflowNodeActivationQueue');
+    expect(activationSource).toContain('request === sequence');
+  });
+
+  it('prefetches adjacent effect workspaces with isolated context inputs', () => {
+    expect(pageSource).toContain('scheduleAdjacentWorkspacePrefetch');
+    expect(pageSource).toContain('const targetPrefetch = prefetchWorkflowStep(step)');
+    expect(pageSource).toContain('prefetchEffectExtractionWorkspace({ projectId, draftId })');
+    expect(pageSource).toContain('prefetchEffectPromptWorkspace({ projectId, workflowRunId })');
+    expect(pageSource).toContain(
+      'prefetchEffectSegmentRenderWorkspace({ projectId, workflowRunId, productId })',
+    );
+    expect(pageSource).toContain('clearEffectWorkspacePrefetches()');
+  });
+
+  it('activates the selected workflow node independently from node draft persistence', () => {
+    expect(pageSource).toContain('activateWorkflowNode(');
+    expect(pageSource).toContain('getActiveWorkflowRunOverview(');
+    expect(pageSource).toContain('workflowNodeBaseId(overviewData.run?.currentNodeId)');
+    expect(pageSource).toContain("'INFORMATION_EXTRACTION'");
+    expect(pageSource).toContain('effectWorkflowNodeIds[step]');
+    expect(pageSource).toContain('effectWorkflowNodeIds[activeStep.value]');
+  });
+
+  it('debounces node-state saving and removes node-level asset publishing', () => {
+    expect(pageSource).toContain('putWorkflowNodeState(');
+    expect(pageSource).toContain('setTimeout(() => void flushProduct(productId), 1000)');
+    expect(pageSource).toContain('defineExpose({');
+    expect(pageSource).toContain('flushPendingEdits,');
+    expect(pageSource).toContain('resumeWorkflowNode,');
+    expect(pageSource).toContain(
+      "workflowRunId: computed(() => workspace.value?.workflowRunId ?? '')",
+    );
+    expect(pageSource).not.toContain('publishEffectImportDraft');
+    expect(pageSource).not.toContain('asset-publish-bar');
+    expect(pageSource).not.toContain('保存到项目资产库');
+  });
+
+  it('preserves autosave concurrency state without locking downstream on draft edits', () => {
+    expect(pageSource).not.toContain('relockDownstreamNode');
+    expect(pageSource).toContain('nodeStateRevision.value = response.data.nodeState.revision');
+    expect(pageSource).toMatch(
+      /const loadProject = async[\s\S]*nodeStateRevision\.value = 0;[\s\S]*lastSavedNodeState = '';/,
+    );
+  });
+
+  it('serializes node-state writes with the existing project write queue', () => {
+    expect(pageSource).toContain(
+      'return keepalive ? persist() : writeQueue.enqueue(projectId, persist)',
+    );
+    expect(pageSource).toContain('if (serialized === lastSavedNodeState) return true;');
+  });
+});

@@ -1,0 +1,832 @@
+<script setup lang="ts">
+import type {
+  AssetWorkflow,
+  AssetWorkflowSpace,
+  Project,
+  WorkingArtifact,
+  WorkflowNodeState,
+  WorkflowRun,
+} from '@ai-marketing/contracts';
+import {
+  AlertTriangle,
+  ArrowRight,
+  Clock3,
+  FileText,
+  FolderClock,
+  Layers3,
+  LoaderCircle,
+  RefreshCw,
+} from '@lucide/vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
+
+import { isAbortError } from '../../../api/http-client';
+import { useProjectContext } from '../../project/project-context';
+import { presentProjectOperation } from '../../project/project-operation-status';
+import {
+  getActiveWorkflowRunOverview,
+  listWorkingArtifacts,
+} from '../../workflow/api/workflow-working.api';
+import { latestWorkflowNodeStateMap, workflowNodeBaseId } from '../../workflow/workflow-node-id';
+import { SPACE_LABELS, WORKFLOW_META, typeLabel } from '../asset-v4';
+import { EFFECT_NODE_LABELS } from '../../../workflows/effect/shared/effect-node-labels';
+import {
+  aggregateWorkspaceArtifacts,
+  finalVideoArtifactCounts,
+  isRenderBatchArtifact,
+  renderBatchClipCount,
+} from './project-workspace-artifacts';
+
+const props = withDefaults(
+  defineProps<{
+    project: Project;
+    workflow: AssetWorkflow;
+    space: AssetWorkflowSpace;
+    canResume?: boolean;
+  }>(),
+  { canResume: false },
+);
+const emit = defineEmits<{ resumeNode: [nodeId: string] }>();
+const { currentProject } = useProjectContext();
+
+type LoadStatus = 'loading' | 'success' | 'error';
+type WorkflowNodeDefinition = { id: string; label: string };
+
+const EFFECT_NODES: readonly WorkflowNodeDefinition[] = [
+  { id: 'SOURCE_IMPORT', label: EFFECT_NODE_LABELS.SOURCE_IMPORT },
+  { id: 'INFORMATION_EXTRACTION', label: EFFECT_NODE_LABELS.INFORMATION_EXTRACTION },
+  { id: 'PROMPT_GENERATION', label: EFFECT_NODE_LABELS.PROMPT_GENERATION },
+  { id: 'SEGMENT_RENDER', label: EFFECT_NODE_LABELS.SEGMENT_RENDER },
+  { id: 'TEMPLATE_MIX', label: EFFECT_NODE_LABELS.TEMPLATE_MIX },
+  { id: 'FINAL_OUTPUT', label: EFFECT_NODE_LABELS.FINAL_OUTPUT },
+] as const;
+
+const status = ref<LoadStatus>('loading');
+const error = ref('');
+const run = ref<WorkflowRun | null>(null);
+const nodeStates = ref<WorkflowNodeState[]>([]);
+const artifacts = ref<WorkingArtifact[]>([]);
+let controller: AbortController | undefined;
+let generation = 0;
+
+const workflowNodes = computed<readonly WorkflowNodeDefinition[]>(() =>
+  props.workflow === 'EFFECT' ? EFFECT_NODES : [],
+);
+const stateByNode = computed(() => latestWorkflowNodeStateMap(nodeStates.value));
+const latestState = computed(
+  () =>
+    [...nodeStates.value].sort(
+      (left, right) => Date.parse(right.savedAt) - Date.parse(left.savedAt),
+    )[0],
+);
+const visibleArtifacts = computed(() => aggregateWorkspaceArtifacts(artifacts.value));
+const renderBatchArtifact = computed(
+  () => visibleArtifacts.value.find(isRenderBatchArtifact) ?? null,
+);
+const finalVideoCounts = computed(() => finalVideoArtifactCounts(artifacts.value));
+const currentNodeIndex = computed(() => {
+  const index = workflowNodes.value.findIndex(
+    (node) => node.id === workflowNodeBaseId(run.value?.currentNodeId ?? latestState.value?.nodeId),
+  );
+  return index >= 0 ? index : 0;
+});
+const currentNodeLabel = computed(
+  () =>
+    workflowNodes.value[currentNodeIndex.value]?.label ?? latestState.value?.nodeId ?? '尚未开始',
+);
+const activeNodeId = computed(() =>
+  workflowNodeBaseId(run.value?.currentNodeId ?? latestState.value?.nodeId),
+);
+const lastSavedAt = computed(() => {
+  const timestamps = [
+    props.project.updatedAt,
+    run.value?.updatedAt,
+    ...nodeStates.value.map((item) => item.savedAt),
+    ...artifacts.value.map((item) => item.updatedAt),
+  ].filter((value): value is string => Boolean(value));
+  return timestamps.sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+});
+
+const projectStatusLabel = computed(
+  () => presentProjectOperation(props.project, currentProject.value?.id).label,
+);
+
+const formatTime = (value: string | null): string =>
+  value
+    ? new Intl.DateTimeFormat('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(new Date(value))
+    : '尚未保存';
+
+const nodeLabel = (nodeId: string): string =>
+  workflowNodes.value.find((node) => node.id === nodeId)?.label ?? nodeId;
+
+const hasNodeContent = (definition: WorkflowNodeDefinition): boolean =>
+  stateByNode.value.has(definition.id) ||
+  (definition.id === 'SEGMENT_RENDER' && renderBatchArtifact.value !== null) ||
+  (definition.id === 'FINAL_OUTPUT' && finalVideoCounts.value.total > 0);
+
+const nodeDetail = (definition: WorkflowNodeDefinition): string => {
+  const state = stateByNode.value.get(definition.id);
+  if (definition.id === 'SOURCE_IMPORT') {
+    const packages = artifacts.value.filter(
+      (artifact) =>
+        artifact.nodeId === 'SOURCE_IMPORT' && artifact.artifactKey.startsWith('source-package:'),
+    );
+    if (packages.length === 1)
+      return `已确认版本 ${packages[0]!.revision} · ${formatTime(packages[0]!.updatedAt)}`;
+    if (packages.length > 1) return `已确认 ${packages.length} 个资料包`;
+    if (state) return `草稿已保存 · ${formatTime(state.savedAt)}`;
+    return '暂无已保存内容';
+  }
+  if (definition.id === 'FINAL_OUTPUT' && finalVideoCounts.value.total > 0) {
+    const { completed, stale, total, unavailable } = finalVideoCounts.value;
+    const details = [`已渲染 ${completed}/${total} 条成片`];
+    if (stale) details.push(`${stale} 条待更新`);
+    if (unavailable) details.push(`${unavailable} 条不可用`);
+    return details.join(' · ');
+  }
+  if (state) return `revision ${state.revision} · ${formatTime(state.savedAt)}`;
+  if (definition.id === 'SEGMENT_RENDER' && renderBatchArtifact.value)
+    return `已确认 ${renderBatchClipCount(renderBatchArtifact.value)} 条视频素材`;
+  return '暂无已保存内容';
+};
+
+const nodeStatus = (definition: WorkflowNodeDefinition): string => {
+  const state = stateByNode.value.get(definition.id);
+  if (definition.id === 'FINAL_OUTPUT' && finalVideoCounts.value.total > 0) {
+    const { completed, stale, total } = finalVideoCounts.value;
+    if (completed === total) return '已完成';
+    if (completed > 0) return '部分待更新';
+    if (stale > 0) return '待更新';
+    return '产物不可用';
+  }
+  if (definition.id === activeNodeId.value) return '编辑中';
+  if (!state) return '尚未开始';
+  return '已自动保存';
+};
+
+const artifactSummary = (artifact: WorkingArtifact): string => {
+  if (isRenderBatchArtifact(artifact)) return `${renderBatchClipCount(artifact)} 条已完成视频素材`;
+  if (artifact.kind === 'FILE')
+    return artifact.originalFileName || artifact.mimeType || '文件工作副本';
+  const value = artifact.payload;
+  if (!value || typeof value !== 'object') return '结构化工作副本';
+  const text = JSON.stringify(value);
+  return text.length > 90 ? `${text.slice(0, 90)}…` : text;
+};
+
+const openArtifact = (artifact: WorkingArtifact): void => {
+  if (!props.canResume || !isRenderBatchArtifact(artifact)) return;
+  emit('resumeNode', 'SEGMENT_RENDER');
+};
+
+const artifactStateLabel = (artifact: WorkingArtifact): string => {
+  if (artifact.availability === 'PENDING_DELETE') return '待删除，可恢复';
+  if (artifact.availability === 'SOURCE_REMOVED') return '来源已删除';
+  return artifact.freshness === 'STALE' ? '待更新' : '最新';
+};
+
+const configEntries = (artifact: WorkingArtifact): Array<[string, string]> => {
+  if (artifact.type !== 'VIDEO_CONFIG' || !artifact.payload || typeof artifact.payload !== 'object')
+    return [];
+  const payload = artifact.payload as Record<string, unknown>;
+  const fields: Array<[string, string]> = [
+    ['视频时长', `${String(payload.durationSeconds ?? '—')} 秒`],
+    ['画幅比例', String(payload.aspectRatio ?? '—')],
+    ['风格基调', String(payload.styleTone ?? '—')],
+    ['投放渠道', String(payload.deliveryChannel ?? '—')],
+  ];
+  return fields;
+};
+
+const load = async (): Promise<void> => {
+  controller?.abort();
+  const request = new AbortController();
+  controller = request;
+  const requestGeneration = ++generation;
+  status.value = 'loading';
+  error.value = '';
+  run.value = null;
+  nodeStates.value = [];
+  artifacts.value = [];
+  try {
+    const overviewResponse = await getActiveWorkflowRunOverview(
+      props.project.id,
+      props.workflow,
+      props.space,
+      request.signal,
+    );
+    if (request.signal.aborted || requestGeneration !== generation) return;
+    run.value = overviewResponse.data.run;
+    nodeStates.value = overviewResponse.data.nodeStates;
+    const artifactResponse = run.value
+      ? await listWorkingArtifacts(
+          props.project.id,
+          { workflow: props.workflow, space: props.space, workflowRunId: run.value.id },
+          request.signal,
+        )
+      : null;
+    if (request.signal.aborted || requestGeneration !== generation) return;
+    artifacts.value = artifactResponse?.data.items ?? [];
+    status.value = 'success';
+  } catch (loadError) {
+    if (isAbortError(loadError) || requestGeneration !== generation) return;
+    error.value = loadError instanceof Error ? loadError.message : '项目工作数据加载失败';
+    status.value = 'error';
+  }
+};
+
+watch(
+  () => [props.project.id, props.workflow, props.space] as const,
+  () => void load(),
+  { immediate: true },
+);
+onBeforeUnmount(() => controller?.abort());
+</script>
+
+<template>
+  <div class="project-overview" :aria-busy="status === 'loading'">
+    <div v-if="status === 'loading'" class="overview-state">
+      <LoaderCircle class="spinner" :size="25" /><strong>正在加载项目工作数据…</strong>
+    </div>
+    <div v-else-if="status === 'error'" class="overview-state is-error" role="alert">
+      <AlertTriangle :size="26" /><strong>项目工作数据加载失败</strong>
+      <p>{{ error }}</p>
+      <button type="button" @click="load"><RefreshCw :size="14" />重新加载</button>
+    </div>
+    <template v-else>
+      <section class="project-summary">
+        <div class="summary-main">
+          <span class="summary-icon"><Layers3 :size="20" /></span>
+          <div>
+            <h2>{{ project.name }}</h2>
+            <p>{{ project.id }} · {{ WORKFLOW_META[workflow].label }} · {{ projectStatusLabel }}</p>
+          </div>
+        </div>
+        <div class="summary-metrics">
+          <span
+            ><small>当前节点</small><strong>{{ currentNodeLabel }}</strong></span
+          >
+          <span
+            ><small>工作流进度</small
+            ><strong>{{ currentNodeIndex + 1 }}/{{ workflowNodes.length || 1 }}</strong></span
+          >
+          <span
+            ><small>最后保存</small><strong>{{ formatTime(lastSavedAt) }}</strong></span
+          >
+          <span
+            ><small>工作空间</small><strong>{{ SPACE_LABELS[space] }}</strong></span
+          >
+        </div>
+        <p class="project-description">{{ project.description || '暂无项目说明' }}</p>
+      </section>
+
+      <div class="overview-grid">
+        <section class="overview-panel drafts-panel">
+          <header>
+            <span><FolderClock :size="17" /></span>
+            <div>
+              <h3>工作流草稿</h3>
+              <p>节点编辑状态，仅保存在当前项目</p>
+            </div>
+            <b>{{ nodeStates.length }}</b>
+          </header>
+          <div v-if="!run" class="section-empty">
+            <FileText :size="27" /><strong>尚无工作流草稿</strong>
+            <p>进入节点编辑后会自动保存到这里。</p>
+          </div>
+          <div v-else class="draft-list">
+            <button
+              v-for="(definition, index) in workflowNodes"
+              :key="definition.id"
+              type="button"
+              :class="{ active: definition.id === activeNodeId }"
+              :aria-current="definition.id === activeNodeId ? 'step' : undefined"
+              :disabled="!hasNodeContent(definition) || !canResume"
+              @click="emit('resumeNode', definition.id)"
+            >
+              <span class="step-index">{{ index + 1 }}</span>
+              <span
+                ><strong>{{ definition.label }}</strong
+                ><small>{{ nodeDetail(definition) }}</small></span
+              >
+              <em :class="{ active: definition.id === activeNodeId }">{{
+                nodeStatus(definition)
+              }}</em>
+              <ArrowRight v-if="hasNodeContent(definition) && canResume" :size="14" />
+            </button>
+          </div>
+          <p v-if="run && !canResume" class="resume-hint">
+            只有当前绑定项目可以直接返回节点继续编辑。
+          </p>
+        </section>
+
+        <section class="overview-panel artifacts-panel">
+          <header>
+            <span><Clock3 :size="17" /></span>
+            <div>
+              <h3>工作区产物</h3>
+              <p>最新工作副本，不进入跨项目选择器</p>
+            </div>
+            <b>{{ visibleArtifacts.length }}</b>
+          </header>
+          <div v-if="!visibleArtifacts.length" class="section-empty">
+            <FolderClock :size="27" /><strong>暂无工作区产物</strong>
+            <p>上传或生成成功后会自动维护最新副本。</p>
+          </div>
+          <div v-else class="artifact-grid">
+            <article
+              v-for="artifact in visibleArtifacts"
+              :key="artifact.id"
+              :class="{ actionable: isRenderBatchArtifact(artifact) && canResume }"
+              :role="isRenderBatchArtifact(artifact) && canResume ? 'button' : undefined"
+              :tabindex="isRenderBatchArtifact(artifact) && canResume ? 0 : undefined"
+              @click="openArtifact(artifact)"
+              @keydown.enter.prevent="openArtifact(artifact)"
+              @keydown.space.prevent="openArtifact(artifact)"
+            >
+              <div
+                class="working-preview"
+                :class="{ package: artifact.type === 'SOURCE_MATERIAL' }"
+              >
+                <img
+                  v-if="artifact.mainPreviewUrl"
+                  :src="artifact.mainPreviewUrl"
+                  :alt="artifact.name"
+                />
+                <FileText v-else :size="32" />
+                <span v-if="artifact.type === 'SOURCE_MATERIAL'">
+                  {{ artifact.fileCount }} 个文件
+                </span>
+                <span v-else-if="isRenderBatchArtifact(artifact)">
+                  {{ renderBatchClipCount(artifact) }} 条
+                </span>
+              </div>
+              <div class="artifact-copy">
+                <span class="artifact-type">{{ typeLabel(artifact.type) }}</span
+                ><strong>{{ artifact.name }}</strong>
+                <div v-if="artifact.type === 'SOURCE_MATERIAL'" class="package-files">
+                  <a
+                    v-for="file in artifact.files"
+                    :key="file.id"
+                    :href="file.downloadUrl"
+                    target="_blank"
+                    rel="noreferrer"
+                    >{{ file.originalFileName }}</a
+                  >
+                </div>
+                <dl v-else-if="artifact.type === 'VIDEO_CONFIG'" class="config-summary">
+                  <div v-for="entry in configEntries(artifact)" :key="entry[0]">
+                    <dt>{{ entry[0] }}</dt>
+                    <dd>{{ entry[1] }}</dd>
+                  </div>
+                </dl>
+                <p v-else>{{ artifactSummary(artifact) }}</p>
+                <footer>
+                  <span>revision {{ artifact.revision }}</span
+                  ><span>{{ nodeLabel(artifact.nodeId) }}</span
+                  ><em
+                    :class="{
+                      stale:
+                        artifact.freshness === 'STALE' || artifact.availability !== 'AVAILABLE',
+                    }"
+                    >{{ artifactStateLabel(artifact) }}</em
+                  ><b>尚未归档</b
+                  ><span v-if="isRenderBatchArtifact(artifact) && canResume" class="artifact-open"
+                    >进入素材池 <ArrowRight :size="10"
+                  /></span>
+                </footer>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.project-overview {
+  height: 100%;
+  padding: 14px 16px 22px;
+  overflow: auto;
+  background: #f3f6fb;
+  box-sizing: border-box;
+  color: #17233a;
+}
+.overview-state {
+  display: flex;
+  min-height: 320px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 9px;
+  color: #72809a;
+}
+.overview-state.is-error {
+  color: #b45353;
+}
+.overview-state button {
+  display: flex;
+  height: 34px;
+  padding: 0 13px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #c8d6ed;
+  border-radius: 9px;
+  background: #fff;
+  color: #245ec7;
+  font-weight: 800;
+}
+.spinner {
+  animation: spin 1s linear infinite;
+}
+.project-summary,
+.overview-panel {
+  background: #fff;
+  border: 1px solid #dce5f2;
+  border-radius: 16px;
+  box-shadow: 0 7px 22px rgba(31, 65, 126, 0.045);
+}
+.project-summary {
+  padding: 16px 18px;
+}
+.summary-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.summary-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 11px;
+  background: #eaf1ff;
+  color: #2563eb;
+}
+.summary-main h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.summary-main p,
+.project-description {
+  margin: 4px 0 0;
+  color: #72809a;
+  font-size: 12px;
+}
+.summary-metrics {
+  display: grid;
+  margin-top: 14px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 9px;
+}
+.summary-metrics span {
+  padding: 10px 12px;
+  border: 1px solid #e4eaf4;
+  border-radius: 11px;
+  background: #f8faff;
+}
+.summary-metrics small,
+.summary-metrics strong {
+  display: block;
+}
+.summary-metrics small {
+  color: #7e8aa0;
+  font-size: 10px;
+}
+.summary-metrics strong {
+  margin-top: 3px;
+  font-size: 13px;
+}
+.project-description {
+  padding-top: 11px;
+  border-top: 1px solid #edf1f7;
+}
+.overview-grid {
+  display: grid;
+  margin-top: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.overview-panel {
+  min-width: 0;
+  padding: 14px;
+}
+.overview-panel > header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid #edf1f7;
+}
+.overview-panel > header > span {
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border-radius: 9px;
+  background: #edf3ff;
+  color: #2563eb;
+}
+.overview-panel > header div {
+  min-width: 0;
+  flex: 1;
+}
+.overview-panel h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.overview-panel header p {
+  margin: 2px 0 0;
+  color: #8490a5;
+  font-size: 10px;
+}
+.overview-panel header > b {
+  display: grid;
+  min-width: 25px;
+  height: 25px;
+  padding: 0 6px;
+  place-items: center;
+  border-radius: 999px;
+  background: #edf3ff;
+  color: #2563eb;
+  font-size: 11px;
+}
+.draft-list {
+  display: flex;
+  padding-top: 7px;
+  flex-direction: column;
+}
+.draft-list button {
+  display: grid;
+  width: 100%;
+  padding: 8px 5px;
+  grid-template-columns: 28px minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-bottom: 1px solid #f0f3f8;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.draft-list button.active {
+  border-radius: 8px;
+  background: #eff5ff;
+  color: #1d4ed8;
+  box-shadow: inset 3px 0 #2563eb;
+}
+.draft-list button.active .step-index {
+  background: #2563eb;
+  color: #fff;
+}
+.draft-list button.active small,
+.draft-list button.active em,
+.draft-list button.active svg {
+  color: #2563eb;
+}
+.draft-list button:not(:disabled) {
+  cursor: pointer;
+}
+.draft-list button:disabled {
+  opacity: 0.55;
+}
+.step-index {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 8px;
+  background: #eef3fb;
+  color: #4e6284;
+  font-size: 10px;
+  font-weight: 900;
+}
+.draft-list strong,
+.draft-list small {
+  display: block;
+}
+.draft-list strong {
+  font-size: 12px;
+}
+.draft-list small {
+  margin-top: 2px;
+  color: #8a96aa;
+  font-size: 9px;
+}
+.draft-list em {
+  color: #71809a;
+  font-size: 9px;
+  font-style: normal;
+}
+.draft-list em.active {
+  color: #2563eb;
+  font-weight: 900;
+}
+.resume-hint {
+  margin: 9px 4px 0;
+  color: #8490a5;
+  font-size: 9px;
+}
+.artifact-grid {
+  display: grid;
+  padding-top: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(225px, 1fr));
+  gap: 9px;
+}
+.artifact-grid article {
+  display: flex;
+  min-width: 0;
+  padding: 8px;
+  gap: 9px;
+  border: 1px solid #e1e8f3;
+  border-radius: 12px;
+  background: #fbfcff;
+}
+.artifact-grid article.actionable {
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+.artifact-grid article.actionable:hover,
+.artifact-grid article.actionable:focus-visible {
+  border-color: #9bbcf5;
+  box-shadow: 0 7px 18px rgb(37 99 235 / 10%);
+  outline: none;
+  transform: translateY(-1px);
+}
+.working-preview {
+  width: 72px;
+  min-width: 72px;
+  height: 72px;
+  border-radius: 9px;
+}
+.working-preview {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #edf3ff;
+  color: #5474ac;
+}
+.working-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.working-preview span {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: rgb(16 35 68 / 76%);
+  color: white;
+  font-size: 8px;
+}
+.package-files {
+  display: flex;
+  margin: 4px 0;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.package-files a {
+  max-width: 125px;
+  overflow: hidden;
+  color: #52647f;
+  font-size: 8px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-summary {
+  display: grid;
+  margin: 5px 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+}
+.config-summary div {
+  padding: 3px 4px;
+  border-radius: 5px;
+  background: #f0f4fb;
+}
+.config-summary dt,
+.config-summary dd {
+  margin: 0;
+  font-size: 8px;
+}
+.config-summary dt {
+  color: #8793a7;
+}
+.config-summary dd {
+  color: #344b70;
+  font-weight: 800;
+}
+.artifact-copy {
+  min-width: 0;
+  flex: 1;
+}
+.artifact-type {
+  color: #2563eb;
+  font-size: 9px;
+  font-weight: 800;
+}
+.artifact-copy > strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-copy > p {
+  margin: 4px 0;
+  color: #8390a5;
+  font-size: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-copy footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.artifact-copy footer span,
+.artifact-copy footer em,
+.artifact-copy footer b {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: #edf2f8;
+  color: #65748e;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 700;
+}
+.artifact-copy footer em {
+  background: #e8f7f0;
+  color: #16845e;
+}
+.artifact-copy footer em.stale {
+  background: #fff2df;
+  color: #a85f00;
+}
+.artifact-copy footer b {
+  background: #edf3ff;
+  color: #2563eb;
+}
+.artifact-copy footer .artifact-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  background: #e7efff;
+  color: #1d5bd0;
+}
+.section-empty {
+  display: flex;
+  min-height: 125px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  color: #8a96aa;
+  text-align: center;
+}
+.section-empty strong {
+  margin-top: 7px;
+  color: #516079;
+  font-size: 12px;
+}
+.section-empty p {
+  max-width: 390px;
+  margin: 4px 0 0;
+  font-size: 10px;
+  line-height: 1.55;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (max-width: 1100px) {
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+  .summary-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 650px) {
+  .summary-metrics {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

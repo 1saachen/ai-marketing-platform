@@ -1,0 +1,287 @@
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+
+from effect_prompt_generation.api_client import HttpInternalApi, InternalApiError
+from effect_prompt_generation.models import (
+    NodeId,
+    ProgressPayload,
+    RuntimeContext,
+    ShardPhase,
+    ShardRecord,
+    StageOutput,
+    StageStatus,
+)
+
+
+@pytest.mark.asyncio
+async def test_internal_api_uses_worker_and_attempt_tokens(runtime: RuntimeContext) -> None:
+    context = runtime
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"success": True, "data": {}})
+
+    api = HttpInternalApi(
+        "http://api.local/api",
+        "worker-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await api.put_stage(
+            context,
+            StageOutput(
+                node_id=NodeId.EXACT_SELECTION_AND_SUPPLEMENT,
+                status=StageStatus.RUNNING,
+                summary="正在校验",
+            ),
+        )
+        await api.heartbeat(
+            context,
+            ProgressPayload(
+                progress=40,
+                current_node=NodeId.EXACT_SELECTION_AND_SUPPLEMENT,
+            ),
+        )
+    finally:
+        await api.aclose()
+
+    assert requests[0].url.path.endswith(
+        "/internal/workers/effect-prompt-generation/runs/run-1/stages/EXACT_SELECTION_AND_SUPPLEMENT"
+    )
+    assert requests[0].headers["x-worker-token"] == "worker-token"
+    assert requests[0].headers["x-attempt-token"] == "attempt-1"
+    assert json.loads(requests[1].content) == {"projectId": "project-1"}
+
+
+@pytest.mark.asyncio
+async def test_download_product_image_uses_active_attempt_lease(
+    runtime: RuntimeContext,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=b"image-bytes")
+
+    api = HttpInternalApi(
+        "http://api.local/api",
+        "worker-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        content = await api.download_product_image(runtime, "file-1")
+    finally:
+        await api.aclose()
+
+    assert content == b"image-bytes"
+    assert seen[0].url.path.endswith(
+        "/internal/workers/effect-prompt-generation/runs/run-1/product-images/file-1/content"
+    )
+    assert seen[0].url.params["projectId"] == "project-1"
+    assert seen[0].headers["x-attempt-token"] == "attempt-1"
+
+
+@pytest.mark.asyncio
+async def test_get_shards_accepts_backend_run_id_envelope(runtime: RuntimeContext) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {"runId": "run-1", "shards": []},
+            },
+        )
+
+    api = HttpInternalApi(
+        "http://api.local/api",
+        "worker-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert await api.get_shards(runtime) == []
+    finally:
+        await api.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_shards_restores_current_creative_phase_fields(
+    runtime: RuntimeContext,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "runId": "run-1",
+                    "shards": [
+                        {
+                            "phase": "CREATIVE",
+                            "round": 0,
+                            "shardIndex": 0,
+                            "status": "SUCCEEDED",
+                            "creativePlan": [],
+                            "creativeItems": [],
+                            "classificationPlan": [],
+                            "evaluations": [],
+                            "warnings": [],
+                        }
+                    ],
+                },
+            },
+        )
+
+    api = HttpInternalApi(
+        "http://api.local/api",
+        "worker-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        shards = await api.get_shards(runtime)
+    finally:
+        await api.aclose()
+
+    assert len(shards) == 1
+    assert shards[0].phase == ShardPhase.CREATIVE
+    assert shards[0].status == StageStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_put_shard_serializes_current_phase_fields(runtime: RuntimeContext) -> None:
+    seen: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"success": True, "data": {}})
+
+    api = HttpInternalApi(
+        "http://api.local/api",
+        "worker-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await api.put_shard(
+            runtime,
+            ShardRecord(
+                phase=ShardPhase.CLASSIFICATION,
+                round=1,
+                shard_index=2,
+                status=StageStatus.RUNNING,
+                classification_plan=["creative-1", "creative-2"],
+            ),
+        )
+    finally:
+        await api.aclose()
+
+    assert seen["phase"] == "CLASSIFICATION"
+    assert seen["classificationPlan"] == ["creative-1", "creative-2"]
+    assert seen["creativePlan"] == []
+    assert seen["creativeItems"] == []
+    assert seen["evaluations"] == []
+
+
+@pytest.mark.asyncio
+async def test_internal_api_error_includes_only_bounded_structured_message() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"message": [" first validation error ", "second\nerror", "x" * 300, "ignored"]},
+        )
+
+    api = HttpInternalApi(
+        "http://api.local/api",
+        "worker-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(InternalApiError) as caught:
+            await api._request("GET", "invalid")
+    finally:
+        await api.aclose()
+
+    message = str(caught.value)
+    assert message.startswith("internal API returned HTTP 400: first validation error; second error; ")
+    assert "ignored" not in message
+    assert len(message) <= 532
+
+
+@pytest.mark.asyncio
+async def test_internal_api_error_does_not_echo_non_json_body() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="upstream body must stay private")
+
+    api = HttpInternalApi(
+        "http://api.local/api",
+        "worker-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(InternalApiError) as caught:
+            await api._request("GET", "invalid")
+    finally:
+        await api.aclose()
+
+    assert str(caught.value) == "internal API returned HTTP 502"
+    assert caught.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_idempotent_internal_write_retries_transient_connection_loss(
+    runtime: RuntimeContext,
+) -> None:
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ConnectError("temporary local API restart", request=request)
+        return httpx.Response(200, json={"success": True, "data": {}})
+
+    api = HttpInternalApi(
+        "http://api.local/api",
+        "worker-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await api.put_shard(
+            runtime,
+            ShardRecord(
+                phase=ShardPhase.CLASSIFICATION,
+                round=0,
+                shard_index=0,
+                status=StageStatus.RUNNING,
+            ),
+        )
+    finally:
+        await api.aclose()
+
+    assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_claim_does_not_retry_unknown_network_outcome() -> None:
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectError("claim response lost", request=request)
+
+    api = HttpInternalApi(
+        "http://api.local/api",
+        "worker-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(InternalApiError):
+            await api.claim("run-1", "project-1")
+    finally:
+        await api.aclose()
+
+    assert attempts == 1

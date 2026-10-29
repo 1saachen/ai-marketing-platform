@@ -1,0 +1,82 @@
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import AliasChoices, AnyHttpUrl, Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=None, case_sensitive=True, env_ignore_empty=True, extra="ignore")
+    internal_api_base_url: AnyHttpUrl = Field(alias="INTERNAL_API_BASE_URL")
+    worker_token: SecretStr = Field(alias="EFFECT_TEMPLATE_MIX_WORKER_TOKEN")
+    rabbitmq_url: SecretStr = Field(alias="RABBITMQ_URL")
+    queue_name: str = Field(default="effect.template-mix.requested", alias="EFFECT_TEMPLATE_MIX_QUEUE")
+    ark_base_url: str = Field(default="https://ark.cn-beijing.volces.com/api/v3", alias="ARK_BASE_URL")
+    ark_api_key: SecretStr = Field(alias="ARK_API_KEY")
+    model: str = Field(validation_alias=AliasChoices("ARK_TEMPLATE_MIX_MODEL", "ARK_MODEL"))
+    video_import_model: str = Field(default="doubao-seed-2-1-pro-260628", alias="ARK_VIDEO_IMPORT_MODEL", min_length=1)
+    api_timeout_seconds: float = Field(default=90, alias="INTERNAL_API_TIMEOUT_SECONDS", gt=0)
+    api_recovery_max_attempts: int = Field(default=20, alias="TEMPLATE_MIX_API_RECOVERY_MAX_ATTEMPTS", ge=1, le=100)
+    api_recovery_timeout_seconds: float = Field(default=600, alias="TEMPLATE_MIX_API_RECOVERY_TIMEOUT_SECONDS", gt=0, le=3600)
+    api_recovery_max_delay_seconds: float = Field(default=30, alias="TEMPLATE_MIX_API_RECOVERY_MAX_DELAY_SECONDS", gt=0, le=60)
+    ark_timeout_seconds: float = Field(default=120, alias="ARK_TIMEOUT_SECONDS", gt=0)
+    ark_max_output_tokens: int = Field(
+        default=8_192,
+        alias="ARK_TEMPLATE_MIX_MAX_OUTPUT_TOKENS",
+        ge=512,
+    )
+    ark_reasoning_effort: Literal["minimal", "low", "medium", "high"] = Field(
+        default="minimal",
+        alias="ARK_TEMPLATE_MIX_REASONING_EFFORT",
+    )
+    classification_batch_size: int = Field(
+        default=10,
+        alias="TEMPLATE_MIX_CLASSIFICATION_BATCH_SIZE",
+        ge=1,
+        le=50,
+    )
+    classification_input_token_budget: int = Field(
+        default=16_000,
+        alias="TEMPLATE_MIX_CLASSIFICATION_INPUT_TOKEN_BUDGET",
+        ge=4_096,
+    )
+    ai_max_concurrency: int = Field(
+        default=4,
+        alias="TEMPLATE_MIX_AI_MAX_CONCURRENCY",
+        ge=1,
+        le=4,
+    )
+    packaging_item_concurrency: int = Field(default=6, alias="TEMPLATE_MIX_PACKAGING_ITEM_CONCURRENCY", ge=1, le=8)
+    packaging_item_timeout_seconds: float = Field(default=2400, alias="TEMPLATE_MIX_PACKAGING_ITEM_TIMEOUT_SECONDS", gt=0, le=86400)
+    packaging_step_retry_attempts: int = Field(default=2, alias="TEMPLATE_MIX_PACKAGING_STEP_RETRY_ATTEMPTS", ge=0, le=5)
+    packaging_model_concurrency: int = Field(default=4, alias="TEMPLATE_MIX_PACKAGING_MODEL_CONCURRENCY", ge=1, le=8)
+    packaging_model_timeout_seconds: float = Field(default=300, alias="TEMPLATE_MIX_PACKAGING_MODEL_TIMEOUT_SECONDS", gt=0, le=1200)
+    packaging_model_max_output_tokens: int = Field(default=16_384, alias="TEMPLATE_MIX_PACKAGING_MODEL_MAX_OUTPUT_TOKENS", ge=4096, le=32_768)
+    packaging_tts_concurrency: int = Field(default=4, alias="TEMPLATE_MIX_PACKAGING_TTS_CONCURRENCY", ge=1, le=12)
+    packaging_tts_connection_max_attempts: int = Field(default=8, alias="TEMPLATE_MIX_PACKAGING_TTS_CONNECTION_MAX_ATTEMPTS", ge=1, le=20)
+    packaging_tts_connection_timeout_seconds: float = Field(default=600, alias="TEMPLATE_MIX_PACKAGING_TTS_CONNECTION_TIMEOUT_SECONDS", gt=0, le=1800)
+    packaging_tts_connection_max_delay_seconds: float = Field(default=30, alias="TEMPLATE_MIX_PACKAGING_TTS_CONNECTION_MAX_DELAY_SECONDS", gt=0, le=60)
+    max_video_bytes: int = Field(default=512 * 1024 * 1024, alias="TEMPLATE_MIX_MAX_VIDEO_BYTES", ge=1)
+    final_output_max_concurrency: int = Field(default=2, alias="FINAL_OUTPUT_MAX_CONCURRENCY", ge=1, le=4)
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    tts_api_key: SecretStr = Field(default=SecretStr(''), alias='VOLC_TTS_API_KEY')
+    tts_speaker: str = Field(default='', alias='VOLC_TTS_SPEAKER')
+    tts_resource_id: str = Field(default='seed-tts-2.0', alias='VOLC_TTS_RESOURCE_ID')
+    music_access_key: SecretStr = Field(default=SecretStr(''), alias='VOLC_MUSIC_ACCESS_KEY')
+    music_secret_key: SecretStr = Field(default=SecretStr(''), alias='VOLC_MUSIC_SECRET_KEY')
+    music_action: Literal['GenBGM', 'GenBGMForTime'] = Field(default='GenBGMForTime', alias='VOLC_MUSIC_ACTION')
+
+    @model_validator(mode="after")
+    def validate_real_provider(self) -> "Settings":
+        self.queue_name = self.queue_name.strip()
+        self.ark_base_url = self.ark_base_url.rstrip("/")
+        self.model = self.model.strip()
+        key = self.ark_api_key.get_secret_value().strip()
+        if not self.queue_name or not self.model or not key or "replace-with" in key.casefold():
+            raise ValueError("template mix worker requires a real Ark model and API key")
+        return self
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()  # type: ignore[call-arg]
