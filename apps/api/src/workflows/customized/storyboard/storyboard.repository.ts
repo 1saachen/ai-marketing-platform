@@ -1,4 +1,19 @@
+import type { CustomizedScriptTextPatch } from '@ai-marketing/contracts';
+import { sharedCustomizedBrief } from '../../../platform/workflow/customized-shared-brief';
+import { scriptUpdateFailureMessage, storyboardTaskError } from './script-update-failure';
 import { randomUUID } from 'node:crypto';
+import {
+  createScriptUpdate,
+  completeScriptUpdate,
+  scriptUpdateCandidate,
+  saveScriptUpdate,
+  editLocalScript,
+} from './script-update';
+import {
+  applyCustomizedScriptPatches,
+  isStoryboardReview,
+  type CustomizedUpdateRequest,
+} from '@ai-marketing/contracts';
 import { Inject, Injectable } from '@nestjs/common';
 import {
   storyboardStages,
@@ -50,6 +65,7 @@ import {
   customizedScope,
   lockCustomizedProject,
   customizedConflict,
+  customizedPathScriptId,
 } from '../../../platform/workflow/customized-branches';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
 import { ApiHttpException } from '../../../common/api-http-exception';
@@ -82,6 +98,9 @@ type Task = CustomizedStoryboardTask & { steps: CustomizedStoryboardStep[] };
 const inputOf = (t: CustomizedStoryboardTask) => t.inputSnapshot as unknown as StoryboardInput;
 export const presentStoryboardTask = (t: Task): StoryboardTask => ({
   ...(inputOf(t).outputMode ? { outputMode: inputOf(t).outputMode! } : {}),
+  ...(inputOf(t).incremental
+    ? { incremental: { version: 1 as const, scriptId: inputOf(t).incremental!.scriptId } }
+    : {}),
   ...(inputOf(t).graphVersion
     ? {
         graphVersion: inputOf(t).graphVersion!,
@@ -106,7 +125,7 @@ export const presentStoryboardTask = (t: Task): StoryboardTask => ({
     errorMessage: s.errorMessage,
     updatedAt: s.updatedAt.toISOString(),
   })),
-  errorMessage: t.errorMessage,
+  errorMessage: storyboardTaskError(t),
   createdAt: t.createdAt.toISOString(),
   updatedAt: new Date(
     Math.max(t.updatedAt.getTime(), ...t.steps.map((s) => s.updatedAt.getTime())),
@@ -115,6 +134,28 @@ export const presentStoryboardTask = (t: Task): StoryboardTask => ({
 
 @Injectable()
 export class StoryboardRepository {
+  createUpdate(
+    p: string,
+    r: string,
+    sid: string,
+    key: string,
+    request: CustomizedUpdateRequest,
+    models: StoryboardInput['models'],
+  ) {
+    return this.db.$transaction(
+      async (tx) =>
+        presentStoryboardTask(await createScriptUpdate(tx, p, r, sid, key, request, models)),
+      { timeout: 15000 },
+    );
+  }
+  updateCandidate(p: string, r: string, sid: string) {
+    return scriptUpdateCandidate(this.db, p, r, sid);
+  }
+  saveUpdate(p: string, r: string, id: string, script: Script) {
+    return this.db.$transaction((tx) => saveScriptUpdate(tx, this.working, p, r, id, script), {
+      timeout: 30000,
+    });
+  }
   constructor(
     @Inject(PrismaService) private readonly db: PrismaService,
     @Inject(WorkflowWorkingRepository) private readonly working: WorkflowWorkingRepository,
@@ -131,11 +172,30 @@ export class StoryboardRepository {
   private async sourceRun(tx: Prisma.TransactionClient, projectId: string, runId: string) {
     const run = await this.scope(tx, projectId, runId);
     if (run.editSessionNodeId) return customizedConflict('请先保存或取消当前节点编辑');
+    const shared = await sharedCustomizedBrief(tx, projectId, runId);
+    if (shared && shared.workflowRunId !== runId)
+      return this.scope(tx, projectId, shared.workflowRunId);
     if (run.forkScriptId) {
+      const local = await tx.workingArtifact.findFirst({
+        where: {
+          projectId,
+          workflowRunId: runId,
+          artifactKey: `customized-script:${run.forkScriptId}`,
+        },
+      });
+      if ((local?.metadata as { localUpdate?: boolean } | null)?.localUpdate) return run;
       const script = await tx.customizedStoryboardScript.findFirst({
         where: { projectId, id: run.forkScriptId },
       });
       if (!script) throw missing();
+      const currentBrief = await this.brief(tx, projectId, run.id);
+      const consumed = script.sourceSnapshot as unknown as StoryboardSource;
+      if (
+        currentBrief &&
+        (currentBrief.revision !== consumed.revision ||
+          currentBrief.contentHash !== consumed.fingerprint)
+      )
+        return run;
       return this.scope(tx, projectId, script.sourceRunId);
     }
     return run;
@@ -176,7 +236,12 @@ export class StoryboardRepository {
     return this.db.$transaction(
       async (tx) => {
         const run = await this.sourceRun(tx, projectId, runId),
-          b = await this.brief(tx, projectId, run.id),
+          b = await sharedCustomizedBrief(
+            tx,
+            projectId,
+            runId,
+            await this.brief(tx, projectId, run.id),
+          ),
           state = await this.state(tx, projectId, run.id);
         const records = await tx.customizedStoryboardScript.findMany({
           where: { projectId },
@@ -196,31 +261,81 @@ export class StoryboardRepository {
             artifactKey: { in: records.map((s) => `customized-script:${s.id}`) },
             availability: 'AVAILABLE',
           },
+          include: { dependencies: true },
+        });
+        const localStates = await tx.workflowNodeState.findMany({
+          where: {
+            projectId,
+            workflowRunId: runId,
+            nodeId: { startsWith: 'CUSTOMIZED_SCRIPT_EDIT:' },
+          },
         });
         const scripts = records
           .filter((s) => s.origin !== 'AI' || s.status === 'COMPLETED')
           .map((s) => {
             const a = artifacts.find(
                 (a) =>
-                  a.workflowRunId === s.workflowRunId &&
-                  a.artifactKey === `customized-script:${s.id}`,
+                  a.workflowRunId ===
+                    (artifacts.some(
+                      (v) =>
+                        v.workflowRunId === runId && v.artifactKey === `customized-script:${s.id}`,
+                    )
+                      ? runId
+                      : s.workflowRunId) && a.artifactKey === `customized-script:${s.id}`,
               ),
-              source = s.sourceSnapshot as unknown as StoryboardSource;
+              source = (a?.dependencies.some((d) => d.sourceKey === 'customized-brief')
+                ? (() => {
+                    const dependency = (
+                      a as unknown as {
+                        dependencies?: {
+                          sourceArtifactId: string;
+                          sourceRevision: number;
+                          sourceHash: string;
+                        }[];
+                      }
+                    ).dependencies?.find(
+                      (d) => (d as { sourceKey?: string }).sourceKey === 'customized-brief',
+                    );
+                    return dependency
+                      ? {
+                          artifactId: dependency.sourceArtifactId,
+                          revision: dependency.sourceRevision,
+                          fingerprint: dependency.sourceHash,
+                        }
+                      : b
+                        ? this.source(b)
+                        : s.sourceSnapshot;
+                  })()
+                : s.sourceSnapshot) as unknown as StoryboardSource;
+            const local =
+              a?.workflowRunId === runId
+                ? localStates.find((v) => v.nodeId === `CUSTOMIZED_SCRIPT_EDIT:${s.id}`)
+                : null;
+            const localDraft = local?.state as { editing: boolean; script: Script } | undefined;
             return {
               id: s.id,
-              workflowRunId: s.workflowRunId,
+              workflowRunId: (a?.metadata as { localUpdate?: boolean } | null)?.localUpdate
+                ? runId
+                : s.workflowRunId,
               source,
               status: s.status as 'DRAFT',
               origin: s.origin as 'AI',
-              revision: s.revision,
-              editing: s.editing,
+              revision:
+                local?.revision ??
+                ((a?.metadata as { localUpdate?: boolean } | null)?.localUpdate
+                  ? a!.revision
+                  : s.revision),
+              editing: localDraft?.editing ?? s.editing,
               stale:
                 !b ||
                 b.freshness !== 'CURRENT' ||
-                source.artifactId !== b.id ||
-                source.revision !== b.revision ||
+                source.fingerprint !== b.contentHash ||
                 a?.freshness === 'STALE',
-              script: (s.editing ? s.draft : (a?.payload ?? s.draft)) as unknown as Script,
+              script: (localDraft?.editing
+                ? localDraft.script
+                : s.editing
+                  ? s.draft
+                  : (a?.payload ?? s.draft)) as unknown as Script,
               confirmedRevision: a?.revision ?? null,
               taskId: s.taskId,
             };
@@ -240,6 +355,10 @@ export class StoryboardRepository {
           },
         });
         const viewed = await this.scope(tx, projectId, runId);
+        const pathScriptId = customizedPathScriptId(
+          viewed,
+          artifacts.filter((a) => a.workflowRunId === runId),
+        );
         return {
           sourceRunId: run.id,
           source: b ? this.source(b) : null,
@@ -248,10 +367,10 @@ export class StoryboardRepository {
           settings: state.settings,
           settingsRevision: state.revision,
           scripts,
-          selectedScriptId: scripts.some((s) => s.id === state.selectedScriptId)
-            ? state.selectedScriptId
-            : scripts.some((s) => s.id === viewed.forkScriptId)
-              ? viewed.forkScriptId
+          selectedScriptId: scripts.some((s) => s.id === pathScriptId)
+            ? pathScriptId
+            : scripts.some((s) => s.id === state.selectedScriptId)
+              ? state.selectedScriptId
               : (scripts[0]?.id ?? null),
           task: task ? presentStoryboardTask(task) : null,
           legacyDraft:
@@ -487,8 +606,38 @@ export class StoryboardRepository {
     return t;
   }
   private async validSource(tx: Prisma.TransactionClient, t: CustomizedStoryboardTask) {
+    const local = inputOf(t).incremental;
+    if (local) {
+      const state = await tx.workflowNodeState.findUnique({
+        where: {
+          projectId_workflowRunId_nodeId: {
+            projectId: t.projectId,
+            workflowRunId: t.workflowRunId,
+            nodeId: `CUSTOMIZED_SCRIPT_EDIT:${local.scriptId}`,
+          },
+        },
+      });
+      if ((state?.state as { editing?: boolean })?.editing)
+        return customizedConflict('当前路径脚本正在编辑');
+      const artifact = await tx.workingArtifact.findFirst({
+        where: {
+          projectId: t.projectId,
+          workflowRunId: t.workflowRunId,
+          artifactKey: `customized-script:${local.scriptId}`,
+          revision: local.baselineRevision,
+        },
+      });
+      const record = await tx.customizedStoryboardScript.findFirst({
+        where: { projectId: t.projectId, id: local.scriptId },
+      });
+      if (!artifact || record?.editing)
+        return customizedConflict('脚本已编辑，原更新任务不能继续写入');
+    }
     await this.scope(tx, t.projectId, t.workflowRunId);
-    const b = await this.brief(tx, t.projectId, t.workflowRunId),
+    const b =
+        local?.informationMode === 'CURRENT'
+          ? await sharedCustomizedBrief(tx, t.projectId, t.workflowRunId, undefined, true)
+          : await this.brief(tx, t.projectId, t.workflowRunId),
       source = inputOf(t).source;
     if (
       !b ||
@@ -575,6 +724,75 @@ export class StoryboardRepository {
   step(projectId: string, id: string, token: string, value: Omit<StoryboardStep, 'updatedAt'>) {
     return this.db.$transaction(async (tx) => {
       const t = await this.lease(tx, projectId, id, token);
+      if (inputOf(t).incremental) {
+        const input = inputOf(t);
+        if (
+          !storyboardStages(input).some((s) => s.id === value.nodeId) ||
+          value.nodeId === 'SAVE' ||
+          value.scriptId !== (value.nodeId === 'SNAPSHOT' ? '' : input.incremental!.scriptId) ||
+          !['RUNNING', 'SUCCEEDED', 'FAILED'].includes(value.status)
+        )
+          invalid('局部更新阶段不正确');
+        if (Buffer.byteLength(JSON.stringify(value.output ?? null)) > 2 * 1024 * 1024)
+          invalid('结果超过大小限制');
+        const previous = await tx.customizedStoryboardStep.findUnique({
+          where: {
+            projectId_taskId_nodeId_scriptId: {
+              projectId,
+              taskId: id,
+              nodeId: value.nodeId,
+              scriptId: value.scriptId,
+            },
+          },
+        });
+        if (previous?.status === 'SUCCEEDED') {
+          if (value.status !== 'SUCCEEDED') return { accepted: true };
+          if (workflowStateHash(previous.output) !== workflowStateHash(value.output))
+            return customizedConflict('已完成阶段不能被其他候选覆盖');
+          return { accepted: true };
+        }
+        if (value.status === 'SUCCEEDED' && value.nodeId === 'STORY') {
+          const output = value.output as {
+            patches: CustomizedScriptTextPatch[];
+            script: Script;
+          };
+          try {
+            if (
+              workflowStateHash(
+                applyCustomizedScriptPatches(input.incremental!.baseline, output.patches),
+              ) !== workflowStateHash(output.script)
+            )
+              invalid('修改候选与补丁不一致');
+          } catch {
+            invalid('脚本修改无法定位原文');
+          }
+        }
+        if (value.status === 'SUCCEEDED' && value.nodeId === 'REVIEW') {
+          const story = await tx.customizedStoryboardStep.findFirst({
+            where: { projectId, taskId: id, nodeId: 'STORY', status: 'SUCCEEDED' },
+          });
+          if (
+            !story ||
+            !isStoryboardReview(value.output) ||
+            (value.output as { candidateHash?: string }).candidateHash !==
+              workflowStateHash((story.output as { script?: unknown })?.script)
+          )
+            invalid('审校不属于当前脚本候选');
+        }
+        await tx.customizedStoryboardStep.upsert({
+          where: {
+            projectId_taskId_nodeId_scriptId: {
+              projectId,
+              taskId: id,
+              nodeId: value.nodeId,
+              scriptId: value.scriptId,
+            },
+          },
+          create: { projectId, taskId: id, ...value, output: json(value.output) },
+          update: { ...value, output: json(value.output) },
+        });
+        return { accepted: true };
+      }
       // A batch may still be running when one published sibling is permanently removed.
       if (value.scriptId && !inputOf(t).scriptIds.includes(value.scriptId))
         return { accepted: true, removed: true };
@@ -945,6 +1163,15 @@ export class StoryboardRepository {
     return this.db.$transaction(
       async (tx) => {
         await lockCustomizedProject(tx, projectId);
+        const updateTask = await tx.customizedStoryboardTask.findFirst({
+          where: { projectId, id: taskId },
+        });
+        if (updateTask && inputOf(updateTask).incremental) {
+          if (updateTask.status === 'COMPLETED' && updateTask.attemptToken === token)
+            return { workflowRunId: updateTask.workflowRunId, unchanged: true };
+          const leased = await this.lease(tx, projectId, taskId, token);
+          return completeScriptUpdate(tx, leased, script);
+        }
         const s = await tx.customizedStoryboardScript.findFirst({
           where: { projectId, taskId, id: script.id },
         });
@@ -1092,6 +1319,12 @@ export class StoryboardRepository {
           : null;
       const automatic =
         failure.retryable === true && count < inputOf(t).scriptIds.length && t.attemptCount < 3;
+      const localFailure =
+        inputOf(t).incremental && !automatic && count < inputOf(t).scriptIds.length
+          ? scriptUpdateFailureMessage(
+              await tx.customizedStoryboardStep.findMany({ where: { projectId, taskId: id } }),
+            )
+          : null;
       await tx.customizedStoryboardTask.update({
         where: { id },
         data: {
@@ -1105,10 +1338,14 @@ export class StoryboardRepository {
           leaseExpiresAt: null,
           autoRetryScriptIds: automatic ? retryIds : [],
           errorMessage: automatic
-            ? '服务暂时繁忙，稍后自动恢复未完成方案；已完成内容保留'
+            ? inputOf(t).incremental
+              ? '本次脚本局部更新暂未完成，稍后自动继续；原脚本保持不变'
+              : '服务暂时繁忙，稍后自动恢复未完成方案；已完成内容保留'
             : count === inputOf(t).scriptIds.length
               ? null
-              : (informationError ?? '部分脚本未完成，已成功的脚本保留，可重试未完成部分'),
+              : (localFailure ??
+                informationError ??
+                '部分脚本未完成，已成功的脚本保留，可重试未完成部分'),
         },
       });
       if (automatic) {
@@ -1144,6 +1381,17 @@ export class StoryboardRepository {
           });
       } else {
         if (!['FAILED', 'PARTIAL', 'CANCELLED'].includes(t.status)) return { accepted: true };
+        if (inputOf(t).incremental) {
+          const review = await tx.customizedStoryboardStep.findFirst({
+            where: { projectId, taskId: id, nodeId: 'REVIEW', status: 'SUCCEEDED' },
+          });
+          if (
+            review &&
+            isStoryboardReview(review.output) &&
+            review.output.findings.some((f) => f.severity === 'ERROR')
+          )
+            return customizedConflict('该候选需要修改，请使用“按审核意见修正”生成并审核新候选');
+        }
         await this.validSource(tx, t);
         await tx.customizedStoryboardTask.update({
           where: { id },
@@ -1207,10 +1455,24 @@ export class StoryboardRepository {
     action: 'begin' | 'draft' | 'cancel' | 'save' | 'discard',
     expectedRevision: number,
     script?: Script,
+    workflowRunId?: string,
   ) {
     return this.db.$transaction(
       async (tx) => {
         await lockCustomizedProject(tx, projectId);
+        if (workflowRunId) {
+          const local = await editLocalScript(
+            tx,
+            this.working,
+            projectId,
+            workflowRunId,
+            scriptId,
+            action,
+            expectedRevision,
+            script,
+          );
+          if (local) return local;
+        }
         const s = await tx.customizedStoryboardScript.findFirst({
           where: { projectId, id: scriptId },
         });

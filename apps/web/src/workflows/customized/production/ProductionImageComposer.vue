@@ -32,7 +32,48 @@ const props = defineProps<{
   interrupted?: boolean | undefined;
   error?: string | undefined;
 }>();
-const emit = defineEmits<{ generate: [settings: CustomizedImageSettings]; close: [] }>();
+const emit = defineEmits<{
+  generate: [settings: CustomizedImageSettings];
+  replace: [image: CustomizedImageReference];
+  close: [];
+}>();
+const replacementInput = ref<HTMLInputElement>();
+async function replaceImage(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file || locked.value) return;
+  if (
+    !['image/png', 'image/jpeg', 'image/webp'].includes(file.type) ||
+    file.size <= 0 ||
+    file.size > CUSTOMIZED_IMAGE_REFERENCE_MAX_BYTES
+  ) {
+    uploadError.value = '请选择不超过 10 MB 的 PNG、JPG 或 WebP 图片';
+    return;
+  }
+  const current = scope;
+  uploading.value = true;
+  uploadError.value = '';
+  try {
+    const asset = await productionApi.uploadImageReference(
+      props.projectId,
+      props.workflowRunId,
+      file,
+      current.signal,
+      props.asset.id,
+    );
+    if (current !== scope || current.signal.aborted) return;
+    if (!Number.isInteger(asset.currentVersion) || !asset.currentVersion)
+      throw new Error('上传图片版本不完整，请重新上传');
+    emit('replace', { assetId: asset.id, version: asset.currentVersion! });
+    scopeNotice.value = '图片已上传到编辑草稿，保存修改后用于后续制作；取消编辑可恢复原图。';
+  } catch (e) {
+    if (current === scope && !isAbortError(e))
+      uploadError.value = e instanceof Error ? e.message : '图片上传失败，请重试';
+  } finally {
+    if (current === scope) uploading.value = false;
+  }
+}
 type Reference = CustomizedImageReference & { name: string; source: string };
 const root = ref<HTMLElement>(),
   editor = ref<HTMLTextAreaElement>(),
@@ -316,6 +357,16 @@ function submit() {
         <span v-else>{{ asset.image ? '当前图片' : '图片待生成' }}</span
         ><span>{{ asset.name }}</span>
       </figcaption>
+      <input
+        ref="replacementInput"
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        hidden
+        @change="replaceImage"
+      />
+      <BaseButton :disabled="locked" @click="replacementInput?.click()">{{
+        asset.image ? '替换图片' : '上传图片'
+      }}</BaseButton>
     </figure>
     <div
       ref="root"

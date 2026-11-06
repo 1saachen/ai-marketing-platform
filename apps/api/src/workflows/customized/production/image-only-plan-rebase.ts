@@ -18,10 +18,11 @@ import {
 } from '../../../platform/workflow/workflow-working.repository';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
 import { clipPayload } from './video-production.domain';
+import { rebindUnchanged } from './unchanged-media';
 
 const equal = (a: unknown, b: unknown) => workflowStateHash(a) === workflowStateHash(b);
 const withoutImages = (assets: ProductionDocument['assets']) =>
-  assets.map(({ image: _image, ...a }) => a);
+  assets.map(({ image: _image, imageBasis: _basis, ...a }) => a);
 const dependency = (a: WorkingArtifact) => ({
   sourceType: 'WORKING_ARTIFACT' as const,
   sourceArtifactId: a.id,
@@ -326,6 +327,17 @@ export async function applyImageOnlyPlanRebase(
     }
   const current = new Map(rows.map((a) => [a.artifactKey, a]));
   for (const step of proof.steps) {
+    if (workflowStateHash(step.artifact.payload) === workflowStateHash(step.payload)) {
+      const record = await rebindUnchanged(
+        tx,
+        p,
+        r,
+        step.artifact.id,
+        step.sourceKeys.map((k) => current.get(k)!),
+      );
+      current.set(step.artifact.artifactKey, record);
+      continue;
+    }
     const result = await working.commitValidatedArtifactsInTransaction(
       tx,
       p,

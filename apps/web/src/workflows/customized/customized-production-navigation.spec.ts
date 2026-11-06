@@ -215,6 +215,12 @@ describe('ordinary customized production navigation', () => {
     expect(state.workflowRunId).toBe('other-assets');
     expect(state.activeStep).toBe(2);
     expect(state.storyboardViewedRunId).toBe('other-script');
+    expect(api.activate).toHaveBeenLastCalledWith(
+      'project',
+      'other-assets',
+      'STORYBOARD',
+      'CURRENT',
+    );
     await call(state, 'continueScript', 'other-script', 4);
     expect(state.workflowRunId).toBe('other-assets');
     expect(state.activeStep).toBe(4);
@@ -230,6 +236,17 @@ describe('ordinary customized production navigation', () => {
     expect(refreshed.workflowRunId).toBe('video');
     expect(refreshed.activeStep).toBe(2);
     expect(api.put).not.toHaveBeenCalled();
+  });
+  it('preserves the stored information view on refresh and returns to current facts on ordinary selection', async () => {
+    dynamicServer();
+    const state = await mount();
+    await call(state, 'activateScriptSelection', 'script', () => true, false, true);
+    expect(api.activate).toHaveBeenLastCalledWith('project', 'assets', 'STORYBOARD', 'PRESERVE');
+    api.activate.mockClear();
+    await call(state, 'activateScriptSelection', 'script', () => true, false, true);
+    expect(api.activate).not.toHaveBeenCalled();
+    await call(state, 'activateScriptSelection', 'script', () => true, false);
+    expect(api.activate).toHaveBeenLastCalledWith('project', 'assets', 'STORYBOARD', 'CURRENT');
   });
   it('serializes activation and prevents superseded replies from reloading an obsolete script', async () => {
     dynamicServer();
@@ -262,7 +279,12 @@ describe('ordinary customized production navigation', () => {
     expect(state.branchError).toContain('切换脚本分支失败');
     await call(state, 'selectBranch', { workflowRunId: 'other-script', nodeId: 'STORYBOARD' });
     expect(state.workflowRunId).toBe('other-script');
-    expect(api.activate).toHaveBeenLastCalledWith('project', 'other-script', 'STORYBOARD');
+    expect(api.activate).toHaveBeenLastCalledWith(
+      'project',
+      'other-script',
+      'STORYBOARD',
+      'HISTORICAL',
+    );
   });
   it('keeps exact script descendants, including multiple production forks, and rejects unrelated or corrupt ancestry', () => {
     expect(customizedProductionNavigationRun(tree, 'assets', 'script')).toBe('assets');
@@ -316,10 +338,10 @@ describe('ordinary customized production navigation', () => {
     await settle();
     await call(state, 'selectStep', 3);
     await settle();
-    expect(api.activate).toHaveBeenCalledWith('project', 'other-script', 'SHOT_PROMPT');
+    expect(api.activate).toHaveBeenCalledWith('project', 'other-script', 'SHOT_PROMPT', 'CURRENT');
     api.activate.mockClear();
     await call(state, 'selectBranch', { workflowRunId: 'script', nodeId: 'SHOT_PROMPT' });
-    expect(api.activate).toHaveBeenCalledWith('project', 'script', 'SHOT_PROMPT');
+    expect(api.activate).toHaveBeenCalledWith('project', 'script', 'SHOT_PROMPT', 'HISTORICAL');
   });
   it('ignores a late catalog response after the Run changes', async () => {
     const state = await mount();

@@ -1,3 +1,4 @@
+import type { CustomizedUpdateRequest } from '@ai-marketing/contracts';
 import { Type } from 'class-transformer';
 import {
   IsIn,
@@ -53,6 +54,13 @@ export class StartStoryboardDto extends StoryboardScopeDto {
   @IsInt() @Min(0) expectedRevision!: number;
   @IsString() @MaxLength(200) idempotencyKey!: string;
 }
+export class StartScriptUpdateDto extends StartStoryboardDto {
+  @IsUUID() scriptId!: string;
+  @IsObject() incremental!: CustomizedUpdateRequest;
+}
+export class SaveScriptUpdateDto extends StoryboardScopeDto {
+  @IsObject() script!: CustomizedStoryboardScript;
+}
 export class StoryboardDetailQueryDto {
   @IsOptional() @IsUUID() scriptId?: string;
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(10000) page = 0;
@@ -62,6 +70,7 @@ export class CreateScriptDto extends StoryboardScopeDto {
   @IsIn(['MANUAL', 'IMPORT']) origin!: 'MANUAL' | 'IMPORT';
 }
 export class EditScriptDto {
+  @IsOptional() @IsUUID() workflowRunId?: string;
   @IsIn(['begin', 'draft', 'cancel', 'save', 'discard']) action!:
     'begin' | 'draft' | 'cancel' | 'save' | 'discard';
   @IsInt() @Min(1) expectedRevision!: number;

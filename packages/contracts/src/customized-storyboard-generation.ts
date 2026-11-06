@@ -43,8 +43,17 @@ export const CUSTOMIZED_STORYBOARD_STAGES = [
 export type StoryboardStage =
   (typeof CUSTOMIZED_STORYBOARD_STAGES)[number]['id'] | TypedScriptStage;
 export function storyboardStages(
-  input: Pick<StoryboardInput, 'graphVersion' | 'routeId' | 'outputMode' | 'strategyVersions'>,
+  input: Pick<StoryboardInput, 'graphVersion' | 'routeId' | 'outputMode' | 'strategyVersions'> & {
+    incremental?: { version: 1 };
+  },
 ) {
+  if (input.incremental)
+    return CUSTOMIZED_STORYBOARD_STAGES.filter((s) =>
+      ['SNAPSHOT', 'STORY', 'REVIEW', 'SAVE'].includes(s.id),
+    ).map((s) => ({
+      ...s,
+      label: s.id === 'STORY' ? '定向修改脚本' : s.id === 'SAVE' ? '保存修改候选' : s.label,
+    }));
   return input.graphVersion === 'TYPED_CREATION_V1' && input.routeId
     ? typedScriptStages(input.routeId, input.strategyVersions?.concept)
     : CUSTOMIZED_STORYBOARD_STAGES.filter(
@@ -99,6 +108,16 @@ export type StoryboardStory = {
 /** Model output: the complete scene text is assembled once into story.content. */
 export type StoryboardScreenplayDraft = Omit<StoryboardStory, 'content'>;
 export type StoryboardInput = {
+  incremental?: {
+    version: 1;
+    scriptId: string;
+    baselineRevision: number;
+    baseline: CustomizedStoryboardScript;
+    previousBrief: CustomizedBrief;
+    fingerprint: string;
+    informationMode?: 'CURRENT';
+    reviewFeedback?: { candidate: CustomizedStoryboardScript; findings: StoryboardFinding[] };
+  };
   schemaVersion: 1;
   outputMode?: 'STORY_ONLY';
   /** Frozen per task. Absent on historical story/checkpoint executions. */
@@ -131,6 +150,7 @@ export type StoryboardStep = {
   updatedAt: string;
 };
 export type StoryboardTask = {
+  incremental?: { version: 1; scriptId: string };
   graphVersion?: NonNullable<StoryboardInput['graphVersion']>;
   routeId?: NonNullable<StoryboardInput['routeId']>;
   strategyVersions?: NonNullable<StoryboardInput['strategyVersions']>;

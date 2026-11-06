@@ -8,6 +8,9 @@ import { requestActionConfirmation } from '../../../shared/composables/action-co
 import { extractionApi } from './customized-extraction.api';
 import { createLiveNodeDetail } from './live-node-detail';
 import CustomizedInfoExtractionNodePage from './CustomizedInfoExtractionNodePage.vue';
+import CustomizedLocalUpdate from '../shared/CustomizedLocalUpdate.vue';
+import { productionApi } from '../production/production.api';
+import type { CustomizedUpdatePreview } from '@ai-marketing/contracts';
 import WorkflowExtractionFeedback from '../../../platform/workflow/components/WorkflowExtractionFeedback.vue';
 import {
   emptyCustomizedExtractionView,
@@ -122,6 +125,7 @@ async function load(showLoading = true) {
     apply(response.data);
     if (['QUEUED', 'RUNNING'].includes(response.data.task?.status ?? ''))
       void monitor(response.data.task!.id, current);
+    return response.data;
   } catch (e) {
     if (!isAbortError(e) && currentScope(current)) loadError.value = errorText(e);
   } finally {
@@ -256,7 +260,12 @@ async function cancelEdit() {
     if (currentScope(current)) view.value.saving = false;
   }
 }
-async function extract(retry = false, skipConfirm = false) {
+async function extract(
+  retry = false,
+  skipConfirm = false,
+  incremental = false,
+  expected?: CustomizedUpdatePreview,
+) {
   const current = controller;
   if (!workspace.value?.source || !(await flush())) return;
   if (
@@ -275,6 +284,17 @@ async function extract(retry = false, skipConfirm = false) {
   feedback.value = '';
   view.value.saving = true;
   try {
+    const preview = incremental
+      ? await productionApi.preview(
+          props.projectId,
+          props.workflowRunId,
+          'INFORMATION_EXTRACTION',
+          undefined,
+          current.signal,
+        )
+      : null;
+    if (expected && preview?.fingerprint !== expected.fingerprint)
+      throw new Error('来源或修改状态已变化，请重新查看局部更新');
     if (workspace.value.committed && !workspace.value.temporary) {
       const response = await extractionApi.edit(
         props.projectId,
@@ -287,6 +307,14 @@ async function extract(retry = false, skipConfirm = false) {
         `customized-extraction-intent:${props.projectId}`,
         response.data.workflowRunId,
       );
+      if (incremental)
+        sessionStorage.setItem(
+          `customized-extraction-local:${props.projectId}`,
+          JSON.stringify({
+            runId: response.data.workflowRunId,
+            sourceFingerprint: workspace.value.source.fingerprint,
+          }),
+        );
       emit('workflowRunChange');
       return;
     }
@@ -301,6 +329,9 @@ async function extract(retry = false, skipConfirm = false) {
               sourceArtifactId: source.artifactId,
               sourceRevision: source.revision,
               idempotencyKey: crypto.randomUUID(),
+              ...(preview
+                ? { incremental: { version: 1 as const, fingerprint: preview.fingerprint } }
+                : {}),
             },
             controller.signal,
           );
@@ -370,12 +401,29 @@ watch(
     selectedNode.value = null;
     detail.value = null;
     const current = controller;
-    await load();
+    const loaded = await load();
     if (!currentScope(current)) return;
     const key = `customized-extraction-intent:${props.projectId}`;
     if (sessionStorage.getItem(key) === props.workflowRunId) {
       sessionStorage.removeItem(key);
-      await extract(false, true);
+      const localKey = `customized-extraction-local:${props.projectId}`;
+      const savedLocal = sessionStorage.getItem(localKey);
+      let local = false;
+      if (savedLocal) {
+        try {
+          const intent = JSON.parse(savedLocal) as { runId: string; sourceFingerprint: string };
+          local = intent.runId === props.workflowRunId;
+          if (local && intent.sourceFingerprint !== loaded?.source?.fingerprint) {
+            feedback.value = '资料版本已变化，请重新查看局部更新范围';
+            sessionStorage.removeItem(localKey);
+            return;
+          }
+        } catch {
+          local = false;
+        }
+      }
+      sessionStorage.removeItem(localKey);
+      await extract(false, true, local);
     }
   },
   { immediate: true },
@@ -389,6 +437,14 @@ onBeforeUnmount(() => {
 defineExpose({ flushPendingEdits: flush });
 </script>
 <template>
+  <CustomizedLocalUpdate
+    v-if="workspace?.result && !loading"
+    :project-id="projectId"
+    :workflow-run-id="workflowRunId"
+    :nodes="['INFORMATION_EXTRACTION']"
+    :disabled="view.saving || ['QUEUED', 'RUNNING'].includes(view.status)"
+    @execute="extract(false, true, true, $event)"
+  />
   <WorkflowExtractionFeedback
     v-for="warning in workspace?.sourceWarnings ?? []"
     :key="warning"

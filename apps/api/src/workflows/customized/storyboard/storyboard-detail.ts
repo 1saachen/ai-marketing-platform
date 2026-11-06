@@ -15,6 +15,7 @@ import {
   type StoryboardInput,
   type StoryboardStage,
 } from '@ai-marketing/contracts';
+import { readableScriptReviewText } from './storyboard-review-text';
 
 type Row = { title: string; content: string };
 type Step = {
@@ -627,12 +628,18 @@ ${str(mapping.evidence)}`,
       }
       return result;
     };
+    const reviewText =
+      nodeId === 'REVIEW' || nodeId === 'RECHECK' || nodeId.endsWith('_REVIEW')
+        ? readableScriptReviewText
+        : (text: string) => text;
     return rows.map((r) => ({
-      title: readableObjectText(
-        prefix && prefix !== r.title ? `${str(prefix)} · ${r.title}` : r.title,
-        catalogs,
+      title: reviewText(
+        readableObjectText(
+          prefix && prefix !== r.title ? `${str(prefix)} · ${r.title}` : r.title,
+          catalogs,
+        ),
       ),
-      content: readableBrandText(readableObjectText(r.content, catalogs)),
+      content: reviewText(readableBrandText(readableObjectText(r.content, catalogs))),
     }));
   });
   const state = chosen.some((s) => s.status === 'RUNNING')

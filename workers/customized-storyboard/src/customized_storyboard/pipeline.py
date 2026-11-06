@@ -234,6 +234,10 @@ class Pipeline:
             raise
 
     async def run(self) -> None:
+        if self.input.get('incremental'):
+            from .incremental import run as run_incremental
+            await run_incremental(self)
+            return
         if self.input.get("graphVersion") == "TYPED_CREATION_V1":
             from .typed_creation import run
             await run(self)

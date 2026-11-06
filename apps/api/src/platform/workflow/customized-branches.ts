@@ -11,12 +11,27 @@ import type { WorkflowWorkingRepository } from './workflow-working.repository';
 import { importFileFormat } from '../file/import-file-validation';
 import { workflowStateHash } from './workflow-state-hash';
 import { readCustomizedExtractionResult } from './customized-inherited-extraction';
+import { setCustomizedInformationMode, sharedCustomizedBrief } from './customized-shared-brief';
+import type { CustomizedInformationMode } from '@ai-marketing/contracts';
 
 export const customizedScope = (projectId: string) => ({
   projectId,
   workflow: 'CUSTOMIZED' as const,
   workflowSpace: 'CUSTOMIZED_PROJECT' as const,
 });
+/** Upstream edits may inherit a complete script without a script fork marker. */
+export function customizedPathScriptId(
+  run: { forkScriptId?: string | null },
+  artifacts: { artifactKey: string; availability?: string }[],
+): string | null {
+  if (run.forkScriptId) return run.forkScriptId;
+  const keys = artifacts.filter(
+    (a) =>
+      a.artifactKey.startsWith('customized-script:') &&
+      (!a.availability || a.availability === 'AVAILABLE'),
+  );
+  return keys.length === 1 ? keys[0]!.artifactKey.slice('customized-script:'.length) || null : null;
+}
 export const customizedConflict = (message: string): never => {
   throw new ApiHttpException(message, HttpStatus.CONFLICT, 'CONFLICT');
 };
@@ -81,10 +96,33 @@ export async function beginCustomizedEdit(
   )
     return customizedConflict('信息提炼仍在执行，请等待完成后编辑');
   const key = nodeId === 'SOURCE_IMPORT' ? CUSTOMIZED_SOURCE_ARTIFACT_KEY : 'customized-brief';
-  const artifacts = await tx.workingArtifact.findMany({
+  let artifacts = await tx.workingArtifact.findMany({
     where: { projectId, workflowRunId: runId },
     include: { dependencies: true, files: true },
   });
+  const shared =
+    nodeId === 'INFORMATION_EXTRACTION'
+      ? await sharedCustomizedBrief(
+          tx,
+          projectId,
+          runId,
+          artifacts.find((a) => a.artifactKey === 'customized-brief'),
+        )
+      : null;
+  if (shared && shared.workflowRunId !== runId) {
+    const inherited = await tx.workingArtifact.findMany({
+      where: {
+        projectId,
+        workflowRunId: shared.workflowRunId,
+        artifactKey: { in: ['customized-brief', CUSTOMIZED_SOURCE_ARTIFACT_KEY] },
+      },
+      include: { dependencies: true, files: true },
+    });
+    artifacts = [
+      ...artifacts.filter((a) => !inherited.some((b) => b.artifactKey === a.artifactKey)),
+      ...inherited,
+    ];
+  }
   const baseline = artifacts.find((a) => a.artifactKey === key);
   if (!baseline) return active;
   const child = await tx.workflowRun.create({
@@ -92,6 +130,7 @@ export async function beginCustomizedEdit(
       ...customizedScope(projectId),
       activeKey: null,
       parentWorkflowRunId: runId,
+      forkScriptId: customizedPathScriptId(active, artifacts),
       forkNodeId: nodeId,
       currentNodeId: nodeId,
       editSessionNodeId: nodeId,
@@ -104,6 +143,7 @@ export async function beginCustomizedEdit(
   });
   const source = artifacts.find((a) => a.artifactKey === CUSTOMIZED_SOURCE_ARTIFACT_KEY);
   for (const state of states) {
+    if (shared && shared.workflowRunId !== runId && state.nodeId === 'SOURCE_IMPORT') continue;
     if (nodeId === 'SOURCE_IMPORT' && source && state.nodeId === 'SOURCE_IMPORT') continue;
     const { id: _id, createdAt: _created, updatedAt: _updated, ...data } = state;
     await tx.workflowNodeState.create({
@@ -112,7 +152,12 @@ export async function beginCustomizedEdit(
   }
   // Script branches can have confirmed upstream copies without a page draft.
   // Seed only on explicit edit; a read/navigation must not manufacture draft revisions.
-  if (source && (nodeId === 'SOURCE_IMPORT' || !states.some((s) => s.nodeId === 'SOURCE_IMPORT'))) {
+  if (
+    source &&
+    (nodeId === 'SOURCE_IMPORT' ||
+      (shared && shared.workflowRunId !== runId) ||
+      !states.some((s) => s.nodeId === 'SOURCE_IMPORT'))
+  ) {
     const state = restoreCustomizedImportDraft(source.payload);
     await tx.workflowNodeState.create({
       data: {
@@ -179,7 +224,12 @@ export async function beginCustomizedEdit(
         payload: normalizeCustomizedImportDraft(source.payload),
       })
     : undefined;
-  const resolved = await readCustomizedExtractionResult(tx, projectId, runId, sourceFingerprint);
+  const resolved = await readCustomizedExtractionResult(
+    tx,
+    projectId,
+    shared?.workflowRunId ?? runId,
+    sourceFingerprint,
+  );
   const result = resolved?.record;
   if (result) {
     const { id: _id, createdAt: _created, updatedAt: _updated, ...data } = result;
@@ -429,6 +479,7 @@ export async function activateCustomizedBranch(
   projectId: string,
   runId: string,
   nodeId: string,
+  informationMode?: CustomizedInformationMode,
 ) {
   await lockCustomizedProject(tx, projectId);
   const active = await activeRun(tx, projectId);
@@ -442,6 +493,7 @@ export async function activateCustomizedBranch(
   });
   if (!target || (target.parentWorkflowRunId && !target.branchPublishedAt))
     return customizedConflict('所选版本不可用，请重新加载版本树');
+  if (informationMode) await setCustomizedInformationMode(tx, projectId, runId, informationMode);
   if (active && active.id !== target.id)
     await tx.workflowRun.update({
       where: { id: active.id },

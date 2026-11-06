@@ -11,6 +11,7 @@ import {
   saveCustomizedVersion,
   activateCustomizedBranch,
   assertCustomizedImportEditable,
+  customizedPathScriptId,
 } from './customized-branches';
 import {
   workingArtifactContentHash,
@@ -185,6 +186,24 @@ function fixture() {
 }
 
 describe('customized source version lifecycle', () => {
+  it('resolves only one available script in the current path and rejects ambiguous inheritance', () => {
+    expect(customizedPathScriptId({}, [{ artifactKey: 'customized-script:chosen' }])).toBe(
+      'chosen',
+    );
+    expect(customizedPathScriptId({}, [])).toBeNull();
+    expect(
+      customizedPathScriptId({}, [
+        { artifactKey: 'customized-script:a' },
+        { artifactKey: 'customized-script:b' },
+      ]),
+    ).toBeNull();
+    expect(
+      customizedPathScriptId({}, [
+        { artifactKey: 'customized-script:a', availability: 'UNAVAILABLE' },
+      ]),
+    ).toBeNull();
+    expect(customizedPathScriptId({ forkScriptId: 'chosen' }, [])).toBe('chosen');
+  });
   it('guards uploads by project, active Run and isolated edit session', async () => {
     const f = fixture();
     await expect(assertCustomizedImportEditable(f.tx, 'p', 'root')).resolves.toMatchObject({

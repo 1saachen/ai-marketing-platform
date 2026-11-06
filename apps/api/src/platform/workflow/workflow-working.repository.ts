@@ -9,12 +9,14 @@ import {
   customizedConflict,
 } from './customized-branches';
 import { CUSTOMIZED_SOURCE_ARTIFACT_KEY } from '@ai-marketing/contracts';
+import { sharedCustomizedBrief } from './customized-shared-brief';
 import {
   EFFECT_WORKFLOW_BRANCH_NODES,
   EFFECT_WORKFLOW_EDITABLE_NODES,
   EFFECT_TEMPLATE_CURRENT_PATH_NODE_ID,
 } from '@ai-marketing/contracts';
 import type {
+  CustomizedInformationMode,
   EffectWorkflowBranchNodeId,
   EffectWorkflowEditableNodeId,
   AssetDirectory,
@@ -167,6 +169,7 @@ const semanticMetadata = (value: unknown): unknown => {
   delete metadata.legacyArtifactIds;
   delete metadata.branchSource;
   delete metadata.branchSourceOwner;
+  delete metadata.sharedBriefSource;
   return metadata;
 };
 
@@ -549,8 +552,15 @@ export class WorkflowWorkingRepository {
       saveCustomizedVersion(tx, this, projectId, runId, revision),
     );
   }
-  activateCustomizedRunBranch(projectId: string, runId: string, nodeId: string) {
-    return this.prisma.$transaction((tx) => activateCustomizedBranch(tx, projectId, runId, nodeId));
+  activateCustomizedRunBranch(
+    projectId: string,
+    runId: string,
+    nodeId: string,
+    informationMode?: CustomizedInformationMode,
+  ) {
+    return this.prisma.$transaction((tx) =>
+      activateCustomizedBranch(tx, projectId, runId, nodeId, informationMode),
+    );
   }
 
   /**
@@ -2113,6 +2123,30 @@ export class WorkflowWorkingRepository {
             ),
           )
           .find(Boolean);
+        if (
+          current?.workflow === 'CUSTOMIZED' &&
+          current.workflowSpace === 'CUSTOMIZED_PROJECT' &&
+          dependency.sourceKey === 'customized-brief' &&
+          dependency.sourceArtifactId &&
+          source?.id !== dependency.sourceArtifactId
+        ) {
+          const head = await sharedCustomizedBrief(
+            transaction,
+            projectId,
+            workflowRunId,
+            undefined,
+            true,
+          );
+          if (
+            !head ||
+            head.id !== dependency.sourceArtifactId ||
+            head.revision !== dependency.sourceRevision ||
+            head.contentHash !== dependency.sourceHash ||
+            head.freshness !== 'CURRENT'
+          )
+            throw new Error('WORKING_ARTIFACT_DEPENDENCY_CONFLICT');
+          continue;
+        }
         if (
           effectRun &&
           nodeId === 'TEMPLATE_MIX' &&

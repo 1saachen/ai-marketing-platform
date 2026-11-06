@@ -8,6 +8,25 @@ import {
   type ProductionDocument,
   type ProductionInput,
 } from '@ai-marketing/contracts';
+import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
+export function assetImageBasis(a: ProductionAsset) {
+  return workflowStateHash({
+    kind: a.kind,
+    name: a.name,
+    description: a.description,
+    knownFacts: a.knownFacts,
+    designNotes: a.designNotes,
+    imageRequirements: a.imageRequirements ?? '',
+    preparation: a.preparation
+      ? {
+          treatment: a.preparation.treatment,
+          parentId: a.preparation.parentId,
+          details: a.preparation.details,
+          images: a.preparation.images,
+        }
+      : null,
+  });
+}
 
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 export function recordAssetEdits(
@@ -40,6 +59,7 @@ export function mergePreparedAssets(
     const merged = {
       ...a,
       ...(old.image !== undefined ? { image: old.image } : {}),
+      ...(old.imageBasis ? { imageBasis: old.imageBasis } : {}),
       manualFields: protectedAssetFields(old),
     };
     for (const field of ASSET_EDITABLE_FIELDS) {

@@ -1,4 +1,9 @@
 import { createAssetBranch } from './production-asset-branch';
+import { updatePreview } from './update-preview';
+import { assetUpdateScope, validateAssetUpdateScope } from './asset-update-scope';
+import { sharedCustomizedBrief } from '../../../platform/workflow/customized-shared-brief';
+import { rebindUnchanged, reconcileUnchangedMedia } from './unchanged-media';
+import type { CustomizedUpdateNode, CustomizedUpdateRequest } from '@ai-marketing/contracts';
 import { applyImageOnlyPlanRebase } from './image-only-plan-rebase';
 import { beginPromptMechanicalRecovery } from './prompt-mechanical-recovery';
 import {
@@ -25,6 +30,7 @@ import {
   recordAssetEdits,
   mergePreparedAssets,
   validatePreparedAssets,
+  assetImageBasis,
 } from './asset-preparation.domain';
 import { Inject, Injectable } from '@nestjs/common';
 import {
@@ -51,6 +57,7 @@ import {
   isProductionPrompt,
   isCustomizedImageSettings,
   customizedAssetImageSelectionIssue,
+  resolveCustomizedAssetImageSource,
   isCustomizedVideoRenderSettings,
   type CustomizedVideoRenderSettings,
   type CustomizedVideoResult,
@@ -78,6 +85,7 @@ import {
   customizedScope,
   lockCustomizedProject,
   customizedConflict,
+  customizedPathScriptId,
 } from '../../../platform/workflow/customized-branches';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
 import { ApiHttpException } from '../../../common/api-http-exception';
@@ -95,12 +103,25 @@ const snapshot = (t: CustomizedProductionTask) => t.inputSnapshot as unknown as 
 export const presentProductionTask = (t: CustomizedProductionTask): ProductionTask => {
   const steps = t.steps as unknown as ProductionStep[];
   const saved = t.output as Record<string, unknown> | null;
+  const updateScope = assetUpdateScope(snapshot(t), t.output);
   return {
     id: t.id,
     operation: t.operation as ProductionOperation,
     shotId: t.shotId,
     status: t.status as ProductionTask['status'],
     errorMessage: t.errorMessage,
+    ...(updateScope ? { assetUpdateScope: updateScope } : {}),
+    ...(snapshot(t).incremental
+      ? {
+          incremental: {
+            version: 1 as const,
+            targetIds: snapshot(t).incremental!.targetIds,
+            ...(snapshot(t).incremental!.batchKey
+              ? { batchKey: snapshot(t).incremental!.batchKey! }
+              : {}),
+          },
+        }
+      : {}),
     ...(typeof saved?.publishedWorkflowRunId === 'string'
       ? { publishedWorkflowRunId: saved.publishedWorkflowRunId }
       : {}),
@@ -221,18 +242,38 @@ export class ProductionRepository {
     const run = await tx.workflowRun.findFirst({
       where: { ...customizedScope(p), id: r, status: { in: ['ACTIVE', 'PAUSED'] } },
     });
-    if (!run || !run.forkScriptId) return missing();
+    if (!run) return missing();
     if (
       run.editSessionNodeId ||
       (await tx.project.count({ where: { id: p, deletionState: { not: null } } }))
     )
       return customizedConflict('项目正在编辑或删除');
-    return run;
+    const scriptId = customizedPathScriptId(
+      run,
+      run.forkScriptId
+        ? []
+        : await tx.workingArtifact.findMany({
+            where: {
+              projectId: p,
+              workflowRunId: r,
+              artifactKey: { startsWith: 'customized-script:' },
+              availability: 'AVAILABLE',
+            },
+            select: { artifactKey: true },
+          }),
+    );
+    if (!scriptId) return missing();
+    return { ...run, forkScriptId: scriptId };
   }
-  private artifacts(tx: Tx, p: string, r: string) {
-    return tx.workingArtifact.findMany({
+  private async artifacts(tx: Tx, p: string, r: string) {
+    const rows = await tx.workingArtifact.findMany({
       where: { projectId: p, workflowRunId: r, availability: 'AVAILABLE' },
     });
+    const local = rows.find((a) => a.artifactKey === 'customized-brief');
+    const shared = await sharedCustomizedBrief(tx, p, r, local ?? null);
+    if (shared && shared.id !== local?.id)
+      return [...rows.filter((a) => a.artifactKey !== 'customized-brief'), shared];
+    return rows;
   }
   private async state(tx: Tx, p: string, r: string) {
     return tx.workflowNodeState.findUnique({
@@ -317,6 +358,25 @@ export class ProductionRepository {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: 30,
     });
+    const activeTasks = await tx.customizedProductionTask.findMany({
+      where: { projectId: p, workflowRunId: r, status: { in: ['QUEUED', 'RUNNING'] } },
+    });
+    for (const task of activeTasks) if (!tasks.some((t) => t.id === task.id)) tasks.push(task);
+    const latestGroup = tasks.find((t) => snapshot(t).incremental?.batchKey);
+    if (latestGroup) {
+      const group = await tx.customizedProductionTask.findMany({
+        where: {
+          projectId: p,
+          workflowRunId: r,
+          inputSnapshot: {
+            path: ['incremental', 'batchKey'],
+            equals: snapshot(latestGroup).incremental!.batchKey!,
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      for (const task of group) if (!tasks.some((t) => t.id === task.id)) tasks.push(task);
+    }
     // Image iteration must not hide the extraction behind the sole workflow entry.
     if (!tasks.some((t) => t.operation === 'ASSETS')) {
       const head = await tx.customizedProductionTask.findFirst({
@@ -343,13 +403,26 @@ export class ProductionRepository {
           },
         })
       : [];
+    const brief = artifacts.find((a) => a.artifactKey === 'customized-brief');
+    const scriptDependencies =
+      brief && brief.workflowRunId !== r
+        ? await tx.workingArtifactDependency.findMany({
+            where: { projectId: p, dependentArtifactId: script.id, sourceKey: 'customized-brief' },
+          })
+        : null;
     return {
       brandImageReferences: brandVersions
         .filter((v) => v.storageKey && v.sizeBytes <= CUSTOMIZED_IMAGE_REFERENCE_MAX_BYTES)
         .map((v) => ({ assetId: v.assetId, version: v.version, name: v.originalFileName })),
       script: script.payload,
       source: { artifactId: script.id, revision: script.revision, fingerprint: script.contentHash },
-      sourceReady: script.freshness === 'CURRENT',
+      sourceReady:
+        script.freshness === 'CURRENT' &&
+        (!scriptDependencies ||
+          scriptDependencies.some((d) => d.sourceHash === brief?.contentHash)),
+      imageReviewObjectIds: document.assets
+        .filter((a) => a.image && a.imageBasis && a.imageBasis !== assetImageBasis(a))
+        .map((a) => a.id),
       document,
       confirmedDocument,
       draftRevision: state?.revision ?? 0,
@@ -392,6 +465,122 @@ export class ProductionRepository {
   }
   workspace(p: string, r: string) {
     return this.db.$transaction((tx) => this.read(tx, p, r), { timeout: 15000 });
+  }
+  preview(p: string, r: string, node: CustomizedUpdateNode, targetId: string | null = null) {
+    return this.db.$transaction((tx) => updatePreview(tx, p, r, node, targetId), {
+      timeout: 15000,
+    });
+  }
+  identicalObjectImage(p: string, r: string, objectId: string, sha256: string) {
+    return this.db.$transaction(async (tx) => {
+      const w = await this.read(tx, p, r),
+        owner = resolveCustomizedAssetImageSource(w.document.assets, objectId);
+      if (!owner.ok || owner.source.id !== objectId) invalid('请在当前资产所属主体中替换图片');
+      if (!owner.ok || !owner.source.image) return null;
+      const version = await tx.assetVersion.findFirst({
+        where: {
+          projectId: p,
+          assetId: owner.source.image.assetId,
+          version: owner.source.image.version,
+          status: { not: 'UNAVAILABLE' },
+          asset: {
+            archivedAt: null,
+            storageWorkflow: 'CUSTOMIZED',
+            workflowSpace: 'CUSTOMIZED_PROJECT',
+          },
+        },
+      });
+      if (!version?.storageKey) return null;
+      const file = await tx.fileObject.findFirst({
+        where: { projectId: p, storageKey: version.storageKey, sha256, status: 'AVAILABLE' },
+      });
+      return file ? owner.source.image : null;
+    });
+  }
+  startUpdates(
+    p: string,
+    r: string,
+    node: 'ASSETS' | 'SHOTS' | 'PROMPT' | 'RENDER',
+    request: CustomizedUpdateRequest,
+    key: string,
+    models: Snapshot['models'],
+    renderModels: Record<string, string>,
+  ) {
+    return this.db.$transaction(
+      async (tx) => {
+        await lockCustomizedProject(tx, p);
+        const existing = await tx.customizedProductionTask.findMany({
+          where: { projectId: p, workflowRunId: r, idempotencyKey: { startsWith: key + ':' } },
+        });
+        if (existing.length) {
+          if (
+            existing.some(
+              (t) =>
+                t.operation !== node ||
+                snapshot(t).incremental?.requestFingerprint !== request.fingerprint,
+            )
+          )
+            return customizedConflict('请求标识已用于其他操作');
+          return existing.map(presentProductionTask);
+        }
+        const preview = await updatePreview(tx, p, r, node);
+        if (request.version !== 1 || preview.fingerprint !== request.fingerprint)
+          return customizedConflict('更新范围已变化，请重新查看局部更新');
+        if (preview.blockers.length || !preview.items.length)
+          return customizedConflict(preview.blockers.join('；') || '当前内容无需更新');
+        const initial = await this.read(tx, p, r);
+        const targets = ['ASSETS', 'SHOTS'].includes(node)
+          ? [null]
+          : preview.items.map((i) => i.id);
+        const tasks: ProductionTask[] = [];
+        for (const target of targets) {
+          const current = await this.read(tx, p, r);
+          const scoped = await updatePreview(tx, p, r, node, target);
+          const settings =
+            node === 'RENDER'
+              ? initial.videoSettings?.find((v) => v.clipId === target)?.settings
+              : undefined;
+          if (node === 'RENDER' && (!settings || !renderModels[settings.capabilityKey]))
+            return invalid('请先为待更新分镜保存视频模型、画幅和分辨率');
+          const task = await this.start(
+            p,
+            r,
+            current.draftRevision,
+            node,
+            `${key}:${workflowStateHash(target ?? node)}`,
+            null,
+            models,
+            null,
+            undefined,
+            {
+              version: 2,
+              ...(target ? { target: { kind: 'CLIP' as const, id: target } } : {}),
+              ...(settings
+                ? { render: { settings, model: renderModels[settings.capabilityKey]! } }
+                : {}),
+            },
+            { version: 1, fingerprint: scoped.fingerprint },
+            tx,
+          );
+          const stored = await tx.customizedProductionTask.findUniqueOrThrow({
+            where: { id: task.id },
+          });
+          const input = snapshot(stored);
+          input.incremental = {
+            ...input.incremental!,
+            batchKey: key,
+            requestFingerprint: request.fingerprint,
+          };
+          await tx.customizedProductionTask.update({
+            where: { id: task.id },
+            data: { inputSnapshot: json(input) },
+          });
+          tasks.push({ ...task, incremental: { ...task.incremental!, batchKey: key } });
+        }
+        return tasks;
+      },
+      { timeout: 30000 },
+    );
   }
   saveVideoSettings(
     p: string,
@@ -515,6 +704,18 @@ export class ProductionRepository {
     payload: unknown,
     sources: WorkingArtifact[],
   ) {
+    const previous = await tx.workingArtifact.findFirst({
+      where: { projectId: p, workflowRunId: r, artifactKey: key },
+    });
+    if (
+      previous &&
+      previous.name === name.slice(0, 120) &&
+      previous.kind === 'STRUCTURED' &&
+      workflowStateHash(previous.payload) === workflowStateHash(payload)
+    ) {
+      const record = await rebindUnchanged(tx, p, r, previous.id, sources);
+      return [{ record, unchanged: true }];
+    }
     return this.working.commitValidatedArtifactsInTransaction(tx, p, r, node, [
       {
         artifactKey: key,
@@ -529,8 +730,14 @@ export class ProductionRepository {
       },
     ]);
   }
-  private async commitAssets(tx: Tx, p: string, r: string, value: ProductionDocument) {
-    const artifacts = await this.artifacts(tx, p, r);
+  private async commitAssets(
+    tx: Tx,
+    p: string,
+    r: string,
+    value: ProductionDocument,
+    frozen?: WorkingArtifact[],
+  ) {
+    const artifacts = frozen ?? (await this.artifacts(tx, p, r));
     const run = await this.scope(tx, p, r);
     const story = artifacts.find((a) => a.artifactKey === `customized-script:${run.forkScriptId}`)!;
     const brief = artifacts.find((a) => a.artifactKey === 'customized-brief');
@@ -594,6 +801,25 @@ export class ProductionRepository {
           section,
         );
         if (!isProductionDocument(value)) invalid('镜头引用的资产已发生变化');
+        if (section === 'ASSETS')
+          value.assets = value.assets.map((a) => {
+            const old = w.document.assets.find((v) => v.id === a.id);
+            if (!a.image) {
+              const { imageBasis: _basis, ...withoutBasis } = a;
+              return withoutBasis;
+            }
+            const adopted =
+              workflowStateHash(a.image) !== workflowStateHash(old?.image ?? null) ||
+              (!a.imageBasis && !!old?.imageBasis);
+            return {
+              ...a,
+              ...(adopted
+                ? { imageBasis: assetImageBasis(a) }
+                : old?.imageBasis
+                  ? { imageBasis: old.imageBasis }
+                  : {}),
+            };
+          });
         if (section === 'SHOTS' && isVideoDocument(value)) {
           const current = await this.artifacts(tx, p, r);
           if (
@@ -632,15 +858,21 @@ export class ProductionRepository {
                 projectId: p,
                 assetId: a.image.assetId,
                 version: a.image.version,
+                status: { not: 'UNAVAILABLE' },
                 mimeType: { startsWith: 'image/' },
                 asset: {
                   projectId: p,
                   storageWorkflow: 'CUSTOMIZED',
                   workflowSpace: 'CUSTOMIZED_PROJECT',
+                  archivedAt: null,
                 },
               },
             });
-            if (!exists) invalid('图片版本不存在或不属于当前项目');
+            if (!exists?.storageKey || exists.sizeBytes <= 0)
+              invalid('图片版本不存在、不可用或不属于当前项目');
+            const owner = resolveCustomizedAssetImageSource(value.assets, a.id);
+            if (!owner.ok || owner.source.id !== a.id)
+              invalid('附属对象请替换所属人物或场景的图片');
           }
         let state = await this.writeDraft(tx, p, r, value, w.source.revision, revision);
         if (confirm) {
@@ -651,6 +883,7 @@ export class ProductionRepository {
             const rebased = await applyImageOnlyPlanRebase(tx, this.working, p, r, value);
             if (rebased)
               state = await this.writeDraft(tx, p, r, rebased, w.source.revision, state.revision);
+            if (rebased) await reconcileUnchangedMedia(tx, p, r, rebased, artifacts);
           } else {
             if (
               !w.assetsConfirmed ||
@@ -748,6 +981,7 @@ export class ProductionRepository {
               isVideoDocument(value) ? value : { shots: value.shots },
               [story],
             );
+            await reconcileUnchangedMedia(tx, p, r, value, artifacts);
           }
         }
         return { revision: state.revision };
@@ -882,6 +1116,8 @@ export class ProductionRepository {
       target?: { kind: 'CLIP'; id: string };
       render?: { settings: CustomizedVideoRenderSettings; model: string };
     },
+    incremental?: CustomizedUpdateRequest,
+    transaction?: Tx,
   ) {
     if (
       videoSettings?.durationPolicy !== undefined &&
@@ -908,232 +1144,257 @@ export class ProductionRepository {
           })),
         })),
       };
-    return this.db.$transaction(
-      async (tx) => {
-        await lockCustomizedProject(tx, p);
-        let w = await this.read(tx, p, r);
-        const previous = await tx.customizedProductionTask.findUnique({
-          where: { projectId_idempotencyKey: { projectId: p, idempotencyKey: key } },
-        });
-        if (previous) {
-          if (
-            previous.workflowRunId !== r ||
-            previous.operation !== operation ||
-            previous.shotId !== shotId ||
-            workflowStateHash(snapshot(previous).target ?? null) !==
-              workflowStateHash(videoSettings?.target ?? null) ||
-            workflowStateHash(snapshot(previous).videoRender?.settings ?? null) !==
-              workflowStateHash(videoSettings?.render?.settings ?? null) ||
-            workflowStateHash(snapshot(previous).imageSettings ?? null) !==
-              workflowStateHash(imageSettings ?? null) ||
-            (snapshot(previous).targetAssetId ?? null) !== targetAssetId
-          )
-            return customizedConflict('请求标识已用于其他操作');
-          return presentProductionTask(previous);
-        }
-        if (revision !== w.draftRevision || !w.sourceReady)
-          return customizedConflict('创作依据已变化，请重新加载');
-        const active = await this.hasTaskConflict(tx, p, r, {
-          operation,
-          target: videoSettings?.target,
-        });
-        if (active) return customizedConflict('已有制作任务执行中，请等待完成');
-        if (operation === 'PROMPT' || operation === 'RENDER') {
-          const rebased = await applyImageOnlyPlanRebase(tx, this.working, p, r, w.document);
-          if (rebased) {
-            const state = await this.writeDraft(tx, p, r, rebased, w.source.revision, revision);
-            revision = state.revision;
-            w = { ...w, document: rebased, draftRevision: revision };
-          }
-        }
-        const artifacts = await this.artifacts(tx, p, r);
-        const source = [artifacts.find((a) => a.id === w.source.artifactId)!];
+    const perform = async (tx: Tx) => {
+      await lockCustomizedProject(tx, p);
+      let w = await this.read(tx, p, r);
+      const previous = await tx.customizedProductionTask.findUnique({
+        where: { projectId_idempotencyKey: { projectId: p, idempotencyKey: key } },
+      });
+      if (previous) {
         if (
-          targetAssetId &&
-          (operation !== 'ASSETS' || !w.document.assets.some((a) => a.id === targetAssetId))
+          previous.workflowRunId !== r ||
+          previous.operation !== operation ||
+          previous.shotId !== shotId ||
+          workflowStateHash(snapshot(previous).target ?? null) !==
+            workflowStateHash(videoSettings?.target ?? null) ||
+          workflowStateHash(snapshot(previous).videoRender?.settings ?? null) !==
+            workflowStateHash(videoSettings?.render?.settings ?? null) ||
+          workflowStateHash(snapshot(previous).imageSettings ?? null) !==
+            workflowStateHash(imageSettings ?? null) ||
+          (snapshot(previous).targetAssetId ?? null) !== targetAssetId
         )
-          invalid('选定资产不存在');
-        const brief = artifacts.find((a) => a.artifactKey === 'customized-brief');
-        if (operation === 'ASSETS') {
-          if (!brief || brief.freshness !== 'CURRENT')
-            return customizedConflict('信息卡已变化，请先确认创作依据');
-          source.push(brief);
+          return customizedConflict('请求标识已用于其他操作');
+        return presentProductionTask(previous);
+      }
+      if (revision !== w.draftRevision || !w.sourceReady)
+        return customizedConflict('创作依据已变化，请重新加载');
+      let updateTargets: string[] = [];
+      if (incremental) {
+        if (
+          incremental.version !== 1 ||
+          !['ASSETS', 'SHOTS', 'PROMPT', 'RENDER'].includes(operation)
+        )
+          invalid('局部更新类型不正确');
+        const preview = await updatePreview(
+          tx,
+          p,
+          r,
+          operation as CustomizedUpdateNode,
+          videoSettings?.target?.id ?? null,
+        );
+        if (preview.fingerprint !== incremental.fingerprint)
+          return customizedConflict('更新范围已变化，请重新查看局部更新');
+        if (preview.blockers.length) return customizedConflict(preview.blockers.join('；'));
+        if (!preview.items.length) return customizedConflict('当前内容无需更新');
+        updateTargets = preview.items.map((i) => i.id);
+        if (workflowStateHash(w.document.assets) !== workflowStateHash(w.confirmedDocument.assets))
+          return customizedConflict('请先保存或取消资产修改');
+      }
+      const active = await this.hasTaskConflict(tx, p, r, {
+        operation,
+        target: videoSettings?.target,
+      });
+      if (active) return customizedConflict('已有制作任务执行中，请等待完成');
+      if (operation === 'PROMPT' || operation === 'RENDER') {
+        const rebased = await applyImageOnlyPlanRebase(tx, this.working, p, r, w.document);
+        if (rebased) {
+          const state = await this.writeDraft(tx, p, r, rebased, w.source.revision, revision);
+          revision = state.revision;
+          w = { ...w, document: rebased, draftRevision: revision };
         }
-        if (operation !== 'ASSETS') {
-          const catalog = artifacts.find(
-            (a) => a.artifactKey === 'customized-asset-catalog' && a.freshness === 'CURRENT',
-          );
-          if (
-            !catalog ||
-            workflowStateHash(catalog.payload) !== workflowStateHash({ assets: w.document.assets })
-          )
-            return customizedConflict('请先保存并确认资产目录');
-          source.push(catalog);
-        }
-        const render =
-          operation === 'RENDER'
-            ? await freezeVideoRender(
-                tx,
-                p,
-                w,
-                artifacts,
-                videoSettings?.target?.id ?? '',
-                videoSettings?.render?.settings as CustomizedVideoRenderSettings,
-                videoSettings?.render?.model ?? '',
-              )
-            : undefined;
-        if (render) source.push(...render.sources);
-        if (operation === 'IMAGE') {
-          if (
-            !isCustomizedImageSettings(imageSettings) ||
-            imageSettings.assetIds.some(
-              (id) => !w.document.assets.some((a) => a.id === id && a.description.trim()),
+      }
+      const artifacts = await this.artifacts(tx, p, r);
+      const source = [artifacts.find((a) => a.id === w.source.artifactId)!];
+      if (
+        targetAssetId &&
+        (operation !== 'ASSETS' || !w.document.assets.some((a) => a.id === targetAssetId))
+      )
+        invalid('选定资产不存在');
+      const brief = artifacts.find((a) => a.artifactKey === 'customized-brief');
+      if (operation === 'ASSETS') {
+        if (!brief || brief.freshness !== 'CURRENT')
+          return customizedConflict('信息卡已变化，请先确认创作依据');
+        source.push(brief);
+      }
+      if (operation !== 'ASSETS') {
+        const catalog = artifacts.find(
+          (a) => a.artifactKey === 'customized-asset-catalog' && a.freshness === 'CURRENT',
+        );
+        if (
+          !catalog ||
+          workflowStateHash(catalog.payload) !== workflowStateHash({ assets: w.document.assets })
+        )
+          return customizedConflict('请先保存并确认资产目录');
+        source.push(catalog);
+      }
+      const render =
+        operation === 'RENDER'
+          ? await freezeVideoRender(
+              tx,
+              p,
+              w,
+              artifacts,
+              videoSettings?.target?.id ?? '',
+              videoSettings?.render?.settings as CustomizedVideoRenderSettings,
+              videoSettings?.render?.model ?? '',
             )
+          : undefined;
+      if (render) source.push(...render.sources);
+      if (operation === 'IMAGE') {
+        if (
+          !isCustomizedImageSettings(imageSettings) ||
+          imageSettings.assetIds.some(
+            (id) => !w.document.assets.some((a) => a.id === id && a.description.trim()),
           )
-            invalid('请选择有效的生图模型、尺寸和已填写公共形象的资产');
-          const selectionIssue = customizedAssetImageSelectionIssue(
-            w.document.assets,
-            imageSettings!.assetIds,
-          );
-          if (selectionIssue) invalid(selectionIssue);
-          if (!brief || brief.freshness !== 'CURRENT')
-            return customizedConflict('品牌信息已变化，请先确认创作依据');
-          source.push(brief);
-          for (const reference of imageSettings!.inputs?.flatMap((i) => i.references) ?? []) {
-            const file = await tx.assetVersion.findFirst({
-              where: {
-                projectId: p,
-                assetId: reference.assetId,
-                version: reference.version,
-                status: { not: 'UNAVAILABLE' },
-                mimeType: { in: ['image/png', 'image/jpeg', 'image/webp'] },
-                asset: {
-                  storageWorkflow: 'CUSTOMIZED',
-                  workflowSpace: 'CUSTOMIZED_PROJECT',
-                  archivedAt: null,
-                },
+        )
+          invalid('请选择有效的生图模型、尺寸和已填写公共形象的资产');
+        const selectionIssue = customizedAssetImageSelectionIssue(
+          w.document.assets,
+          imageSettings!.assetIds,
+        );
+        if (selectionIssue) invalid(selectionIssue);
+        if (!brief || brief.freshness !== 'CURRENT')
+          return customizedConflict('品牌信息已变化，请先确认创作依据');
+        source.push(brief);
+        for (const reference of imageSettings!.inputs?.flatMap((i) => i.references) ?? []) {
+          const file = await tx.assetVersion.findFirst({
+            where: {
+              projectId: p,
+              assetId: reference.assetId,
+              version: reference.version,
+              status: { not: 'UNAVAILABLE' },
+              mimeType: { in: ['image/png', 'image/jpeg', 'image/webp'] },
+              asset: {
+                storageWorkflow: 'CUSTOMIZED',
+                workflowSpace: 'CUSTOMIZED_PROJECT',
+                archivedAt: null,
               },
-            });
-            if (
-              !file?.storageKey ||
-              file.sizeBytes <= 0 ||
-              file.sizeBytes > CUSTOMIZED_IMAGE_REFERENCE_MAX_BYTES
-            )
-              invalid('参考图片版本不可用，请移除后重新选择');
-          }
-        } else if (imageSettings) invalid('此任务不接受图片设置');
-        const videoV2 =
-          (operation === 'SHOTS' && videoSettings?.version === 2) ||
-          (operation === 'PROMPT' && isVideoDocument(w.document));
-        if (videoV2) {
-          if (!brief || brief.freshness !== 'CURRENT')
-            return customizedConflict('请先确认当前信息卡');
-          source.push(brief);
-        }
-        if (operation === 'PROMPT' && videoV2) {
-          if (shotId || videoSettings?.target?.kind !== 'CLIP' || !isVideoDocument(w.document))
-            invalid('请选择当前视频片段');
-          const targetId = videoSettings!.target!.id;
-          const a = artifacts.find(
-            (a) =>
-              a.artifactKey === `customized-video-clip:${targetId}` && a.freshness === 'CURRENT',
-          );
+            },
+          });
           if (
-            !a ||
-            workflowStateHash(a.payload) !==
-              workflowStateHash(clipPayload(w.document as ProductionVideoDocument, targetId))
+            !file?.storageKey ||
+            file.sizeBytes <= 0 ||
+            file.sizeBytes > CUSTOMIZED_IMAGE_REFERENCE_MAX_BYTES
           )
-            return customizedConflict('请先保存当前片段和分镜');
-          source.push(a);
-        } else if (operation === 'PROMPT') {
-          if (videoSettings?.target) invalid('旧版镜头不接受片段目标');
-          const shot = productionShots(w.document).find((s) => s.id === shotId),
-            a = artifacts.find(
-              (a) => a.artifactKey === `customized-shot:${shotId}` && a.freshness === 'CURRENT',
-            );
-          if (!shot || !a || workflowStateHash(a.payload) !== workflowStateHash(shot))
-            return customizedConflict('请先保存当前镜头及资产绑定');
-          source.push(a);
+            invalid('参考图片版本不可用，请移除后重新选择');
         }
-        const input: Snapshot = {
-          script: w.script,
-          brief: artifacts.find((a) => a.artifactKey === 'customized-brief')?.payload,
-          document: w.document,
-          sources: source.map((a) => ({ id: a.id, revision: a.revision, hash: a.contentHash })),
-          draftRevision: revision,
-          models,
+      } else if (imageSettings) invalid('此任务不接受图片设置');
+      const videoV2 =
+        (operation === 'SHOTS' && videoSettings?.version === 2) ||
+        (operation === 'PROMPT' && isVideoDocument(w.document));
+      if (videoV2) {
+        if (!brief || brief.freshness !== 'CURRENT')
+          return customizedConflict('请先确认当前信息卡');
+        source.push(brief);
+      }
+      if (operation === 'PROMPT' && videoV2) {
+        if (shotId || videoSettings?.target?.kind !== 'CLIP' || !isVideoDocument(w.document))
+          invalid('请选择当前视频片段');
+        const targetId = videoSettings!.target!.id;
+        const a = artifacts.find(
+          (a) => a.artifactKey === `customized-video-clip:${targetId}` && a.freshness === 'CURRENT',
+        );
+        if (
+          !a ||
+          workflowStateHash(a.payload) !==
+            workflowStateHash(clipPayload(w.document as ProductionVideoDocument, targetId))
+        )
+          return customizedConflict('请先保存当前片段和分镜');
+        source.push(a);
+      } else if (operation === 'PROMPT') {
+        if (videoSettings?.target) invalid('旧版镜头不接受片段目标');
+        const shot = productionShots(w.document).find((s) => s.id === shotId),
+          a = artifacts.find(
+            (a) => a.artifactKey === `customized-shot:${shotId}` && a.freshness === 'CURRENT',
+          );
+        if (!shot || !a || workflowStateHash(a.payload) !== workflowStateHash(shot))
+          return customizedConflict('请先保存当前镜头及资产绑定');
+        source.push(a);
+      }
+      const input: Snapshot = {
+        ...(incremental ? { incremental: { ...incremental, targetIds: updateTargets } } : {}),
+        script: w.script,
+        brief: artifacts.find((a) => a.artifactKey === 'customized-brief')?.payload,
+        document: w.document,
+        sources: source.map((a) => ({ id: a.id, revision: a.revision, hash: a.contentHash })),
+        draftRevision: revision,
+        models,
+        operation,
+        shotId,
+        ...(videoV2
+          ? {
+              shotWorkflowVersion: 2 as const,
+              ...(operation === 'SHOTS'
+                ? { shotBenefitPolicyVersion: 1 as const, shotDurationStepMs: 1000 as const }
+                : {}),
+              ...(operation === 'PROMPT' ? { promptWorkflowVersion: 3 as const } : {}),
+              strategyVersion: CUSTOMIZED_VIDEO_STRATEGY,
+              requestLimits: { ...CUSTOMIZED_VIDEO_LIMITS },
+              identitySeed: randomUUID(),
+              durationPolicy:
+                (operation === 'PROMPT' || !!incremental) && isVideoDocument(w.document)
+                  ? w.document.videoPlan.durationPolicy
+                  : normalizeVideoPolicy(
+                      videoSettings?.durationPolicy,
+                      w.script.creation?.referenceDurationSeconds ?? 30,
+                    ),
+              sourceUnits: buildVideoSourceUnits(w.script.story?.content ?? w.script.synopsis),
+              renderCapability:
+                (operation === 'PROMPT' || !!incremental) && isVideoDocument(w.document)
+                  ? w.document.videoPlan.capability
+                  : {
+                      key: 'TEXT_PLAN',
+                      status: 'PENDING_MODEL_CHECK' as const,
+                      minClipMs: 4000,
+                      maxClipMs: 15000,
+                      version: 'configured-2026-10-19',
+                    },
+              ...(videoSettings?.target ? { target: videoSettings.target } : {}),
+            }
+          : {}),
+        ...(imageSettings ? { imageSettings } : {}),
+        ...(render
+          ? {
+              videoRender: render.input,
+              target: { kind: 'CLIP' as const, id: render.input.clipId },
+            }
+          : {}),
+        ...(operation === 'ASSETS'
+          ? {
+              assetWorkflowVersion: 2 as const,
+              ...(incremental ? { assetUpdateVersion: 1 as const } : {}),
+              targetAssetId,
+              identitySeed: randomUUID(),
+            }
+          : {}),
+      };
+      const t = await tx.customizedProductionTask.create({
+        data: {
+          projectId: p,
+          workflowRunId: r,
           operation,
           shotId,
-          ...(videoV2
-            ? {
-                shotWorkflowVersion: 2 as const,
-                ...(operation === 'SHOTS'
-                  ? { shotBenefitPolicyVersion: 1 as const, shotDurationStepMs: 1000 as const }
-                  : {}),
-                ...(operation === 'PROMPT' ? { promptWorkflowVersion: 3 as const } : {}),
-                strategyVersion: CUSTOMIZED_VIDEO_STRATEGY,
-                requestLimits: { ...CUSTOMIZED_VIDEO_LIMITS },
-                identitySeed: randomUUID(),
-                durationPolicy:
-                  operation === 'PROMPT' && isVideoDocument(w.document)
-                    ? w.document.videoPlan.durationPolicy
-                    : normalizeVideoPolicy(
-                        videoSettings?.durationPolicy,
-                        w.script.creation?.referenceDurationSeconds ?? 30,
-                      ),
-                sourceUnits: buildVideoSourceUnits(w.script.story?.content ?? w.script.synopsis),
-                renderCapability:
-                  operation === 'PROMPT' && isVideoDocument(w.document)
-                    ? w.document.videoPlan.capability
-                    : {
-                        key: 'TEXT_PLAN',
-                        status: 'PENDING_MODEL_CHECK' as const,
-                        minClipMs: 4000,
-                        maxClipMs: 15000,
-                        version: 'configured-2026-10-19',
-                      },
-                ...(videoSettings?.target ? { target: videoSettings.target } : {}),
-              }
-            : {}),
-          ...(imageSettings ? { imageSettings } : {}),
-          ...(render
-            ? {
-                videoRender: render.input,
-                target: { kind: 'CLIP' as const, id: render.input.clipId },
-              }
-            : {}),
-          ...(operation === 'ASSETS'
-            ? { assetWorkflowVersion: 2 as const, targetAssetId, identitySeed: randomUUID() }
-            : {}),
-        };
-        const t = await tx.customizedProductionTask.create({
-          data: {
-            projectId: p,
-            workflowRunId: r,
-            operation,
-            shotId,
-            idempotencyKey: key,
-            inputSnapshot: json(input),
-            steps: json(
-              productionStages(
-                operation,
-                input.assetWorkflowVersion,
-                input.shotWorkflowVersion,
-                input.promptWorkflowVersion,
-              ).map((s) => ({
-                id: s.id,
-                status: 'PENDING',
-                title: s.label,
-                content: '',
-              })),
-            ),
-          },
-        });
-        await this.enqueue(tx, t);
-        return presentProductionTask(t);
-      },
-      { timeout: 15000 },
-    );
+          idempotencyKey: key,
+          inputSnapshot: json(input),
+          steps: json(
+            productionStages(
+              operation,
+              input.assetWorkflowVersion,
+              input.shotWorkflowVersion,
+              input.promptWorkflowVersion,
+            ).map((s) => ({
+              id: s.id,
+              status: 'PENDING',
+              title: s.label,
+              content: '',
+            })),
+          ),
+        },
+      });
+      await this.enqueue(tx, t);
+      return presentProductionTask(t);
+    };
+    return transaction ? perform(transaction) : this.db.$transaction(perform, { timeout: 15000 });
   }
   private async hasTaskConflict(
     tx: Tx,
@@ -1157,10 +1418,25 @@ export class ProductionRepository {
       }),
     );
   }
+  private async taskArtifacts(tx: Tx, t: CustomizedProductionTask) {
+    const rows = await tx.workingArtifact.findMany({
+      where: { projectId: t.projectId, workflowRunId: t.workflowRunId, availability: 'AVAILABLE' },
+    });
+    if (snapshot(t).sources.some((s) => !rows.some((a) => a.id === s.id))) {
+      const head = await sharedCustomizedBrief(tx, t.projectId, t.workflowRunId, undefined, true);
+      if (
+        head &&
+        snapshot(t).sources.some((s) => s.id === head.id) &&
+        !rows.some((a) => a.id === head.id)
+      )
+        rows.push(head);
+    }
+    return rows;
+  }
   private async valid(tx: Tx, t: CustomizedProductionTask) {
     await this.scope(tx, t.projectId, t.workflowRunId);
     const input = snapshot(t),
-      artifacts = await this.artifacts(tx, t.projectId, t.workflowRunId);
+      artifacts = await this.taskArtifacts(tx, t);
     if (
       input.sources.some(
         (s) =>
@@ -1199,7 +1475,7 @@ export class ProductionRepository {
       const current = (await this.read(tx, t.projectId, t.workflowRunId)).document;
       const withoutImages = (doc: ProductionDocument) => ({
         ...doc,
-        assets: doc.assets.map((a) => ({ ...a, image: null })),
+        assets: doc.assets.map(({ imageBasis: _basis, ...a }) => ({ ...a, image: null })),
       });
       if (
         workflowStateHash(withoutImages(current)) !==
@@ -1579,7 +1855,7 @@ export class ProductionRepository {
           fileObjectId: records[0]!.id,
           posterFileObjectId: records[1]!.id,
         };
-        const sources = (await this.artifacts(tx, p, t.workflowRunId)).filter((a) =>
+        const sources = (await this.taskArtifacts(tx, t)).filter((a) =>
           input.sources.some((s) => s.id === a.id),
         );
         await this.working.commitValidatedArtifactsInTransaction(
@@ -1741,7 +2017,9 @@ export class ProductionRepository {
           t.workflowRunId,
           {
             ...w.document,
-            assets: w.document.assets.map((a) => (a.id === objectId ? { ...a, image } : a)),
+            assets: w.document.assets.map((a) =>
+              a.id === objectId ? { ...a, image, imageBasis: assetImageBasis(definition) } : a,
+            ),
           },
           w.source.revision,
           w.draftRevision,
@@ -1959,6 +2237,8 @@ export class ProductionRepository {
           if (input.assetWorkflowVersion === 2) {
             const issue = validatePreparedAssets(value, input);
             if (issue) invalid(issue);
+            const scopeIssue = validateAssetUpdateScope(value, input, t.output);
+            if (scopeIssue) invalid(scopeIssue);
           }
           if (
             input.operation === 'SHOTS' &&
@@ -1992,11 +2272,13 @@ export class ProductionRepository {
             input.operation === 'ASSETS'
               ? withProductionAssets(
                   input.document,
-                  mergePreparedAssets(input.document.assets, value.assets),
+                  input.assetUpdateVersion === 1
+                    ? value.assets
+                    : mergePreparedAssets(input.document.assets, value.assets),
                 )
               : value;
           let destination = t.workflowRunId;
-          if (input.operation === 'ASSETS' && !input.targetAssetId) {
+          if (input.operation === 'ASSETS' && !input.targetAssetId && !input.incremental) {
             const catalog = (await this.artifacts(tx, p, destination)).find(
               (a) => a.artifactKey === 'customized-asset-catalog',
             );
@@ -2017,7 +2299,23 @@ export class ProductionRepository {
             destination === t.workflowRunId ? input.draftRevision : 0,
           );
           if (input.operation === 'ASSETS') {
-            await this.commitAssets(tx, p, destination, branchDocument);
+            const frozen = await this.taskArtifacts(tx, t);
+            // The confirmed information consumed by this task survives a history-view switch.
+            const source = frozen.find(
+              (a) =>
+                a.artifactKey === 'customized-brief' && input.sources.some((s) => s.id === a.id),
+            );
+            await this.commitAssets(
+              tx,
+              p,
+              destination,
+              branchDocument,
+              destination === t.workflowRunId
+                ? source
+                  ? [...frozen.filter((a) => a.artifactKey !== 'customized-brief'), source]
+                  : frozen
+                : undefined,
+            );
             const saved = t.output as Record<string, unknown> | null;
             await tx.customizedProductionTask.update({
               where: { id },

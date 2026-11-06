@@ -65,6 +65,8 @@ export type CustomizedStoryboardScript = {
   };
   /** Full story; absent only in scripts created before the production split. */
   story?: {
+    /** Narrative text retained by some older scripts; distinct from the root structure type. */
+    structure?: string;
     structureMapping?: ScriptStructureMapping[];
     content: string;
     opening: string;

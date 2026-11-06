@@ -5,6 +5,24 @@ import Directory from './StoryboardSchemeDirectory.vue';
 import { createStoryboardScript, snapshotStoryboard } from './storyboard-state';
 
 describe('script scheme directory', () => {
+  it('shows every affected scheme as pending without rewriting its existing story', async () => {
+    const scripts = [
+      createStoryboardScript('方案一'),
+      createStoryboardScript('方案二'),
+      createStoryboardScript('已更新方案'),
+    ];
+    const before = snapshotStoryboard(scripts);
+    const html = await renderToString(
+      createSSRApp(Directory, {
+        scripts,
+        activeId: scripts[1]!.id,
+        staleIds: [scripts[0]!.id, scripts[1]!.id],
+      }),
+    );
+    expect(html.match(/待更新/g)).toHaveLength(2);
+    expect(html.match(/aria-pressed="true"/g)).toHaveLength(1);
+    expect(scripts).toEqual(before);
+  });
   it('renders every scheme with one controlled current selection without mutating scripts', async () => {
     const scripts = Array.from({ length: 8 }, (_, i) => {
       const script = createStoryboardScript(`第 ${i + 1} 套完整故事`);

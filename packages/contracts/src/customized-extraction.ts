@@ -1,3 +1,4 @@
+import type { CustomizedUpdateRequest } from './customized-update';
 import type { CustomizedImportMaterial } from './customized-import';
 import type { ExtractionGraphNode, ExtractionStepExecution } from './extraction-execution';
 
@@ -226,6 +227,7 @@ export type CustomizedExtractionWorkspace = {
   temporary: boolean;
 };
 export type StartCustomizedExtractionRequest = {
+  incremental?: CustomizedUpdateRequest;
   workflowRunId: string;
   sourceArtifactId: string;
   sourceRevision: number;

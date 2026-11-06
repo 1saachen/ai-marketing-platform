@@ -20,11 +20,27 @@ export class ProductionImageService {
     @Inject(STORAGE_PORT) private readonly storage: StoragePort,
     @Inject(AssetService) private readonly assets: AssetService,
   ) {}
-  async uploadReference(projectId: string, runId: string, file?: UploadedAssetFile) {
+  async uploadReference(
+    projectId: string,
+    runId: string,
+    file?: UploadedAssetFile,
+    objectId?: string,
+  ) {
     await this.repository.workspace(projectId, runId);
     const validated = await validateImportFile(file, 'IMAGE', CUSTOMIZED_IMAGE_REFERENCE_MAX_BYTES);
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(validated.mimetype))
       throw new ApiHttpException('参考图片支持 PNG、JPG、WebP', 400, 'FILE_TYPE_UNSUPPORTED');
+    if (objectId) {
+      const hash = createHash('sha256');
+      for await (const chunk of createReadStream(validated.path)) hash.update(chunk);
+      const current = await this.repository.identicalObjectImage(
+        projectId,
+        runId,
+        objectId,
+        hash.digest('hex'),
+      );
+      if (current) return this.assets.getVersion(projectId, current.assetId, current.version);
+    }
     const [asset] = await this.assets.importMany(
       projectId,
       {

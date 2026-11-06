@@ -56,6 +56,7 @@ const props = defineProps<{
   saveMessage: string;
   error: string;
   stale: boolean;
+  staleScriptIds?: string[];
   projectId: string;
   task: StoryboardTask | null;
   brief: CustomizedBrief | null;
@@ -435,6 +436,7 @@ defineExpose({ guardEditor });
       :key="projectId"
       :scripts="draft.scripts"
       :active-id="draft.activeScriptId"
+      :stale-ids="staleScriptIds ?? []"
       @select="selectScript"
     />
     <section v-if="!draft.scripts.length" class="empty-storyboard">

@@ -87,3 +87,4 @@ export * from './customized-drama-creation';
 export * from './auth';
 export { defaultCustomizedAssetImagePrompt } from './customized-asset-image-prompt';
 export * from './customized-production-concurrency';
+export * from './customized-update';

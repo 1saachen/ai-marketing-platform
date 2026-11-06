@@ -37,7 +37,11 @@ const props = defineProps<{
   brandReferences?: { assetId: string; version: number; name: string }[] | undefined;
   settings?: CustomizedImageSettings | undefined;
 }>();
-const emit = defineEmits<{ close: []; generate: [settings: CustomizedImageSettings] }>();
+const emit = defineEmits<{
+  close: [];
+  generate: [settings: CustomizedImageSettings];
+  replace: [assetId: string, image: { assetId: string; version: number }];
+}>();
 const model = ref<CustomizedImageSettings['model']>(CUSTOMIZED_IMAGE_MODELS[0].id);
 const imageResolution = ref<CustomizedImageSettings['resolution']>('2K');
 const imageRatio = ref<CustomizedImageSettings['ratio']>('1:1');
@@ -130,6 +134,7 @@ const title = computed(() =>
       :interrupted="interrupted"
       :error="error"
       @generate="emit('generate', $event)"
+      @replace="emit('replace', singleAsset.id, $event)"
       @close="emit('close')"
     />
     <div v-else class="render-review">

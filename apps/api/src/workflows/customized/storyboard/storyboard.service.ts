@@ -1,3 +1,4 @@
+import type { CustomizedStoryboardScript } from '@ai-marketing/contracts';
 import {
   Inject,
   Injectable,
@@ -23,9 +24,38 @@ import type {
   SaveStoryboardSettingsDto,
   StartStoryboardDto,
   StoryboardDetailQueryDto,
+  StartScriptUpdateDto,
 } from './storyboard.dto';
 @Injectable()
 export class StoryboardService implements OnModuleInit, OnModuleDestroy {
+  async createUpdate(p: string, b: StartScriptUpdateDto) {
+    await this.projects.get(p);
+    if (!this.config.get<string>('CUSTOMIZED_STORYBOARD_WORKER_TOKEN'))
+      throw new ApiHttpException('脚本 Worker 未配置，请联系管理员', 503, 'VALIDATION_ERROR');
+    return this.repository.createUpdate(
+      p,
+      b.workflowRunId,
+      b.scriptId,
+      b.idempotencyKey,
+      b.incremental,
+      {
+        creative:
+          this.config.get<string>('CUSTOMIZED_STORYBOARD_CREATIVE_MODEL') ||
+          'doubao-seed-2-1-pro-260915',
+        detail:
+          this.config.get<string>('CUSTOMIZED_STORYBOARD_DETAIL_MODEL') ||
+          'doubao-seed-2-1-turbo-260628',
+      },
+    );
+  }
+  async updateCandidate(p: string, r: string, sid: string) {
+    await this.projects.get(p);
+    return this.repository.updateCandidate(p, r, sid);
+  }
+  async saveUpdate(p: string, r: string, id: string, script: CustomizedStoryboardScript) {
+    await this.projects.get(p);
+    return this.repository.saveUpdate(p, r, id, script);
+  }
   private timer?: NodeJS.Timeout;
   private recovering = false;
   private readonly logger = new Logger(StoryboardService.name);
@@ -103,7 +133,7 @@ export class StoryboardService implements OnModuleInit, OnModuleDestroy {
   }
   async edit(p: string, id: string, b: EditScriptDto) {
     await this.projects.get(p);
-    return this.repository.edit(p, id, b.action, b.expectedRevision, b.script);
+    return this.repository.edit(p, id, b.action, b.expectedRevision, b.script, b.workflowRunId);
   }
   async remove(p: string, id: string, b: DeleteStoryboardScriptDto) {
     await this.projects.get(p);

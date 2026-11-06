@@ -65,6 +65,7 @@ function mount() {
     busy: false,
   });
   const generate = vi.fn();
+  const replace = vi.fn();
   let state: Record<string, unknown> = {};
   const child = {
     ...Composer,
@@ -73,11 +74,13 @@ function mount() {
       return h('div');
     },
   } as unknown as typeof Composer;
-  const app = renderer.createApp({ render: () => h(child, { ...props, onGenerate: generate }) });
+  const app = renderer.createApp({
+    render: () => h(child, { ...props, onGenerate: generate, onReplace: replace }),
+  });
   app.provide(ssrContextKey, { modules: new Set() });
   app.mount(node());
   cleanup.push(() => app.unmount());
-  return { props, state, generate };
+  return { props, state, generate, replace };
 }
 const fileEvent = (count = 1) => ({
   target: {
@@ -110,6 +113,38 @@ afterEach(() => {
 });
 
 describe('image composer input lifecycle', () => {
+  it('uploads replacement into the parent draft without generating or changing references', async () => {
+    const { state, replace, generate } = mount();
+    vi.mocked(productionApi.uploadImageReference).mockResolvedValueOnce(uploaded());
+    await call(state, 'replaceImage', fileEvent());
+    expect(replace).toHaveBeenCalledWith({ assetId: uploaded().id, version: 1 });
+    expect(generate).not.toHaveBeenCalled();
+    expect(state.references).toEqual([]);
+    expect(vi.mocked(productionApi.uploadImageReference).mock.calls[0]?.[4]).toBe('object');
+  });
+  it('discards a late replacement when the Run changes', async () => {
+    const { state, props, replace } = mount(),
+      pending = deferred();
+    vi.mocked(productionApi.uploadImageReference).mockReturnValueOnce(pending.promise);
+    const request = call(state, 'replaceImage', fileEvent());
+    await settle();
+    props.workflowRunId = 'other-run';
+    await settle();
+    pending.resolve(uploaded());
+    await request;
+    expect(replace).not.toHaveBeenCalled();
+  });
+  it('rejects oversized replacement and incomplete uploaded version before draft binding', async () => {
+    const { state, replace } = mount();
+    await call(state, 'replaceImage', {
+      target: { files: [{ type: 'image/png', size: 11 * 1024 * 1024 }], value: '' },
+    });
+    expect(productionApi.uploadImageReference).not.toHaveBeenCalled();
+    vi.mocked(productionApi.uploadImageReference).mockResolvedValueOnce({ id: 'image' } as Asset);
+    await call(state, 'replaceImage', fileEvent());
+    expect(replace).not.toHaveBeenCalled();
+    expect(state.uploadError).toContain('版本不完整');
+  });
   it('keeps an in-flight multi-file upload and manual parameters across equal asset/preset rematerialization', async () => {
     const { props, state, generate } = mount(),
       first = deferred(),

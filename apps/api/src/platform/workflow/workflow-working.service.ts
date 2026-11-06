@@ -6,6 +6,7 @@ import {
   type CustomizedWorkflowVersionData,
 } from '@ai-marketing/contracts';
 import type {
+  CustomizedInformationMode,
   ActivateEffectWorkflowBranchData,
   CreateEffectWorkflowBranchData,
   ActivateWorkflowNodeData,
@@ -604,13 +605,23 @@ export class WorkflowWorkingService {
     projectId: string,
     runId: string,
     nodeId: string,
+    informationMode?: CustomizedInformationMode,
   ): Promise<ActivateWorkflowNodeData> {
     await this.projectService.get(projectId);
     const targetNodeId = customizedWorkflowNodeId(nodeId);
     if (!targetNodeId)
       throw new ApiHttpException('定制类节点标识无效', HttpStatus.BAD_REQUEST, 'VALIDATION_ERROR');
     return {
-      run: toRun(await this.repository.activateCustomizedRunBranch(projectId, runId, targetNodeId)),
+      run: toRun(
+        await (informationMode
+          ? this.repository.activateCustomizedRunBranch(
+              projectId,
+              runId,
+              targetNodeId,
+              informationMode,
+            )
+          : this.repository.activateCustomizedRunBranch(projectId, runId, targetNodeId)),
+      ),
     };
   }
 

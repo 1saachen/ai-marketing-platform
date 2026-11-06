@@ -37,6 +37,7 @@ describe('independent asset image worker configuration', () => {
       null,
       body.imageSettings,
       { version: 2 },
+      undefined,
     );
   });
   it('rejects a missing protected worker channel before enqueuing', async () => {

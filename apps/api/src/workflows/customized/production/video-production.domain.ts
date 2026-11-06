@@ -218,6 +218,10 @@ export function validateFinalVideo(
   const issue = validateVideoSnapshot(output, input);
   if (issue) return issue;
   const doc = output as ProductionVideoDocument;
+  if (input.incremental) {
+    const scopeIssue = validateIncrementalVideoScope(doc, input, saved.changes);
+    if (scopeIssue) return scopeIssue;
+  }
   if (
     input.strategyVersion === '2026-10-19-capacity-clips.7' &&
     input.operation === 'SHOTS' &&
@@ -271,6 +275,55 @@ export function normalizeVideoPolicy(value: unknown, reference: number): VideoDu
       seconds: Math.max(1, Math.min(3600, reference || 30)),
     }
   );
+}
+export function validateIncrementalVideoScope(
+  doc: ProductionVideoDocument,
+  input: ProductionInput,
+  changes: unknown,
+): string | null {
+  if (!input.incremental || !isVideoDocument(input.document) || !Array.isArray(changes))
+    return '缺少局部更新基线或变更说明';
+  const declared = new Set<string>();
+  for (const change of changes) {
+    if (
+      !change ||
+      typeof change.clipId !== 'string' ||
+      typeof change.reason !== 'string' ||
+      !change.reason.trim() ||
+      declared.has(change.clipId)
+    )
+      return '分镜修改说明不完整';
+    declared.add(change.clipId);
+  }
+  const old = input.document.videoPlan.clips,
+    next = doc.videoPlan.clips,
+    oldIds = new Set(old.map((c) => c.id)),
+    newIds = new Set(next.map((c) => c.id));
+  const prefix =
+    'v' + Buffer.from((input.identitySeed ?? '').replaceAll('-', ''), 'hex').toString('base64url');
+  if (
+    [...declared].some(
+      (id) =>
+        (!oldIds.has(id) && !newIds.has(id)) ||
+        (oldIds.has(id) && !input.incremental!.targetIds.includes(id)),
+    )
+  )
+    return '分镜局部更新超出已确认范围';
+  if (!next.some((c) => oldIds.has(c.id))) return '无法保留原分镜身份，请使用本节点重新生成';
+  if (next.some((c) => !oldIds.has(c.id) && (!declared.has(c.id) || !c.id.startsWith(prefix))))
+    return '新增分镜身份或范围不正确';
+  for (const clip of old) {
+    if (!newIds.has(clip.id)) {
+      if (!declared.has(clip.id)) return '移除分镜缺少修改说明';
+      continue;
+    }
+    if (
+      !declared.has(clip.id) &&
+      videoHash(clipPayload(input.document, clip.id)) !== videoHash(clipPayload(doc, clip.id))
+    )
+      return '未声明的分镜内容被修改';
+  }
+  return null;
 }
 /** Local clip input fingerprint excludes global numbering and unrelated clips. */
 export function clipPayload(document: ProductionVideoDocument, clipId: string) {

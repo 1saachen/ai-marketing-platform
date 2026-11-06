@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { productionTasksConflict } from '@ai-marketing/contracts';
+import type { CustomizedUpdatePreview } from '@ai-marketing/contracts';
+import CustomizedLocalUpdate from '../shared/CustomizedLocalUpdate.vue';
+import AssetUpdateScope from './AssetUpdateScope.vue';
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import {
   Clapperboard,
@@ -213,15 +216,78 @@ const imageDialogAssets = computed(() =>
 );
 const imageSubmitting = ref(false),
   imageError = ref('');
+const localTasks = computed(() => {
+  const first = workspace.value?.tasks.find((t) => t.incremental?.batchKey);
+  return first
+    ? workspace.value!.tasks.filter((t) => t.incremental?.batchKey === first.incremental!.batchKey)
+    : [];
+});
+const localRunning = computed(() =>
+  localTasks.value.some((t) => ['QUEUED', 'RUNNING'].includes(t.status)),
+);
+const assetUpdateTask = computed(() =>
+  props.mode === 'ASSETS'
+    ? localTasks.value.find((t) => t.operation === 'ASSETS' && t.assetUpdateScope)
+    : undefined,
+);
+const localProgress = computed(() =>
+  localRunning.value
+    ? Math.min(
+        99,
+        Math.floor(
+          localTasks.value.reduce((n, t) => n + t.progress, 0) /
+            Math.max(1, localTasks.value.length),
+        ),
+      )
+    : null,
+);
+async function updateLocal(preview: CustomizedUpdatePreview) {
+  if (
+    !workspace.value ||
+    busy.value ||
+    editing.value ||
+    dirty.value ||
+    promptDirty.value ||
+    videoWorkbench.value?.hasDirty
+  ) {
+    error.value = '请先保存或取消当前修改，再进行局部更新';
+    return;
+  }
+  if (!['ASSETS', 'SHOTS', 'PROMPT', 'RENDER'].includes(preview.node)) return;
+  const scope = controller;
+  busy.value = true;
+  error.value = '';
+  try {
+    const tasks = await productionApi.localUpdate(
+      props.projectId,
+      props.workflowRunId,
+      preview.node as 'ASSETS' | 'SHOTS' | 'PROMPT' | 'RENDER',
+      { version: 1, fingerprint: preview.fingerprint },
+      crypto.randomUUID(),
+      scope.signal,
+    );
+    if (scope !== controller || !workspace.value) return;
+    workspace.value.tasks = [
+      ...tasks,
+      ...workspace.value.tasks.filter((t) => !tasks.some((n) => n.id === t.id)),
+    ];
+    schedule();
+  } catch (e) {
+    if (scope === controller && !isAbortError(e))
+      error.value = e instanceof Error ? e.message : '更新未开始，已有内容保留';
+  } finally {
+    if (scope === controller) busy.value = false;
+  }
+}
 const retryingTaskId = ref('');
 const retryError = ref<{ taskId: string; message: string } | null>(null);
 async function retryTask(taskId: string) {
   const target = workspace.value?.tasks.find((t) => t.id === taskId);
   if (
-    props.mode !== 'SHOTS' ||
+    (props.mode !== 'SHOTS' && !target?.incremental) ||
     !target ||
     target.status !== 'FAILED' ||
-    !['PROMPT', 'RENDER'].includes(target.operation) ||
+    (!['PROMPT', 'RENDER'].includes(target.operation) && !target.incremental) ||
     busy.value ||
     activeTasks.value.some((task) => productionTasksConflict(target, task)) ||
     imageSubmitting.value ||
@@ -417,6 +483,15 @@ function updateAsset(asset: ProductionAsset) {
   if (busy.value || running.value || imageSubmitting.value) return;
   const current = document.value.assets.find((a) => a.id === asset.id);
   if (current) Object.assign(current, asset);
+}
+function replaceAssetImage(assetId: string, image: { assetId: string; version: number }) {
+  if (props.mode !== 'ASSETS' || busy.value || running.value || imageSubmitting.value) return;
+  const asset = document.value.assets.find((a) => a.id === assetId);
+  if (!asset || !independentlyPrepared(document.value.assets, asset)) return;
+  editing.value = true;
+  asset.image = image;
+  delete asset.imageBasis;
+  notice.value = '图片已替换到草稿，请保存修改；取消编辑可恢复原图。';
 }
 function createAsset(assetKind: ProductionAsset['kind']) {
   if (busy.value || running.value || imageSubmitting.value) return;
@@ -1187,6 +1262,14 @@ defineExpose({ flushPendingEdits });
         </p>
       </div>
       <div class="actions extraction-heading__actions">
+        <CustomizedLocalUpdate
+          v-if="workspace && (mode === 'ASSETS' ? document.assets.length : legacyShots.length)"
+          :project-id="projectId"
+          :workflow-run-id="workflowRunId"
+          :nodes="mode === 'ASSETS' ? ['ASSETS'] : ['SHOTS', 'PROMPT', 'RENDER']"
+          :disabled="busy || !!running || editing || dirty || promptDirty"
+          @execute="updateLocal"
+        />
         <WorkflowNodeEditActions
           v-if="mode === 'ASSETS'"
           :editing="editing"
@@ -1238,13 +1321,45 @@ defineExpose({ flushPendingEdits });
       message="请返回脚本创作确认当前故事，再继续制作。"
     />
     <!-- 总时长沿用脚本创作及已有制作策略，不在视频制作重复设置。 -->
+    <WorkflowExtractionFeedback
+      v-if="workspace?.imageReviewObjectIds?.length"
+      tone="warning"
+      title="资产定义已变化，请核对图片"
+      :message="`以下图片仍保留原版本，可在图片制作窗口替换或重新生成：${document.assets
+        .filter((a) => workspace?.imageReviewObjectIds?.includes(a.id))
+        .map((a) => a.name)
+        .join('、')}`"
+    />
     <WorkflowRunProgress
-      v-if="pageProgress"
+      v-if="pageProgress && localProgress === null"
       :progress="pageProgress.progress"
       :summary="pageProgress.operation === 'ASSETS' ? '正在整理资产定义' : '正在创作连续分镜'"
       :terminal="false"
       action-label="查看工作流"
       @show-details="openWorkflow(pageProgress)"
+    />
+    <WorkflowRunProgress
+      v-if="localProgress !== null"
+      :progress="localProgress"
+      :summary="`本次局部更新：${localTasks.filter((t) => t.status === 'COMPLETED').length}/${localTasks.length} 项完成 · ${localTasks.flatMap((t) => t.steps).find((s) => s.status === 'RUNNING')?.title || '等待执行'}`"
+      :terminal="false"
+      action-label="查看工作流"
+      @show-details="openWorkflow(localTasks.find((t) => ['QUEUED', 'RUNNING'].includes(t.status)))"
+    />
+    <div
+      v-for="task in localTasks.filter(
+        (t) => t.status === 'FAILED' && ['ASSETS', 'SHOTS'].includes(t.operation),
+      )"
+      :key="task.id"
+      class="local-update-recovery"
+    >
+      <span>{{ task.errorMessage || '局部更新未完成，旧内容保留' }}</span
+      ><button :disabled="busy || !!running" @click="retryTask(task.id)">继续本次更新</button
+      ><button @click="openWorkflow(task, true)">查看原因</button>
+    </div>
+    <AssetUpdateScope
+      v-if="assetUpdateTask?.assetUpdateScope"
+      :scope="assetUpdateTask.assetUpdateScope"
     />
     <template v-if="workspace">
       <ProductionAssetStudio
@@ -1447,6 +1562,7 @@ defineExpose({ flushPendingEdits });
       :interrupted="pollingInterrupted"
       :error="imageError"
       @generate="generateImages"
+      @replace="replaceAssetImage"
       @close="imageDialogOpen = false"
     />
     <WorkflowInformationDialog

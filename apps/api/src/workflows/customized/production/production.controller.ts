@@ -64,10 +64,19 @@ import type {
   ProductionOperation,
   ProductionStep,
 } from '@ai-marketing/contracts';
+import type { CustomizedUpdateNode, CustomizedUpdateRequest } from '@ai-marketing/contracts';
 import { ProjectService } from '../../../platform/project/project.service';
 import { ProductionRepository } from './production.repository';
 class Scope {
   @IsUUID() workflowRunId!: string;
+}
+class ImageReferenceScope extends Scope {
+  @IsOptional() @IsString() @MaxLength(200) objectId?: string;
+}
+class UpdateScope extends Scope {
+  @IsIn(['INFORMATION_EXTRACTION', 'SCRIPT', 'ASSETS', 'SHOTS', 'PROMPT', 'RENDER'])
+  node!: CustomizedUpdateNode;
+  @IsOptional() @IsString() @MaxLength(200) targetId?: string;
 }
 class PromptTaskScope extends Scope {
   @IsString() @MaxLength(200) clipId!: string;
@@ -96,6 +105,7 @@ class Save extends Scope {
   @IsBoolean() confirm!: boolean;
 }
 class Start extends Scope {
+  @IsOptional() @IsObject() incremental?: CustomizedUpdateRequest;
   @IsInt() @Min(0) expectedRevision!: number;
   @IsIn(['ASSETS', 'SHOTS', 'PROMPT', 'IMAGE', 'RENDER']) operation!: ProductionOperation;
   @IsOptional() @IsObject() renderSettings?: CustomizedVideoRenderSettings;
@@ -105,6 +115,12 @@ class Start extends Scope {
   @IsOptional() @IsString() @MaxLength(200) targetAssetId?: string;
   @IsOptional() @IsObject() durationPolicy?: VideoDurationPolicy;
   @IsOptional() @IsObject() target?: { kind: 'CLIP'; id: string };
+}
+class LocalUpdate extends Scope {
+  @IsIn(['ASSETS', 'SHOTS', 'PROMPT', 'RENDER']) operation!:
+    'ASSETS' | 'SHOTS' | 'PROMPT' | 'RENDER';
+  @IsUUID() idempotencyKey!: string;
+  @IsObject() incremental!: CustomizedUpdateRequest;
 }
 class Worker {
   @IsUUID() projectId!: string;
@@ -169,6 +185,43 @@ export class ProductionService implements OnModuleInit, OnModuleDestroy {
     await this.projects.get(p);
     return this.repository.workspace(p, q.workflowRunId);
   }
+  async preview(p: string, q: UpdateScope) {
+    await this.projects.get(p);
+    return this.repository.preview(p, q.workflowRunId, q.node, q.targetId ?? null);
+  }
+  async localUpdate(p: string, b: LocalUpdate) {
+    await this.projects.get(p);
+    if (
+      !this.config.get<string>(
+        b.operation === 'ASSETS'
+          ? 'CUSTOMIZED_ASSETS_WORKER_TOKEN'
+          : 'CUSTOMIZED_PRODUCTION_WORKER_TOKEN',
+      )
+    )
+      throw new ApiHttpException('当前节点 Worker 未配置，请联系管理员', 503, 'VALIDATION_ERROR');
+    const renderModels = Object.fromEntries(
+      SEEDANCE_MODEL_OPTIONS.map((m) => [
+        m.value,
+        this.config.get<string>(m.configKey)?.trim() || m.model,
+      ]),
+    );
+    return this.repository.startUpdates(
+      p,
+      b.workflowRunId,
+      b.operation,
+      b.incremental,
+      b.idempotencyKey,
+      {
+        creative:
+          this.config.get<string>('CUSTOMIZED_STORYBOARD_CREATIVE_MODEL') ||
+          'doubao-seed-2-1-pro-260915',
+        detail:
+          this.config.get<string>('CUSTOMIZED_STORYBOARD_DETAIL_MODEL') ||
+          'doubao-seed-2-1-turbo-260628',
+      },
+      renderModels,
+    );
+  }
   async save(p: string, b: Save) {
     await this.projects.get(p);
     return this.repository.save(
@@ -231,6 +284,7 @@ export class ProductionService implements OnModuleInit, OnModuleDestroy {
             }
           : {}),
       },
+      b.incremental,
     );
   }
   async task(p: string, id: string) {
@@ -275,6 +329,18 @@ export class ProductionController {
     @Inject(ProductionImageService) private readonly images: ProductionImageService,
     @Inject(ProductionVideoService) private readonly videos: ProductionVideoService,
   ) {}
+  @Get('update-preview') preview(
+    @Param('projectId', ParseUUIDPipe) p: string,
+    @Query() q: UpdateScope,
+  ) {
+    return this.service.preview(p, q);
+  }
+  @Post('local-updates') localUpdate(
+    @Param('projectId', ParseUUIDPipe) p: string,
+    @Body() b: LocalUpdate,
+  ) {
+    return this.service.localUpdate(p, b);
+  }
   @Put('video-settings') videoSettings(
     @Param('projectId', ParseUUIDPipe) p: string,
     @Body() b: VideoSettings,
@@ -309,10 +375,10 @@ export class ProductionController {
   )
   reference(
     @Param('projectId', ParseUUIDPipe) p: string,
-    @Body() b: Scope,
+    @Body() b: ImageReferenceScope,
     @UploadedFile() file?: UploadedAssetFile,
   ) {
-    return this.images.uploadReference(p, b.workflowRunId, file);
+    return this.images.uploadReference(p, b.workflowRunId, file, b.objectId);
   }
   @Get() workspace(@Param('projectId', ParseUUIDPipe) p: string, @Query() q: Scope) {
     return this.service.workspace(p, q);

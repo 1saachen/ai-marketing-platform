@@ -5,6 +5,9 @@ import type {
 // DTO requires a runtime import for validation metadata.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { SaveCustomizedSourceVersionDto } from './dto/save-customized-source-version.dto';
+// DTO requires a runtime import for validation metadata.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { ActivateCustomizedBranchDto } from './dto/activate-customized-branch.dto';
 import type { ServerResponse } from 'node:http';
 import { pipeline } from 'node:stream/promises';
 
@@ -156,8 +159,9 @@ export class WorkflowWorkingController {
     @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
     @Param('workflowRunId', new ParseUUIDPipe({ version: '4' })) runId: string,
     @Param('nodeId') nodeId: string,
+    @Body() body: ActivateCustomizedBranchDto,
   ): Promise<ActivateWorkflowNodeData> {
-    return this.service.activateCustomizedBranch(projectId, runId, nodeId);
+    return this.service.activateCustomizedBranch(projectId, runId, nodeId, body.informationMode);
   }
 
   @Get('workflow-runs/:workflowRunId/nodes/:nodeId/state')

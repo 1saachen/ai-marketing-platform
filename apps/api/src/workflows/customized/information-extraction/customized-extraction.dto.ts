@@ -1,3 +1,4 @@
+import type { CustomizedUpdateRequest } from '@ai-marketing/contracts';
 import {
   Allow,
   IsArray,
@@ -5,6 +6,7 @@ import {
   IsIn,
   IsInt,
   IsOptional,
+  IsObject,
   IsString,
   IsUUID,
   Max,
@@ -20,6 +22,7 @@ export class ExtractionScopeDto {
   @IsUUID('4') workflowRunId!: string;
 }
 export class StartCustomizedExtractionDto extends ExtractionScopeDto {
+  @IsOptional() @IsObject() incremental?: CustomizedUpdateRequest;
   @IsUUID('4') sourceArtifactId!: string;
   @IsInt() @Min(1) sourceRevision!: number;
   @IsString() @MaxLength(500) idempotencyKey!: string;

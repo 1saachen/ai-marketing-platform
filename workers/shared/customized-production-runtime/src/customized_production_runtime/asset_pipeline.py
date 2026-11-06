@@ -41,7 +41,7 @@ class InventoryValidationError(ValueError):
         super().__init__('; '.join(self.reasons))
 
 
-def align_inventory(raw: dict[str, Any], snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+def align_inventory(raw: dict[str, Any], snapshot: dict[str, Any], *, additions_only: bool = False) -> list[dict[str, Any]]:
     candidates = Inventory.model_validate(raw).model_dump()['objects']
     errors: list[str] = []
     existing = {a['id']: a for a in snapshot['document']['assets']}
@@ -50,16 +50,20 @@ def align_inventory(raw: dict[str, Any], snapshot: dict[str, Any]) -> list[dict[
         errors.append('duplicate inventory key')
     ids: dict[str, str] = {}
     for i, a in enumerate(candidates):
+        if additions_only and a['existingId'] is not None:
+            errors.append('invalid existing identity')
         old = existing.get(a['existingId'])
         if a['existingId'] is not None and (old is None or old['kind'] != a['kind']):
             errors.append('invalid existing identity')
         ids[a['key']] = a['existingId'] or f"asset-{snapshot['identitySeed']}-{i+1}"
+        if additions_only and ids[a['key']] in existing:
+            errors.append('invalid existing identity')
     if len(set(ids.values())) != len(ids):
         errors.append('inventory duplicated an identity')
     target = snapshot.get('targetAssetId')
     if target and (len(candidates) != 1 or candidates[0]['existingId'] != target):
         errors.append('single asset scope changed')
-    if not target and not any(a['kind'] == 'PRODUCT' for a in candidates):
+    if not target and not additions_only and not any(a['kind'] == 'PRODUCT' for a in candidates):
         errors.append('missing product')
     index = evidence_index(snapshot)
     result = []
@@ -197,6 +201,9 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
     identity = [{'id': a['id'], 'kind': a['kind'], 'name': a['name'], 'aliases': a.get('preparation', {}).get('aliases', [])} for a in existing]
     locked = [{'id': a['id'], 'fields': {k: a[k] for k in protected_fields(a) if k in a}} for a in existing]
     context = {'sources': sources, 'existingIdentities': identity, 'protectedDefinitions': locked, 'targetAssetId': snapshot.get('targetAssetId')}
+    if snapshot.get('incremental'):
+        context['localUpdate']={'version':1,'possibleAffectedIds':snapshot['incremental']['targetIds'],'existingDefinitions':existing,
+            'instructions':'这是当前目录的局部更新，核对最新来源。相同实体必须复用已有ID；未受影响的定义原样保留，不换设计、不重命名、不改制作归属；人工字段和已有图片保持。只补充必要新增对象，不隐式删除旧对象。'}
 
     async def checkpoint(node: str, status: str, title: str, content: str) -> None:
         await api.call('PUT', 'checkpoint', {'step': {'id': node, 'status': status, 'title': title, 'content': content}, 'output': stored})
@@ -228,6 +235,11 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
 
     if steps['SNAPSHOT']['status'] != 'SUCCEEDED':
         await checkpoint('SNAPSHOT', 'SUCCEEDED', '本次创作依据', snapshot['script']['name']+'\n'+snapshot['script'].get('story', {}).get('content', snapshot['script'].get('synopsis', '')))
+    base_assets: list[dict[str, Any]] = []
+    scoped_update = snapshot.get('assetUpdateVersion') == 1
+    if scoped_update:
+        from .asset_update import prepare_update
+        _, base_assets = await prepare_update(provider, snapshot, stored, context, checkpoint)
     if steps['INVENTORY']['status'] != 'SUCCEEDED':
         await checkpoint('INVENTORY', 'RUNNING', '识别对象与原文', '正在对照完整脚本和信息卡识别必要对象')
         inventory_instruction = '先识别故事实际涉及的产品、人物、场景、道具，不写完整外观，不拆分镜。每项给出用途与原文引用，source/path来自sources，quote必须逐字复制连续原文，field标明支持的内容。产品始终独立；不要按数量删掉动作必需道具。SCENE_DETAIL的父对象必须是SCENE，CHARACTER_DETAIL的父对象必须是CHARACTER，不能归属产品或道具；INDEPENDENT的parentKey为null。包袋、线材等道具的附属细节可合入该道具定义，不建立违反父类型的子项。相同身份复用已有id，不按近名猜测；新对象existingId为null，key为本次唯一代号。父对象使用key；单项整理允许父对象使用existingIdentities的id。若targetAssetId非空只整理该对象，必须保留id和kind。未知事实保持未知，不根据已有生成描述发明产品事实。'
@@ -336,15 +348,22 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
                 await checkpoint(kind, 'RUNNING', KIND_NAMES[kind]+'已整理内容', describe(completed))
         async with lock:
             completed = [a for k, values in stored['batches'].items() if k.startswith(kind+':') for a in values]
-            await checkpoint(kind, 'SUCCEEDED', KIND_NAMES[kind]+'定义', describe(completed) if objects else '当前脚本无需此类对象，已跳过模型调用。')
+            await checkpoint(kind, 'SUCCEEDED', KIND_NAMES[kind]+'定义', describe(completed) if objects else ('此类资产无需新增定义，已有内容保留。' if scoped_update else '当前脚本无需此类对象，已跳过模型调用。'))
 
     results = await asyncio.gather(*(category(k) for k in KIND_NAMES), return_exceptions=True)
     for result in results:
         if isinstance(result, BaseException):
             raise result
     assets_by_id = {a['id']: a for values in stored['batches'].values() for a in values}
-    assets = [assets_by_id[a['id']] for a in inventory]
-    validate_definitions(assets, inventory, snapshot)
+    assets = base_assets + [assets_by_id[a['id']] for a in inventory]
+    assets_by_id = {a['id']: a for a in assets}
+    def validate_candidate(values: list[dict[str, Any]]) -> None:
+        if scoped_update:
+            from .asset_update import validate_candidate as validate_scoped
+            validate_scoped(values, inventory, snapshot, stored['assetUpdatePlan'])
+        else:
+            validate_definitions(values, inventory, snapshot)
+    validate_candidate(assets)
     if steps['IMAGE_PLAN']['status'] != 'SUCCEEDED':
         await checkpoint('IMAGE_PLAN', 'SUCCEEDED', '按需图片制作清单', '\n\n'.join(a['name']+'\n'+('\n'.join(i['name']+'：'+i['purpose']+'；'+i['requirements'] for i in a['preparation']['images']) or '暂不需要独立制作图片') for a in assets))
     audit_instruction = ('独立核对资产与完整脚本和BRIEF。检查必要对象遗漏、重复身份、产品事实及结构断言、分类特征、空间关系、未知信息、来源语义与图片需求。'
@@ -364,6 +383,12 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
     if steps['REPAIR']['status'] != 'SUCCEEDED':
         required = [f for f in stored['audit']['findings'] if f['severity'] == 'REQUIRED']
         if required:
+            if scoped_update:
+                allowed = {(d['assetId'], field) for d in stored['assetUpdatePlan']['decisions'] for field in d['fields']}
+                added = {a['id'] for a in inventory}
+                if any(f['assetId'] not in added and (f['assetId'], f['field']) not in allowed for f in required):
+                    await checkpoint('REPAIR', 'FAILED', '更新范围需要重新核对', '审校发现判断范围外仍有必要修改，请查看审校依据后重新发起局部更新；原资产保留。')
+                    raise ValueError('资产审校超出本次判断范围，未扩大修改')
             # Never repeatedly pay for a repair/recheck that already failed semantic review.
             previous_findings = stored.get('recheck', {}).get('findings', [])
             if previous_findings and all(f['assetId'] in assets_by_id for f in previous_findings) and any(f['severity']=='REQUIRED' for f in previous_findings):
@@ -378,7 +403,7 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
                     {**context, 'assets': assets, 'findings': required},
                     '仅返回findings指定assetId和field的补丁，每个准确字段一次，不返回整份目录。正常字段不改。preparation字段填结构对象、text为null；其他字段填text、preparation为null。保留身份、归属和来源引用规则。未知信息明确待确认，不编造产品事实。')
                 revised = apply_repair(assets, patch.model_dump(), stored['audit'], snapshot)
-                validate_definitions(revised, inventory, snapshot)
+                validate_candidate(revised)
                 stored['revised'] = revised
                 stored['patches'] = patch.model_dump()
                 def field_text(asset: dict[str, Any], field: str) -> str:

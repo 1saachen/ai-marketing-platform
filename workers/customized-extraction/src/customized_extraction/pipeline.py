@@ -115,6 +115,13 @@ class Pipeline:
         self.checkpoints = {
             (c["nodeId"], c["sourceId"]): c["output"] for c in checkpoints
         }
+        for doc in input_data['documents']:
+            key = ('DOCUMENT_EXTRACT', doc['assetId'])
+            if doc['assetId'] in input_data.get('incremental', {}).get('reusedDocumentIds', []) and key in self.checkpoints:
+                try:
+                    validate_provenance(Candidate.model_validate(self.checkpoints[key]), [doc])
+                except ValueError:
+                    self.checkpoints.pop(key, None)
         # Old unfinished tasks may reuse parsing/extraction, but cannot bypass the new raw audit.
         semantic = self.checkpoints.get(("SEMANTIC_REFINEMENT", ""), {})
         summary = semantic.get("auditSummary") if isinstance(semantic, dict) else None

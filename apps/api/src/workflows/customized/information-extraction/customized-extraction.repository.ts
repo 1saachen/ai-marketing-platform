@@ -1,9 +1,16 @@
 import { randomUUID } from 'node:crypto';
+import { updatePreview } from '../production/update-preview';
+import {
+  sharedCustomizedBrief,
+  setCustomizedInformationMode,
+} from '../../../platform/workflow/customized-shared-brief';
+import { unchangedDocumentIds } from './unchanged-documents';
 import { Inject, Injectable } from '@nestjs/common';
 import {
   CUSTOMIZED_BRIEF_ARTIFACT_KEY,
   CUSTOMIZED_SOURCE_ARTIFACT_KEY,
   CUSTOMIZED_EXTRACTION_NODES,
+  CUSTOMIZED_BRIEF_LABELS,
   normalizeCustomizedImportDraft,
   type CustomizedBriefCandidate,
   type CustomizedExtractionTask,
@@ -28,6 +35,13 @@ import { WorkflowWorkingRepository } from '../../../platform/workflow/workflow-w
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const missing = () => new ApiHttpException('提炼记录不存在', 404, 'ASSET_NOT_FOUND');
 export type ExtractionInput = {
+  documentPolicyVersion?: 1;
+  incremental?: {
+    version: 1;
+    manualOverrides: Record<string, unknown>;
+    baselineTaskId?: string;
+    reusedDocumentIds?: string[];
+  };
   source: { artifactId: string; revision: number; fingerprint: string };
   documents: Array<{
     assetId: string;
@@ -186,19 +200,29 @@ export class CustomizedExtractionRepository {
     };
   }
 
+  workspaceSource(projectId: string, workflowRunId: string) {
+    return this.db.$transaction(
+      async (tx) =>
+        (await sharedCustomizedBrief(tx, projectId, workflowRunId))?.workflowRunId ?? workflowRunId,
+    );
+  }
   workspace(projectId: string, workflowRunId: string) {
     return this.db.$transaction(async (tx) => {
       const run = await this.scope(tx, projectId, workflowRunId);
-      const input = await this.input(tx, projectId, workflowRunId, false);
+      const shared = run.editSessionNodeId
+        ? null
+        : await sharedCustomizedBrief(tx, projectId, workflowRunId);
+      const readRunId = shared?.workflowRunId ?? workflowRunId;
+      const input = await this.input(tx, projectId, readRunId, false);
       const resolved = await readCustomizedExtractionResult(
         tx,
         projectId,
-        workflowRunId,
+        readRunId,
         input?.source.fingerprint,
       );
       const result = resolved?.record;
       const localTask = await tx.customizedExtractionTask.findFirst({
-        where: { projectId, workflowRunId },
+        where: { projectId, workflowRunId: readRunId },
         orderBy: { createdAt: 'desc' },
         include: { steps: true },
       });
@@ -211,7 +235,7 @@ export class CustomizedExtractionRepository {
             })
           : null);
       const artifact = await tx.workingArtifact.findFirst({
-        where: { projectId, workflowRunId, artifactKey: CUSTOMIZED_BRIEF_ARTIFACT_KEY },
+        where: { projectId, workflowRunId: readRunId, artifactKey: CUSTOMIZED_BRIEF_ARTIFACT_KEY },
       });
       const draftResult = result?.draftResult as unknown as CustomizedBriefCandidate | undefined;
       const manualFields = new Set(Object.keys((result?.manualOverrides ?? {}) as object));
@@ -220,7 +244,32 @@ export class CustomizedExtractionRepository {
         workflowRunId,
         source: input?.source ?? null,
         brandReferences: input?.brandReferences ?? [],
-        sourceWarnings: input?.sourceWarnings ?? [],
+        sourceWarnings: [
+          ...(input?.sourceWarnings ?? []),
+          ...(result &&
+          task &&
+          (task.inputSnapshot as unknown as ExtractionInput).incremental &&
+          Object.entries((result.manualOverrides ?? {}) as Record<string, unknown>).some(
+            ([key, value]) =>
+              JSON.stringify(value) !==
+              JSON.stringify(
+                (result.generatedResult as unknown as CustomizedBriefCandidate).fields[
+                  key as keyof CustomizedBriefCandidate['fields']
+                ],
+              ),
+          )
+            ? [
+                `人工修正已保留，请对照新资料核对：${Object.keys(
+                  (result.manualOverrides ?? {}) as object,
+                )
+                  .map(
+                    (key) => CUSTOMIZED_BRIEF_LABELS[key as keyof typeof CUSTOMIZED_BRIEF_LABELS],
+                  )
+                  .filter(Boolean)
+                  .join('、')}`,
+              ]
+            : []),
+        ],
         result: result
           ? {
               ...draftResult!,
@@ -282,6 +331,7 @@ export class CustomizedExtractionRepository {
         return customizedConflict('请先进入信息提炼编辑');
       const input = await this.input(tx, projectId, request.workflowRunId);
       if (!input?.documents.length) return customizedConflict('请先保存至少一份简报文档');
+      input.documentPolicyVersion = 1;
       if (
         input.source.artifactId !== request.sourceArtifactId ||
         input.source.revision !== request.sourceRevision
@@ -296,6 +346,28 @@ export class CustomizedExtractionRepository {
         include: { steps: true },
       });
       if (active) return presentTask(active);
+      if (request.incremental) {
+        const preview = await updatePreview(
+          tx,
+          projectId,
+          request.workflowRunId,
+          'INFORMATION_EXTRACTION',
+        );
+        if (
+          request.incremental.version !== 1 ||
+          preview.fingerprint !== request.incremental.fingerprint
+        )
+          return customizedConflict('更新范围已变化，请重新查看局部更新');
+        if (preview.blockers.length) return customizedConflict(preview.blockers.join('；'));
+        const previous = await tx.customizedExtractionResult.findUnique({
+          where: { projectId_workflowRunId: { projectId, workflowRunId: request.workflowRunId } },
+        });
+        input.incremental = {
+          version: 1,
+          manualOverrides: (previous?.manualOverrides ?? {}) as Record<string, unknown>,
+          ...(previous?.taskId ? { baselineTaskId: previous.taskId } : {}),
+        };
+      }
       const task = await tx.customizedExtractionTask.create({
         data: {
           projectId,
@@ -305,6 +377,39 @@ export class CustomizedExtractionRepository {
           inputSnapshot: json(input),
         },
       });
+      if (input.incremental?.baselineTaskId) {
+        const previous = await tx.customizedExtractionTask.findFirst({
+          where: { projectId, id: input.incremental.baselineTaskId, status: 'COMPLETED' },
+          include: { steps: true },
+        });
+        const before = previous?.inputSnapshot as unknown as ExtractionInput | undefined;
+        if (previous && before?.documentPolicyVersion === input.documentPolicyVersion) {
+          const ids = unchangedDocumentIds(before.documents, input.documents);
+          const steps = previous.steps.filter(
+            (s) =>
+              s.nodeId === 'DOCUMENT_EXTRACT' &&
+              s.status === 'SUCCEEDED' &&
+              ids.includes(s.sourceId),
+          );
+          if (steps.length) {
+            await tx.customizedExtractionStep.createMany({
+              data: steps.map((s) => ({
+                projectId,
+                taskId: task.id,
+                nodeId: s.nodeId,
+                sourceId: s.sourceId,
+                status: 'SUCCEEDED',
+                output: json(s.output),
+              })),
+            });
+            input.incremental.reusedDocumentIds = steps.map((s) => s.sourceId);
+            await tx.customizedExtractionTask.update({
+              where: { id: task.id },
+              data: { inputSnapshot: json(input) },
+            });
+          }
+        }
+      }
       await tx.customizedExtractionFileHold.createMany({
         data: [...new Set(input.documents.map((d) => d.storageKey))].map((storageKey) => ({
           projectId,
@@ -525,9 +630,11 @@ export class CustomizedExtractionRepository {
         where: { projectId_workflowRunId: { projectId, workflowRunId: task.workflowRunId } },
       });
       const overrides =
-        previous?.sourceFingerprint === task.inputHash
-          ? (previous.manualOverrides as Record<string, unknown>)
-          : {};
+        input.incremental?.version === 1
+          ? input.incremental.manualOverrides
+          : previous?.sourceFingerprint === task.inputHash
+            ? (previous.manualOverrides as Record<string, unknown>)
+            : {};
       const draft = { ...candidate, fields: { ...candidate.fields, ...overrides } };
       const data = {
         taskId,
@@ -749,6 +856,7 @@ export class CustomizedExtractionRepository {
             },
           });
         }
+        await setCustomizedInformationMode(tx, projectId, run.id, 'CURRENT');
         return { workflowRunId: run.id, unchanged: committed!.unchanged };
       },
       { timeout: 30000 },

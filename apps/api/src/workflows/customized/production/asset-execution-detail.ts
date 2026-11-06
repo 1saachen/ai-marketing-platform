@@ -6,6 +6,7 @@ import {
   type ProductionInput,
   type ProductionStep,
 } from '@ai-marketing/contracts';
+import { assetUpdateScope } from './asset-update-scope';
 
 type Row = Record<string, unknown>;
 type Section = ProductionExecutionDetail['sections'][number];
@@ -168,6 +169,39 @@ export function assetExecutionDetail(
       : step.status === 'RUNNING'
         ? '正在整理，已完成的内容会陆续显示。'
         : '执行到这一步后，将展示具体内容。';
+
+  if (input.assetUpdateVersion === 1 && ['INVENTORY', 'IDENTITY'].includes(step.id)) {
+    const scope = assetUpdateScope(input, output) ?? [];
+    return result(
+      '哪些资产需要修改，哪些原样保留',
+      '语言模型核对必要修改；未涉及的定义、身份与图片保持原样。',
+      [
+        ...scope.map((item) =>
+          section(item.name, [
+            [
+              '处理方式',
+              item.action === 'KEEP'
+                ? '原样保留'
+                : item.action === 'ADD'
+                  ? '必要新增'
+                  : item.action === 'SYNC'
+                    ? '仅同步原文依据，公共定义保留'
+                    : '仅修改关联字段',
+            ],
+            ['判断依据', item.reason],
+          ]),
+        ),
+        section(
+          '需要人工核对',
+          strings(row(saved.assetUpdatePlan).blockers).map(
+            (message) => ['问题', message] as [string, unknown],
+          ),
+        ),
+        ...(step.status === 'FAILED' ? [section('下一步', [['处理建议', step.content]])] : []),
+      ],
+      waiting,
+    );
+  }
 
   if (step.id === 'SNAPSHOT') {
     const b = row(input.brief);

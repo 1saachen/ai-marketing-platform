@@ -71,12 +71,13 @@ export class CustomizedExtractionService implements OnModuleInit, OnModuleDestro
     workflowRunId: string,
   ): Promise<CustomizedExtractionWorkspace> {
     await this.projects.get(projectId);
+    const sourceRunId = await this.repository.workspaceSource(projectId, workflowRunId);
     return this.cache.read(
-      { projectId, workflow: 'CUSTOMIZED', workflowRunId },
+      { projectId, workflow: 'CUSTOMIZED', workflowRunId: sourceRunId },
       'customized-extraction',
       () => this.repository.workspace(projectId, workflowRunId),
       // Retire projections that derived draft freshness from the old confirmed artifact.
-      { projectionVersion: 3 },
+      { projectionVersion: 4, requestedRunId: workflowRunId },
     );
   }
   async start(projectId: string, body: StartCustomizedExtractionRequest) {

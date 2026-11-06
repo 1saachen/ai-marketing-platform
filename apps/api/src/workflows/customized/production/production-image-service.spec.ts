@@ -20,9 +20,15 @@ describe('protected image references', () => {
       );
       const path = join(directory, 'reference.png');
       await writeFile(path, bytes);
-      const repository = { workspace: vi.fn().mockResolvedValue({}) };
+      const repository = {
+        workspace: vi.fn().mockResolvedValue({}),
+        identicalObjectImage: vi.fn().mockResolvedValue({ assetId: 'adopted-image', version: 2 }),
+      };
       const asset = { id: 'reference', currentVersion: 1 };
-      const assets = { importMany: vi.fn().mockResolvedValue([asset]) };
+      const assets = {
+        importMany: vi.fn().mockResolvedValue([asset]),
+        getVersion: vi.fn().mockResolvedValue({ id: 'adopted-image', currentVersion: 2 }),
+      };
       const service = new ProductionImageService(
         repository as unknown as ProductionRepository,
         {} as StoragePort,
@@ -47,6 +53,21 @@ describe('protected image references', () => {
         }),
         [expect.objectContaining({ mimetype: 'image/png', size: bytes.length })],
       );
+      const reused = await service.uploadReference(
+        'project',
+        'run',
+        { path, originalname: 'reference.png', mimetype: 'image/png', size: bytes.length },
+        'product',
+      );
+      expect(reused).toEqual({ id: 'adopted-image', currentVersion: 2 });
+      expect(repository.identicalObjectImage).toHaveBeenCalledWith(
+        'project',
+        'run',
+        'product',
+        expect.stringMatching(/^[a-f0-9]{64}$/),
+      );
+      expect(assets.getVersion).toHaveBeenCalledWith('project', 'adopted-image', 2);
+      expect(assets.importMany).toHaveBeenCalledTimes(1);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

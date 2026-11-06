@@ -171,6 +171,10 @@ def describe(operation: str, value: dict[str, Any]) -> str:
 
 
 async def run(api: Api, provider: Provider, claim: dict[str, Any]) -> None:
+    if claim['input'].get('incremental') and claim['input']['operation']=='SHOTS':
+        from .incremental_video import run as run_incremental
+        await run_incremental(api,provider,claim)
+        return
     if claim['input'].get('shotWorkflowVersion') == 2 and claim['input']['operation'] in ('SHOTS', 'PROMPT'):
         from .video_pipeline import run_video
         await run_video(api, provider, claim)

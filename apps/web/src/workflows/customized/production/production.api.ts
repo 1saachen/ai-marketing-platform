@@ -11,6 +11,9 @@ import type {
   CustomizedVideoRenderSettings,
   CustomizedVideoSettingsDraft,
   Asset,
+  CustomizedUpdateNode,
+  CustomizedUpdatePreview,
+  CustomizedUpdateRequest,
 } from '@ai-marketing/contracts';
 import { requestJson } from '../../../api/http-client';
 const base = (p: string) => `/projects/${encodeURIComponent(p)}/workflows/customized/production`;
@@ -24,6 +27,35 @@ async function call<T>(
   return (await requestJson<ApiResponse<T>>(base(p) + path, { method, body, signal })).data;
 }
 export const productionApi = {
+  localUpdate: (
+    p: string,
+    r: string,
+    operation: 'ASSETS' | 'SHOTS' | 'PROMPT' | 'RENDER',
+    incremental: CustomizedUpdateRequest,
+    key: string,
+    signal?: AbortSignal,
+  ) =>
+    call<ProductionTask[]>(
+      p,
+      '/local-updates',
+      'POST',
+      { workflowRunId: r, operation, incremental, idempotencyKey: key },
+      signal,
+    ),
+  preview: (
+    p: string,
+    r: string,
+    node: CustomizedUpdateNode,
+    targetId?: string,
+    signal?: AbortSignal,
+  ) =>
+    call<CustomizedUpdatePreview>(
+      p,
+      `/update-preview?workflowRunId=${encodeURIComponent(r)}&node=${node}${targetId ? `&targetId=${encodeURIComponent(targetId)}` : ''}`,
+      'GET',
+      undefined,
+      signal,
+    ),
   retry: (p: string, taskId: string, signal?: AbortSignal) =>
     call<ProductionTask>(
       p,
@@ -32,10 +64,17 @@ export const productionApi = {
       undefined,
       signal,
     ),
-  uploadImageReference: (p: string, r: string, file: File, signal?: AbortSignal) => {
+  uploadImageReference: (
+    p: string,
+    r: string,
+    file: File,
+    signal?: AbortSignal,
+    objectId?: string,
+  ) => {
     const form = new FormData();
     form.set('workflowRunId', r);
     form.set('image', file);
+    if (objectId) form.set('objectId', objectId);
     return call<Asset>(p, '/image-references', 'POST', form, signal);
   },
   prompt: (
@@ -76,6 +115,7 @@ export const productionApi = {
       durationPolicy?: VideoDurationPolicy;
       target?: { kind: 'CLIP'; id: string };
       renderSettings?: CustomizedVideoRenderSettings;
+      incremental?: CustomizedUpdateRequest;
     },
   ) =>
     call<ProductionTask>(

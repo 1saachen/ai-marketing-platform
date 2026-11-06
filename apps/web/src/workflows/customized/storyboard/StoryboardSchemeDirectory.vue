@@ -7,6 +7,7 @@ import { scriptDuration } from './storyboard-state';
 const props = defineProps<{
   scripts: CustomizedStoryboardScript[];
   activeId: string | null;
+  staleIds?: string[];
 }>();
 const emit = defineEmits<{ select: [id: string] }>();
 const directoryId = useId();
@@ -168,7 +169,8 @@ onBeforeUnmount(() => {
       >
         <span class="scheme-card-top">
           <span class="scheme-number"
-            >方案 <b>{{ String(index + 1).padStart(2, '0') }}</b></span
+            >方案 <b>{{ String(index + 1).padStart(2, '0') }}</b
+            ><span v-if="staleIds?.includes(script.id)" class="scheme-stale"> · 待更新</span></span
           >
           <span v-if="script.id === activeId" class="scheme-current"
             ><Check :size="12" />当前查看</span
@@ -190,6 +192,12 @@ onBeforeUnmount(() => {
     </div>
   </section>
 </template>
+<style scoped>
+.scheme-stale {
+  color: #b45309;
+  font-size: 11px;
+}
+</style>
 
 <style scoped>
 .scheme-directory {

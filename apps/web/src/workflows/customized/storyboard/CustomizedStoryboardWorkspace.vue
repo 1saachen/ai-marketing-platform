@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import ScriptLocalUpdate from './ScriptLocalUpdate.vue';
 import {
   validateStoryboardSettings,
   type StoryboardWorkspace,
@@ -24,7 +25,12 @@ const props = defineProps<{
   briefConfirmed: boolean;
   scopeReadonly: boolean;
   viewedRunId?: string | null;
-  activateScript?: (runId: string, isCurrent: () => boolean, exact: boolean) => Promise<boolean>;
+  activateScript?: (
+    runId: string,
+    isCurrent: () => boolean,
+    exact: boolean,
+    restoring?: boolean,
+  ) => Promise<boolean>;
 }>();
 const emit = defineEmits<{
   back: [];
@@ -43,7 +49,10 @@ const loading = ref(true),
   pollInterrupted = ref(false),
   savedMessage = ref('');
 const page = ref<InstanceType<typeof CustomizedStoryboardNodePage> | null>(null);
-const graphTask = computed(() => workspace.value?.task ?? null);
+// Local updates have their own per-scheme candidate, progress and recovery controls.
+const graphTask = computed(() =>
+  workspace.value?.task?.incremental ? null : (workspace.value?.task ?? null),
+);
 const currentRecord = computed(() =>
   workspace.value?.scripts.find((s) => s.id === draft.value.activeScriptId),
 );
@@ -170,6 +179,7 @@ async function load() {
         currentRecord.value.workflowRunId,
         () => current(scope) && request === selectionRequest,
         false,
+        true,
       );
       if (!current(scope)) return;
     }
@@ -220,6 +230,7 @@ function flush(): Promise<boolean> {
               record.revision,
               value,
               scope.signal,
+              props.workflowRunId,
             );
           if (!current(scope)) return false;
           record.revision = saved.revision!;
@@ -360,6 +371,7 @@ async function begin() {
       record.revision,
       undefined,
       scope.signal,
+      props.workflowRunId,
     );
     if (current(scope)) {
       record.editing = true;
@@ -383,6 +395,7 @@ async function save() {
       record.revision,
       snapshotStoryboard(active.value),
       scope.signal,
+      props.workflowRunId,
     );
     if (!current(scope)) return false;
     record.editing = false;
@@ -419,6 +432,7 @@ async function cancel() {
       record.revision,
       undefined,
       scope.signal,
+      props.workflowRunId,
     );
     if (!current(scope)) return;
     record.editing = false;
@@ -626,36 +640,54 @@ defineExpose({ flushPendingEdits, selectByRun, nextRunId });
     action="重新加载"
     @action="load"
   />
-  <CustomizedStoryboardNodePage
-    v-else
-    ref="page"
-    v-model:draft="draft"
-    :editing="editing"
-    :source-ready="sourceReady"
-    :readonly="readonly"
-    :saving="saving"
-    :product-name="workspace?.brief?.productName ?? ''"
-    :save-message="savedMessage"
-    :error="error"
-    :stale="currentRecord?.stale ?? false"
-    :progress="progress"
-    :project-id="projectId"
-    :task="graphTask"
-    :brief="workspace?.brief ?? null"
-    :source-revision="workspace?.source?.revision ?? null"
-    :can-delete="!!currentRecord && !scopeReadonly"
-    :deleting="!!deletingId"
-    :next-ready="!!currentRecord?.confirmedRevision && !currentRecord?.stale"
-    @begin="begin"
-    @cancel="cancel"
-    @save="save"
-    @back="back"
-    @next="next"
-    @reload="reload"
-    @generate="generate"
-    @retry="retry()"
-    @select="select"
-    @create="create"
-    @remove="remove"
-  />
+  <template v-else>
+    <ScriptLocalUpdate
+      v-if="currentRecord?.confirmedRevision"
+      :project-id="projectId"
+      :workflow-run-id="workflowRunId"
+      :script-id="currentRecord.id"
+      :affected-scripts="
+        workspace?.scripts
+          .filter((s) => s.confirmedRevision && s.stale)
+          .map((s) => ({ id: s.id, name: s.script.name })) ?? []
+      "
+      :disabled="saving || editing || dirty || running || scopeReadonly"
+      @saved="
+        refresh();
+        emit('published');
+      "
+    />
+    <CustomizedStoryboardNodePage
+      ref="page"
+      v-model:draft="draft"
+      :editing="editing"
+      :source-ready="sourceReady"
+      :readonly="readonly"
+      :saving="saving"
+      :product-name="workspace?.brief?.productName ?? ''"
+      :save-message="savedMessage"
+      :error="error"
+      :stale="currentRecord?.stale ?? false"
+      :stale-script-ids="workspace?.scripts.filter((s) => s.stale).map((s) => s.id) ?? []"
+      :progress="progress"
+      :project-id="projectId"
+      :task="graphTask"
+      :brief="workspace?.brief ?? null"
+      :source-revision="workspace?.source?.revision ?? null"
+      :can-delete="!!currentRecord && !scopeReadonly"
+      :deleting="!!deletingId"
+      :next-ready="!!currentRecord?.confirmedRevision && !currentRecord?.stale"
+      @begin="begin"
+      @cancel="cancel"
+      @save="save"
+      @back="back"
+      @next="next"
+      @reload="reload"
+      @generate="generate"
+      @retry="retry()"
+      @select="select"
+      @create="create"
+      @remove="remove"
+    />
+  </template>
 </template>

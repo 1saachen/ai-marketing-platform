@@ -45,6 +45,8 @@ export type ProductionAsset = {
   /** Future image deliverables, not generated files. Optional for historical records. */
   imageRequirements?: string;
   image?: { assetId: string; version: number } | null;
+  /** API-maintained visual-definition fingerprint when this image was adopted. */
+  imageBasis?: string;
   preparation?: AssetPreparation;
   /** Maintained by the API; model output cannot clear these locks. */
   manualFields?: string[];
@@ -80,6 +82,13 @@ export const withProductionAssets = (
 ): ProductionDocument => ({ ...v, assets });
 export type ProductionOperation = 'ASSETS' | 'SHOTS' | 'PROMPT' | 'IMAGE' | 'RENDER';
 export type ProductionInput = {
+  incremental?: {
+    version: 1;
+    fingerprint: string;
+    targetIds: string[];
+    batchKey?: string;
+    requestFingerprint?: string;
+  };
   script: CustomizedStoryboardScript;
   brief: unknown;
   document: ProductionDocument;
@@ -89,6 +98,8 @@ export type ProductionInput = {
   operation: ProductionOperation;
   shotId: string | null;
   assetWorkflowVersion?: 2;
+  /** New asset local updates only; historical tasks retain the original definition pipeline. */
+  assetUpdateVersion?: 1;
   targetAssetId?: string | null;
   identitySeed?: string;
   imageSettings?: CustomizedImageSettings;
@@ -184,6 +195,8 @@ export type ProductionStep = {
   detail?: ProductionExecutionDetail;
 };
 export type ProductionTask = {
+  assetUpdateScope?: { name: string; action: 'KEEP' | 'UPDATE' | 'SYNC' | 'ADD'; reason: string }[];
+  incremental?: { version: 1; targetIds: string[]; batchKey?: string };
   id: string;
   operation: ProductionOperation;
   status: StoryboardStatus;
@@ -213,6 +226,7 @@ export type ProductionTask = {
   hasCandidate?: boolean;
 };
 export type ProductionWorkspace = {
+  imageReviewObjectIds?: string[];
   brandImageReferences?: { assetId: string; version: number; name: string }[];
   script: CustomizedStoryboardScript;
   source: StoryboardSource;
@@ -244,6 +258,8 @@ export function isProductionAsset(v: unknown): v is ProductionAsset {
       (Array.isArray(v.manualFields) &&
         v.manualFields.every((k) => ASSET_EDITABLE_FIELDS.includes(k)))) &&
     (v.imageRequirements === undefined || text(v.imageRequirements)) &&
+    (v.imageBasis === undefined ||
+      (typeof v.imageBasis === 'string' && /^[a-f0-9]{64}$/.test(v.imageBasis))) &&
     (v.image == null ||
       (obj(v.image) &&
         id(v.image.assetId) &&

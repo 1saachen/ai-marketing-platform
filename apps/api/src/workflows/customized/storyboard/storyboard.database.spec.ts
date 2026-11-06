@@ -408,7 +408,7 @@ it.skipIf(process.env.CUSTOMIZED_STORYBOARD_DATABASE_TEST !== '1')(
       expect(
         (await repo.workspace(projectId, publishedImport.workflowRunId)).selectedScriptId,
       ).toBe(imported.id);
-      // Viewing preferences belong to the collection, not to its active branch.
+      // Collection preference does not replace an explicitly selected script path.
       const beforeBrowsing = await db.workflowRun.findMany({ where: { projectId } });
       const beforeArtifacts = await db.workingArtifact.findMany({ where: { projectId } });
       const collection = await repo.workspace(projectId, root.id);
@@ -421,7 +421,7 @@ it.skipIf(process.env.CUSTOMIZED_STORYBOARD_DATABASE_TEST !== '1')(
       );
       expect(
         (await repo.workspace(projectId, publishedImport.workflowRunId)).selectedScriptId,
-      ).toBe(workspace.scripts[1]!.id);
+      ).toBe(imported.id);
       expect((await repo.workspace(projectId, root.id)).selectedScriptId).toBe(
         workspace.scripts[1]!.id,
       );

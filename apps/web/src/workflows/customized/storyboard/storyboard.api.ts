@@ -6,6 +6,8 @@ import type {
   StoryboardDetail,
   CustomizedStoryboardScript,
   DeleteStoryboardScriptResult,
+  CustomizedScriptUpdateCandidate,
+  CustomizedUpdateRequest,
 } from '@ai-marketing/contracts';
 import { requestJson } from '../../../api/http-client';
 const base = (p: string) => `/projects/${encodeURIComponent(p)}/workflows/customized/storyboard`;
@@ -19,6 +21,50 @@ async function call<T>(
   return (await requestJson<ApiResponse<T>>(`${base(p)}${path}`, { method, body, signal })).data;
 }
 export const storyboardApi = {
+  task: (p: string, id: string, signal?: AbortSignal) =>
+    call<StoryboardTask>(p, `/tasks/${encodeURIComponent(id)}`, 'GET', undefined, signal),
+  updateScript: (
+    p: string,
+    r: string,
+    scriptId: string,
+    incremental: CustomizedUpdateRequest,
+    signal?: AbortSignal,
+  ) =>
+    call<StoryboardTask>(
+      p,
+      '/script-updates',
+      'POST',
+      {
+        workflowRunId: r,
+        scriptId,
+        expectedRevision: 0,
+        idempotencyKey: crypto.randomUUID(),
+        incremental,
+      },
+      signal,
+    ),
+  updateCandidate: (p: string, r: string, sid: string, signal?: AbortSignal) =>
+    call<CustomizedScriptUpdateCandidate | null>(
+      p,
+      `/script-updates/${encodeURIComponent(sid)}?workflowRunId=${encodeURIComponent(r)}`,
+      'GET',
+      undefined,
+      signal,
+    ),
+  saveUpdate: (
+    p: string,
+    r: string,
+    id: string,
+    script: CustomizedStoryboardScript,
+    signal?: AbortSignal,
+  ) =>
+    call<{ workflowRunId: string; unchanged: boolean }>(
+      p,
+      `/script-updates/${encodeURIComponent(id)}/save`,
+      'POST',
+      { workflowRunId: r, script },
+      signal,
+    ),
   remove: (
     p: string,
     scriptId: string,
@@ -102,12 +148,13 @@ export const storyboardApi = {
     revision: number,
     script?: CustomizedStoryboardScript,
     signal?: AbortSignal,
+    workflowRunId?: string,
   ) =>
     call<{ revision?: number; workflowRunId?: string; unchanged?: boolean }>(
       p,
       `/scripts/${scriptId}`,
       'PUT',
-      { action, expectedRevision: revision, script },
+      { action, expectedRevision: revision, script, workflowRunId },
       signal,
     ),
 };

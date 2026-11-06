@@ -20,10 +20,32 @@ import {
   StartStoryboardDto,
   StoryboardDetailQueryDto,
   StoryboardScopeDto,
+  StartScriptUpdateDto,
+  SaveScriptUpdateDto,
 } from './storyboard.dto';
 @Controller('projects/:projectId/workflows/customized/storyboard')
 export class StoryboardController {
   constructor(private readonly service: StoryboardService) {}
+  @Post('script-updates') updateScript(
+    @Param('projectId', ParseUUIDPipe) p: string,
+    @Body() b: StartScriptUpdateDto,
+  ) {
+    return this.service.createUpdate(p, b);
+  }
+  @Get('script-updates/:scriptId') updateCandidate(
+    @Param('projectId', ParseUUIDPipe) p: string,
+    @Param('scriptId', ParseUUIDPipe) sid: string,
+    @Query() q: StoryboardScopeDto,
+  ) {
+    return this.service.updateCandidate(p, q.workflowRunId, sid);
+  }
+  @Post('script-updates/:id/save') saveUpdate(
+    @Param('projectId', ParseUUIDPipe) p: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() b: SaveScriptUpdateDto,
+  ) {
+    return this.service.saveUpdate(p, b.workflowRunId, id, b.script);
+  }
   @Get() workspace(@Param('projectId', ParseUUIDPipe) p: string, @Query() q: StoryboardScopeDto) {
     return this.service.workspace(p, q.workflowRunId);
   }

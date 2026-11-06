@@ -45,6 +45,61 @@ export const ASSET_EDITABLE_FIELDS = [
   'imageRequirements',
   'preparation',
 ] as const;
+export type AssetUpdatePlan = {
+  decisions: {
+    assetId: string;
+    fields: (typeof ASSET_EDITABLE_FIELDS)[number][];
+    reason: string;
+  }[];
+  additions: {
+    key: string;
+    existingId: string | null;
+    name: string;
+    kind: 'PRODUCT' | 'CHARACTER' | 'SCENE' | 'PROP';
+    aliases: string[];
+    usage: string;
+    treatment: AssetPreparation['treatment'];
+    parentKey: string | null;
+    sources: AssetEvidence[];
+  }[];
+  blockers: string[];
+};
+export function isAssetUpdatePlan(value: unknown): value is AssetUpdatePlan {
+  if (!object(value)) return false;
+  return (
+    rows(
+      value.decisions,
+      (d) =>
+        object(d) &&
+        text(d.assetId) &&
+        !!d.assetId &&
+        rows(d.fields, (f) =>
+          ASSET_EDITABLE_FIELDS.includes(f as (typeof ASSET_EDITABLE_FIELDS)[number]),
+        ) &&
+        text(d.reason) &&
+        !!d.reason.trim() &&
+        d.reason.length <= 2000,
+    ) &&
+    rows(value.blockers, (b) => text(b) && !!b.trim() && b.length <= 2000) &&
+    rows(
+      value.additions,
+      (a) =>
+        object(a) &&
+        text(a.key) &&
+        !!a.key &&
+        a.existingId === null &&
+        text(a.name) &&
+        !!a.name &&
+        ['PRODUCT', 'CHARACTER', 'SCENE', 'PROP'].includes(String(a.kind)) &&
+        rows(a.aliases, text) &&
+        text(a.usage) &&
+        ['INDEPENDENT', 'SCENE_DETAIL', 'CHARACTER_DETAIL'].includes(String(a.treatment)) &&
+        (a.parentKey === null || (text(a.parentKey) && !!a.parentKey)) &&
+        Array.isArray(a.sources) &&
+        a.sources.length > 0,
+    )
+  );
+}
 export const ASSET_STAGES = [
   { id: 'SNAPSHOT', label: '故事与资料', description: '查看本次采用的故事、产品信息和品牌要求' },
   { id: 'INVENTORY', label: '识别故事对象', description: '找出出场对象，说明作用与原文依据' },
@@ -64,7 +119,7 @@ export const ASSET_STAGES = [
 ] as const;
 const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v);
-const text = (v: unknown) => typeof v === 'string' && v.length <= 20000;
+const text = (v: unknown): v is string => typeof v === 'string' && v.length <= 20000;
 const rows = (v: unknown, test: (v: unknown) => boolean) =>
   Array.isArray(v) && v.length <= 1000 && v.every(test);
 export function isAssetPreparation(v: unknown): v is AssetPreparation {

@@ -468,14 +468,17 @@ const reload = async () => {
 };
 let navigationRequest = 0;
 const continueScript = async (scriptRunId: string, step: number) => {
-  await selectBranch({
-    workflowRunId: customizedProductionNavigationRun(
-      branchTree.value,
-      workflowRunId.value,
-      scriptRunId,
-    ),
-    nodeId: customizedWorkflowNodes[step]!.id,
-  });
+  await selectBranch(
+    {
+      workflowRunId: customizedProductionNavigationRun(
+        branchTree.value,
+        workflowRunId.value,
+        scriptRunId,
+      ),
+      nodeId: customizedWorkflowNodes[step]!.id,
+    },
+    false,
+  );
 };
 const selectStep = async (step: number) => {
   if (
@@ -658,10 +661,12 @@ const closeBranchTree = () => {
 };
 const scriptPaths = new Map<string, string>();
 let scriptPathWriting: Promise<boolean> = Promise.resolve(true);
+const informationContexts = new Set<string>();
 const activateScriptSelection = (
   scriptRunId: string,
   isCurrent: () => boolean = () => !disposed,
   exact = false,
+  restoring = false,
 ): Promise<boolean> => {
   const operation = scriptPathWriting
     .catch(() => false)
@@ -678,6 +683,17 @@ const activateScriptSelection = (
             scriptPaths.get(scriptRunId),
           );
       if (targetRunId === workflowRunId.value && activeStep.value === 2) {
+        if (!restoring || !informationContexts.has(targetRunId)) {
+          await activateCustomizedBranch(
+            projectId,
+            targetRunId,
+            'STORYBOARD',
+            exact ? 'HISTORICAL' : restoring ? 'PRESERVE' : 'CURRENT',
+          );
+          informationContexts.add(targetRunId);
+          if (disposed || !isCurrent()) return false;
+          await load();
+        }
         storyboardViewedRunId.value = scriptRunId;
         return true;
       }
@@ -686,7 +702,13 @@ const activateScriptSelection = (
       try {
         await nodeActivation.drain();
         if (disposed || !isCurrent()) return false;
-        await activateCustomizedBranch(projectId, targetRunId, 'STORYBOARD');
+        await activateCustomizedBranch(
+          projectId,
+          targetRunId,
+          'STORYBOARD',
+          exact ? 'HISTORICAL' : restoring ? 'PRESERVE' : 'CURRENT',
+        );
+        informationContexts.add(targetRunId);
         // Serial activation preserves server ordering; a superseded response may
         // not reload the old page or overwrite the newer local selection.
         if (disposed || !isCurrent()) return false;
@@ -708,7 +730,10 @@ const activateScriptSelection = (
   scriptPathWriting = operation;
   return operation;
 };
-const selectBranch = async (target: { workflowRunId: string; nodeId: string }) => {
+const selectBranch = async (
+  target: { workflowRunId: string; nodeId: string },
+  historical = true,
+) => {
   const step = customizedWorkflowNodes.findIndex((node) => node.id === target.nodeId);
   if (step < 0 || busy.value || branchSwitching.value) return;
   if (target.nodeId === 'STORYBOARD') {
@@ -723,11 +748,17 @@ const selectBranch = async (target: { workflowRunId: string; nodeId: string }) =
     if (!(await flushPendingEdits())) return;
     await nodeActivation.drain();
     const switchedRun = workflowRunId.value !== target.workflowRunId;
-    if (switchedRun) await activateCustomizedBranch(projectId, target.workflowRunId, target.nodeId);
+    if (switchedRun || historical)
+      await activateCustomizedBranch(
+        projectId,
+        target.workflowRunId,
+        target.nodeId,
+        historical ? 'HISTORICAL' : 'CURRENT',
+      );
     if (disposed) return;
     branchOpen.value = false;
     branchController?.abort();
-    if (switchedRun) {
+    if (switchedRun || historical) {
       storyboardViewedRunId.value = null;
       await load();
     } else {

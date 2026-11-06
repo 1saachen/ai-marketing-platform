@@ -27,6 +27,18 @@ class Candidate(Model):
 class Inventory(Model):
     objects: Annotated[list[Candidate], Field(min_length=1, max_length=1000)]
 
+
+class AssetUpdateDecision(Model):
+    assetId: Id
+    fields: Annotated[list[FieldName], Field(max_length=7)]
+    reason: Annotated[str, Field(min_length=1, max_length=2000)]
+
+
+class AssetUpdatePlan(Model):
+    decisions: Annotated[list[AssetUpdateDecision], Field(max_length=1000)]
+    additions: Annotated[list[Candidate], Field(max_length=1000)]
+    blockers: Annotated[list[Annotated[str, Field(min_length=1, max_length=2000)]], Field(max_length=100)]
+
 class Detail(Model):
     key: Literal['structure', 'material', 'markings', 'appearance', 'styling', 'layout', 'lighting']
     value: Text

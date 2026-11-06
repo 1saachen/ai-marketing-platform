@@ -1,4 +1,6 @@
 import type {
+  ActivateCustomizedBranchRequest,
+  CustomizedInformationMode,
   ActivateWorkflowNodeData,
   ApiResponse,
   CustomizedWorkflowBranchTreeData,
@@ -72,8 +74,12 @@ export const activateCustomizedBranch = (
   projectId: string,
   runId: string,
   nodeId: string,
+  informationMode: CustomizedInformationMode = 'CURRENT',
 ): Promise<ApiResponse<ActivateWorkflowNodeData>> =>
   requestJson(`${branchPath(projectId, runId)}/nodes/${encodeURIComponent(nodeId)}/activate`, {
     method: 'POST',
+    body: {
+      informationMode,
+    } satisfies ActivateCustomizedBranchRequest,
     operation: '切换版本分支',
   });
