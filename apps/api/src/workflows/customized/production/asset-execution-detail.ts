@@ -1,5 +1,6 @@
 import {
   ASSET_FIELD_LABELS,
+  CUSTOMIZED_BRIEF_LABELS,
   isProductionAsset,
   type ProductionAsset,
   type ProductionExecutionDetail,
@@ -16,6 +17,20 @@ const rows = (v: unknown): Row[] => (Array.isArray(v) ? v.map(row) : []);
 const text = (v: unknown): string => (typeof v === 'string' ? v : '');
 const strings = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
+export function assetReviewText(value: string): string {
+  const labels: Record<string, string> = CUSTOMIZED_BRIEF_LABELS;
+  return value
+    .replace(/(?:BRIEF\s+)?\/([A-Za-z]+)(?:\/\d+)?/g, (match, field: string) =>
+      Object.hasOwn(labels, field) ? `信息卡「${labels[field]}」` : match,
+    )
+    .replace(
+      /(?:SCRIPT\s+\/story\/|\bstory\.)(beats|structure|content|synopsis)(?:\/\d+)?/g,
+      (_, field: string) =>
+        `脚本「${({ beats: '叙事段落', structure: '故事结构', content: '故事正文', synopsis: '故事概述' } as Record<string, string>)[field]}」`,
+    )
+    .replace(/\bBRIEF\b/g, '信息卡')
+    .replace(/\bSCRIPT\b/g, '脚本');
+}
 const kindNames: Record<string, string> = {
   PRODUCT: '产品',
   CHARACTER: '人物',
@@ -172,6 +187,7 @@ export function assetExecutionDetail(
 
   if (input.assetUpdateVersion === 1 && ['INVENTORY', 'IDENTITY'].includes(step.id)) {
     const scope = assetUpdateScope(input, output) ?? [];
+    const blockers = strings(row(saved.assetUpdatePlan).blockers);
     return result(
       '哪些资产需要修改，哪些原样保留',
       '语言模型核对必要修改；未涉及的定义、身份与图片保持原样。',
@@ -193,11 +209,20 @@ export function assetExecutionDetail(
         ),
         section(
           '需要人工核对',
-          strings(row(saved.assetUpdatePlan).blockers).map(
-            (message) => ['问题', message] as [string, unknown],
-          ),
+          blockers.map((message) => ['问题', assetReviewText(message)] as [string, unknown]),
         ),
-        ...(step.status === 'FAILED' ? [section('下一步', [['处理建议', step.content]])] : []),
+        ...(step.status === 'FAILED'
+          ? [
+              section('下一步', [
+                [
+                  '处理建议',
+                  blockers.length
+                    ? '回到资产准备，在「需要人工核对」中补充说明并重新判断。'
+                    : step.content,
+                ],
+              ]),
+            ]
+          : []),
       ],
       waiting,
     );
@@ -301,6 +326,8 @@ export function assetExecutionDetail(
     );
   }
   if (step.id === 'IMAGE_PLAN') {
+    if (saved.assetUpdateEvidenceFailure && step.status === 'FAILED')
+      return result('资料引用未完成核对', step.content, []);
     return result(
       '后续需要制作哪些参考图',
       '这里整理图片的用途与具体要求；实际图片可以在后续按镜头需要准备。',

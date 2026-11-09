@@ -33,12 +33,21 @@
           "type": "string"
         },
         "severity": {
-          "enum": ["REQUIRED", "SUGGESTION"],
+          "enum": [
+            "REQUIRED",
+            "SUGGESTION"
+          ],
           "title": "Severity",
           "type": "string"
         }
       },
-      "required": ["assetId", "field", "issue", "basis", "severity"],
+      "required": [
+        "assetId",
+        "field",
+        "issue",
+        "basis",
+        "severity"
+      ],
       "title": "Finding",
       "type": "object"
     }
@@ -59,7 +68,10 @@
       "type": "array"
     }
   },
-  "required": ["summary", "findings"],
+  "required": [
+    "summary",
+    "findings"
+  ],
   "title": "AssetAudit",
   "type": "object"
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { ProductionAsset } from '@ai-marketing/contracts';
 import { assetImageBasis, mergePreparedAssets } from './asset-preparation.domain';
+import { pendingAssetImages, planAssetImageRefresh } from './asset-image-refresh';
 const asset = (): ProductionAsset => ({
   id: 'product',
   kind: 'PRODUCT',
@@ -33,5 +34,18 @@ describe('adopted image basis', () => {
     expect(merged.image).toEqual(original.image);
     expect(merged.imageBasis).toBe(original.imageBasis);
     expect(assetImageBasis(merged)).not.toBe(original.imageBasis);
+  });
+  it('keeps uncertain and previously pending images available without auto-enqueuing them', () => {
+    const original = { ...asset(), imageBasis: 'previous-image-basis' };
+    const updated = { ...original, description: '蓝色杯身' };
+    for (const action of ['KEEP', 'REVIEW'] as const) {
+      const plan = planAssetImageRefresh(
+        [original],
+        [updated],
+        [{ assetId: original.id, action, reason: '继续使用原图' }],
+      );
+      expect(plan.assetIds).toEqual([]);
+      expect(pendingAssetImages(plan.assets)).toEqual([updated]);
+    }
   });
 });

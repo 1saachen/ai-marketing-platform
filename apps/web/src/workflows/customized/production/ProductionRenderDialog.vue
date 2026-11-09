@@ -4,6 +4,7 @@ import { ImagePlus, Video, CircleHelp } from '@lucide/vue';
 import { BaseButton } from '@ai-marketing/ui';
 import {
   CUSTOMIZED_IMAGE_MODELS,
+  CUSTOMIZED_DEFAULT_IMAGE_SETTINGS,
   CUSTOMIZED_IMAGE_RESOLUTIONS,
   CUSTOMIZED_IMAGE_RATIOS,
   customizedAssetImageSelectionIssue,
@@ -42,9 +43,11 @@ const emit = defineEmits<{
   generate: [settings: CustomizedImageSettings];
   replace: [assetId: string, image: { assetId: string; version: number }];
 }>();
-const model = ref<CustomizedImageSettings['model']>(CUSTOMIZED_IMAGE_MODELS[0].id);
-const imageResolution = ref<CustomizedImageSettings['resolution']>('2K');
-const imageRatio = ref<CustomizedImageSettings['ratio']>('1:1');
+const model = ref<CustomizedImageSettings['model']>(CUSTOMIZED_DEFAULT_IMAGE_SETTINGS.model);
+const imageResolution = ref<CustomizedImageSettings['resolution']>(
+  CUSTOMIZED_DEFAULT_IMAGE_SETTINGS.resolution,
+);
+const imageRatio = ref<CustomizedImageSettings['ratio']>(CUSTOMIZED_DEFAULT_IMAGE_SETTINGS.ratio);
 const selectedIds = ref<string[]>([]);
 const catalog = computed(() => props.catalog ?? props.assets);
 const eligible = (asset: ProductionAsset) => independentlyPrepared(catalog.value, asset);

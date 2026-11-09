@@ -38,6 +38,11 @@ import {
   MaxLength,
   IsObject,
   IsBoolean,
+  IsArray,
+  ArrayMinSize,
+  ArrayMaxSize,
+  ArrayUnique,
+  Matches,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -45,6 +50,9 @@ import { FileInterceptor, AnyFilesInterceptor } from '@nestjs/platform-express';
 import type { ServerResponse } from 'node:http';
 import {
   CUSTOMIZED_IMAGE_MAX_BYTES,
+  ASSET_CLARIFICATION_MAX_LENGTH,
+  type AssetClarificationDecision,
+  type AssetClarificationRequest,
   CUSTOMIZED_IMAGE_REFERENCE_MAX_BYTES,
   type CustomizedImageSettings,
   type VideoDurationPolicy,
@@ -64,7 +72,11 @@ import type {
   ProductionOperation,
   ProductionStep,
 } from '@ai-marketing/contracts';
-import type { CustomizedUpdateNode, CustomizedUpdateRequest } from '@ai-marketing/contracts';
+import type {
+  CustomizedAssetImageRetentionRequest,
+  CustomizedUpdateNode,
+  CustomizedUpdateRequest,
+} from '@ai-marketing/contracts';
 import { ProjectService } from '../../../platform/project/project.service';
 import { ProductionRepository } from './production.repository';
 class Scope {
@@ -121,6 +133,25 @@ class LocalUpdate extends Scope {
     'ASSETS' | 'SHOTS' | 'PROMPT' | 'RENDER';
   @IsUUID() idempotencyKey!: string;
   @IsObject() incremental!: CustomizedUpdateRequest;
+}
+class RetainAssetImages extends Scope implements CustomizedAssetImageRetentionRequest {
+  @IsIn([1]) version!: 1;
+  @Matches(/^[a-f0-9]{64}$/) fingerprint!: string;
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(1000)
+  @ArrayUnique()
+  @IsString({ each: true })
+  @MaxLength(200, { each: true })
+  assetIds!: string[];
+}
+class ClarifyAssets extends Scope implements AssetClarificationRequest {
+  @IsUUID() idempotencyKey!: string;
+  @IsString() @MaxLength(ASSET_CLARIFICATION_MAX_LENGTH) explanation!: string;
+}
+class DecideAssetClarification extends Scope implements AssetClarificationDecision {
+  @IsBoolean() adopt!: boolean;
+  @IsOptional() @IsIn([true]) refreshAssetImages?: true;
 }
 class Worker {
   @IsUUID() projectId!: string;
@@ -188,6 +219,10 @@ export class ProductionService implements OnModuleInit, OnModuleDestroy {
   async preview(p: string, q: UpdateScope) {
     await this.projects.get(p);
     return this.repository.preview(p, q.workflowRunId, q.node, q.targetId ?? null);
+  }
+  async retainAssetImages(p: string, b: RetainAssetImages) {
+    await this.projects.get(p);
+    return this.repository.retainAssetImages(p, b.workflowRunId, b);
   }
   async localUpdate(p: string, b: LocalUpdate) {
     await this.projects.get(p);
@@ -291,6 +326,23 @@ export class ProductionService implements OnModuleInit, OnModuleDestroy {
     await this.projects.get(p);
     return this.repository.getTask(p, id);
   }
+  async clarifyAssets(p: string, id: string, b: ClarifyAssets) {
+    await this.projects.get(p);
+    if (!this.config.get<string>('CUSTOMIZED_ASSETS_WORKER_TOKEN'))
+      throw new ApiHttpException('资产准备服务未配置，请联系管理员', 503, 'VALIDATION_ERROR');
+    return this.repository.clarifyAssets(p, id, b, {
+      creative:
+        this.config.get<string>('CUSTOMIZED_STORYBOARD_CREATIVE_MODEL') ||
+        'doubao-seed-2-1-pro-260915',
+      detail:
+        this.config.get<string>('CUSTOMIZED_STORYBOARD_DETAIL_MODEL') ||
+        'doubao-seed-2-1-turbo-260628',
+    });
+  }
+  async decideAssetClarification(p: string, id: string, b: DecideAssetClarification) {
+    await this.projects.get(p);
+    return this.repository.decideAssetClarification(p, id, b);
+  }
   async promptTask(p: string, q: PromptTaskScope) {
     await this.projects.get(p);
     return this.repository.latestPromptTask(p, q.workflowRunId, q.clipId);
@@ -340,6 +392,12 @@ export class ProductionController {
     @Body() b: LocalUpdate,
   ) {
     return this.service.localUpdate(p, b);
+  }
+  @Put('asset-image-retentions') retainAssetImages(
+    @Param('projectId', ParseUUIDPipe) p: string,
+    @Body() b: RetainAssetImages,
+  ) {
+    return this.service.retainAssetImages(p, b);
   }
   @Put('video-settings') videoSettings(
     @Param('projectId', ParseUUIDPipe) p: string,
@@ -415,6 +473,20 @@ export class ProductionController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.service.action(p, id, false);
+  }
+  @Post('tasks/:id/clarification') clarifyAssets(
+    @Param('projectId', ParseUUIDPipe) p: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() b: ClarifyAssets,
+  ) {
+    return this.service.clarifyAssets(p, id, b);
+  }
+  @Post('tasks/:id/clarification-decision') decideAssetClarification(
+    @Param('projectId', ParseUUIDPipe) p: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() b: DecideAssetClarification,
+  ) {
+    return this.service.decideAssetClarification(p, id, b);
   }
   @Post('tasks/:id/review-draft') reviewDraft(
     @Param('projectId', ParseUUIDPipe) p: string,

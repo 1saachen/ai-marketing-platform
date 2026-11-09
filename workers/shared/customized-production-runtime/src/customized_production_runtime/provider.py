@@ -62,12 +62,12 @@ class Provider(StructuredResponsesMixin):
                 schema_name="customized_storyboard_" + stage.lower(),
                 stage=stage,
                 model=model,
-                prompt_version="customized-video-20261019-capacity-clips-v2" if stage.startswith('VIDEO_') else "customized-assets-20261016-reference-boundaries-v2" if stage.startswith('ASSET_') else "customized-storyboard-20261012-sparse-repair",
+                prompt_version="customized-assets-clarification-v1" if stage == 'ASSET_CLARIFICATION' else "customized-video-20261019-capacity-clips-v2" if stage.startswith('VIDEO_') else "customized-assets-20261016-reference-boundaries-v2" if stage.startswith('ASSET_') else "customized-storyboard-20261012-sparse-repair",
                 max_output_tokens=16384,
                 retry_max_output_tokens=32768,
                 request_timeout=self._timeout,
                 reasoning_effort="medium"
-                if stage in {"CONCEPT", "STORY", "REVIEW", "RECHECK", "PRODUCTION_REVIEW", "PRODUCTION_RECHECK", "ASSET_REVIEW", "ASSET_RECHECK", "VIDEO_DIRECTOR", "VIDEO_REVIEW", "VIDEO_RECHECK", "VIDEO_REPAIR"}
+                if stage in {"CONCEPT", "STORY", "REVIEW", "RECHECK", "PRODUCTION_REVIEW", "PRODUCTION_RECHECK", "ASSET_REVIEW", "ASSET_RECHECK", "ASSET_CLARIFICATION", "VIDEO_DIRECTOR", "VIDEO_REVIEW", "VIDEO_RECHECK", "VIDEO_REPAIR"}
                 else "low",
             )
             logging.info(

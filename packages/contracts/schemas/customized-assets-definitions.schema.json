@@ -10,7 +10,12 @@
           "type": "string"
         },
         "kind": {
-          "enum": ["PRODUCT", "CHARACTER", "SCENE", "PROP"],
+          "enum": [
+            "PRODUCT",
+            "CHARACTER",
+            "SCENE",
+            "PROP"
+          ],
           "title": "Kind",
           "type": "string"
         },
@@ -85,7 +90,10 @@
           "type": "string"
         }
       },
-      "required": ["key", "value"],
+      "required": [
+        "key",
+        "value"
+      ],
       "title": "Detail",
       "type": "object"
     },
@@ -93,7 +101,10 @@
       "additionalProperties": false,
       "properties": {
         "source": {
-          "enum": ["BRIEF", "SCRIPT"],
+          "enum": [
+            "BRIEF",
+            "SCRIPT"
+          ],
           "title": "Source",
           "type": "string"
         },
@@ -116,7 +127,12 @@
           "type": "string"
         }
       },
-      "required": ["source", "path", "quote", "field"],
+      "required": [
+        "source",
+        "path",
+        "quote",
+        "field"
+      ],
       "title": "Evidence",
       "type": "object"
     },
@@ -140,7 +156,11 @@
           "type": "string"
         }
       },
-      "required": ["name", "purpose", "requirements"],
+      "required": [
+        "name",
+        "purpose",
+        "requirements"
+      ],
       "title": "ImageNeed",
       "type": "object"
     },
@@ -162,7 +182,11 @@
           "type": "string"
         },
         "treatment": {
-          "enum": ["INDEPENDENT", "SCENE_DETAIL", "CHARACTER_DETAIL"],
+          "enum": [
+            "INDEPENDENT",
+            "SCENE_DETAIL",
+            "CHARACTER_DETAIL"
+          ],
           "title": "Treatment",
           "type": "string"
         },
@@ -244,7 +268,11 @@
           "type": "string"
         }
       },
-      "required": ["field", "question", "impact"],
+      "required": [
+        "field",
+        "question",
+        "impact"
+      ],
       "title": "Question",
       "type": "object"
     }
@@ -261,7 +289,9 @@
       "type": "array"
     }
   },
-  "required": ["assets"],
+  "required": [
+    "assets"
+  ],
   "title": "Definitions",
   "type": "object"
 }

@@ -16,6 +16,7 @@ import { WorkflowWorkingRepository } from '../../../platform/workflow/workflow-w
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
 import { ProductionRepository } from './production.repository';
 import { videoHash } from './video-production.domain';
+import { reusableLocalShotReview } from './local-shot-review-recovery';
 
 it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
   'V2 persists only drafts, confirms clip dependencies, rejects old callbacks and preserves sibling scope',
@@ -217,6 +218,112 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
       await repo.savePrompt(p, r, 2, manualPrompt);
       expect((await repo.workspace(p, r)).prompts[0]?.revision).toBe(2);
       expect(await db.workflowRun.count({ where: { projectId: p } })).toBe(branchCount);
+      // A local storyboard update confirms its own result even if the page never polls.
+      await db.workingArtifact.update({
+        where: {
+          id: clips.find((clip) => clip.artifactKey === 'customized-video-clip:clip-b')!.id,
+        },
+        data: { freshness: 'STALE' },
+      });
+      const shotPreview = await repo.preview(p, r, 'SHOTS');
+      expect(shotPreview.items.map((item) => item.id)).toEqual(['clip-b']);
+      const [local] = await repo.startUpdates(
+        p,
+        r,
+        'SHOTS',
+        { version: 1, fingerprint: shotPreview.fingerprint },
+        randomUUID(),
+        models,
+        {},
+      );
+      const localClaim = await repo.claim(p, local!.id, 'VIDEO');
+      const updated = structuredClone(d);
+      updated.videoPlan.shots.find((s) => s.id === 'shot-c')!.visual =
+        '杯身正面保持可见，光线略微抬亮';
+      const changes = [{ clipId: 'clip-b', reason: '更新定版镜头光线' }];
+      const localAudit: VideoAudit = {
+        ...audit,
+        findings: [
+          {
+            id: 'reference-warning',
+            severity: 'WARNING',
+            category: 'CAPACITY',
+            title: '时长与参考值有差异',
+            impact: '已保留确认过的镜头时长',
+            evidence: [{ entity: 'TIMING', id: 'durationPolicy', field: 'seconds' }],
+            affectedClipIds: ['clip-b'],
+            affectedShotIds: ['shot-c'],
+            suggestedFix: '保留本次分镜时长',
+            repairKind: 'INPUT',
+          },
+        ],
+      };
+      const savedLocal = {
+        value: updated,
+        final: updated,
+        audit: localAudit,
+        auditHash: videoHash(updated.videoPlan),
+        changes,
+        localCandidate: { plan: updated.videoPlan, changes },
+        failureReason: 'REVIEW_UNRESOLVED',
+      };
+      await repo.checkpoint(
+        p,
+        local!.id,
+        localClaim.attemptToken!,
+        { id: 'REVIEW', status: 'FAILED', title: '审校', content: '保留候选和审校结果' },
+        savedLocal,
+        'VIDEO',
+      );
+      await repo.fail(p, local!.id, localClaim.attemptToken!, false, 'VIDEO');
+      expect((await repo.getTask(p, local!.id)).localStoryboard?.reviewAvailable).toBe(true);
+      const localInput = localClaim.input as unknown as ProductionInput;
+      expect(
+        reusableLocalShotReview(localInput, localInput, { ...savedLocal, auditHash: 'different' }),
+      ).toBeNull();
+      expect(
+        reusableLocalShotReview(
+          { ...localInput, draftRevision: localInput.draftRevision + 1 },
+          localInput,
+          savedLocal,
+        ),
+      ).toBeNull();
+      expect(
+        reusableLocalShotReview(
+          { ...localInput, incremental: { ...localInput.incremental!, targetIds: ['clip-a'] } },
+          localInput,
+          savedLocal,
+        ),
+      ).toBeNull();
+      const [resumed] = await repo.startUpdates(
+        p,
+        r,
+        'SHOTS',
+        { version: 1, fingerprint: shotPreview.fingerprint },
+        randomUUID(),
+        models,
+        {},
+      );
+      const resumedClaim = await repo.claim(p, resumed!.id, 'VIDEO');
+      expect(resumedClaim.output).toMatchObject({
+        localCandidate: savedLocal.localCandidate,
+        audit: localAudit,
+        auditHash: savedLocal.auditHash,
+      });
+      const { failureReason: _, ...validatedLocal } = savedLocal;
+      await finish(resumed!, resumedClaim.attemptToken!, updated, validatedLocal);
+      w = await repo.workspace(p, r);
+      expect(w.shotsConfirmed).toBe(true);
+      expect(w.confirmedDocument).toEqual(updated);
+      expect(w.document).toEqual(w.confirmedDocument);
+      expect(w.prompts[0]).toMatchObject({ revision: 2, stale: false });
+      expect((await repo.preview(p, r, 'SHOTS')).items).toEqual([]);
+      expect(await db.workflowRun.count({ where: { projectId: p } })).toBe(branchCount);
+      await repo.complete(p, resumed!.id, resumedClaim.attemptToken!, updated, 'VIDEO');
+      await expect(
+        repo.complete(p, local!.id, localClaim.attemptToken!, updated, 'VIDEO'),
+      ).rejects.toThrow();
+      expect((await repo.workspace(p, r)).draftRevision).toBe(w.draftRevision);
       // Unrelated clip edit does not stale clip-a's prompt.
       d.videoPlan.shots.find((s) => s.id === 'shot-c')!.visual = '独立产品定版中杯身略向右侧';
       revision = (await repo.save(p, r, w.draftRevision, d, 'SHOTS', true)).revision;

@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import pytest
 from ai_runtime.responses import ProviderError
-from customized_production_runtime.image_generation import IMAGE_LAYOUTS, ImageSettings, generate_image, image_prompt, run_image
+from customized_production_runtime.image_generation import IMAGE_LAYOUTS, AssetImageRefreshSettings, ImageSettings, generate_image, image_prompt, run_image
 
 PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6D1kAAAAASUVORK5CYII=')
 SETTINGS = {'model': 'doubao-seedream-5-0-pro-260628', 'resolution': '2K', 'ratio': '1:1', 'assetIds': ['product', 'room']}
@@ -108,6 +108,12 @@ def test_contract_matches_pinned_models_and_limits() -> None:
     for ids in ([], ['same', 'same'], ['x'] * 21, [' '], ['x' * 201]):
         with pytest.raises(ValueError):
             ImageSettings.model_validate({**SETTINGS, 'assetIds': ids})
+
+def test_server_selected_image_refresh_accepts_the_catalog_scope() -> None:
+    ids = [f'object-{n}' for n in range(21)]
+    assert AssetImageRefreshSettings.model_validate({**SETTINGS, 'assetIds': ids}).assetIds == ids
+    with pytest.raises(ValueError):
+        ImageSettings.model_validate({**SETTINGS, 'assetIds': ids})
 
 
 @pytest.mark.asyncio

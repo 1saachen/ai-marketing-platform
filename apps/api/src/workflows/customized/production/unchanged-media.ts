@@ -12,6 +12,7 @@ import type { Prisma, WorkingArtifact } from '../../../generated/prisma/client';
 import { workingArtifactContentHash } from '../../../platform/workflow/workflow-working.repository';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
 import { lockCustomizedProject } from '../../../platform/workflow/customized-branches';
+import { sharedCustomizedBrief } from '../../../platform/workflow/customized-shared-brief';
 import { clipPayload } from './video-production.domain';
 type Tx = Prisma.TransactionClient;
 const equal = (a: unknown, b: unknown) => workflowStateHash(a) === workflowStateHash(b);
@@ -51,7 +52,7 @@ export async function rebindUnchanged(
     sources.some(
       (s) =>
         s.projectId !== p ||
-        s.workflowRunId !== r ||
+        (s.workflowRunId !== r && s.artifactKey !== 'customized-brief') ||
         s.freshness !== 'CURRENT' ||
         s.availability !== 'AVAILABLE',
     )
@@ -68,12 +69,22 @@ export async function rebindUnchanged(
       freshness: 'CURRENT',
     },
   });
+  // A confirmed information card can be shared within the same root family.
+  // Rebind to the exact card consumed by the task, as in a content-changing commit.
+  if (sources.some((s) => s.workflowRunId !== r)) {
+    const brief = await sharedCustomizedBrief(tx, p, r, undefined, true);
+    if (brief?.availability === 'AVAILABLE' && brief.freshness === 'CURRENT') heads.push(brief);
+  }
   if (
     new Set(sources.map((s) => s.id)).size !== sources.length ||
     sources.some(
       (s) =>
         !heads.some(
-          (h) => h.id === s.id && h.revision === s.revision && h.contentHash === s.contentHash,
+          (h) =>
+            h.id === s.id &&
+            h.workflowRunId === s.workflowRunId &&
+            h.revision === s.revision &&
+            h.contentHash === s.contentHash,
         ),
     )
   )

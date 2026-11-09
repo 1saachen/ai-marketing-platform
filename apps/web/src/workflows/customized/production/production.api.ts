@@ -11,9 +11,12 @@ import type {
   CustomizedVideoRenderSettings,
   CustomizedVideoSettingsDraft,
   Asset,
+  CustomizedAssetImageRetentionRequest,
   CustomizedUpdateNode,
   CustomizedUpdatePreview,
   CustomizedUpdateRequest,
+  AssetClarificationRequest,
+  AssetClarificationDecision,
 } from '@ai-marketing/contracts';
 import { requestJson } from '../../../api/http-client';
 const base = (p: string) => `/projects/${encodeURIComponent(p)}/workflows/customized/production`;
@@ -27,6 +30,45 @@ async function call<T>(
   return (await requestJson<ApiResponse<T>>(base(p) + path, { method, body, signal })).data;
 }
 export const productionApi = {
+  retainAssetImages: (
+    p: string,
+    r: string,
+    body: CustomizedAssetImageRetentionRequest,
+    signal?: AbortSignal,
+  ) =>
+    call<CustomizedUpdatePreview>(
+      p,
+      '/asset-image-retentions',
+      'PUT',
+      { workflowRunId: r, ...body },
+      signal,
+    ),
+  clarifyAssets: (
+    p: string,
+    taskId: string,
+    body: AssetClarificationRequest,
+    signal?: AbortSignal,
+  ) =>
+    call<ProductionTask>(
+      p,
+      `/tasks/${encodeURIComponent(taskId)}/clarification`,
+      'POST',
+      body,
+      signal,
+    ),
+  decideAssetClarification: (
+    p: string,
+    taskId: string,
+    body: AssetClarificationDecision,
+    signal?: AbortSignal,
+  ) =>
+    call<ProductionTask>(
+      p,
+      `/tasks/${encodeURIComponent(taskId)}/clarification-decision`,
+      'POST',
+      body,
+      signal,
+    ),
   localUpdate: (
     p: string,
     r: string,

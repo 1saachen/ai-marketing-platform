@@ -45,6 +45,11 @@ export const ASSET_EDITABLE_FIELDS = [
   'imageRequirements',
   'preparation',
 ] as const;
+export type AssetImageDecision = {
+  assetId: string;
+  action: 'KEEP' | 'UPDATE' | 'REVIEW';
+  reason: string;
+};
 export type AssetUpdatePlan = {
   decisions: {
     assetId: string;
@@ -63,6 +68,7 @@ export type AssetUpdatePlan = {
     sources: AssetEvidence[];
   }[];
   blockers: string[];
+  imageDecisions?: AssetImageDecision[];
 };
 export function isAssetUpdatePlan(value: unknown): value is AssetUpdatePlan {
   if (!object(value)) return false;
@@ -80,6 +86,19 @@ export function isAssetUpdatePlan(value: unknown): value is AssetUpdatePlan {
         !!d.reason.trim() &&
         d.reason.length <= 2000,
     ) &&
+    (value.imageDecisions === undefined ||
+      rows(
+        value.imageDecisions,
+        (d) =>
+          object(d) &&
+          text(d.assetId) &&
+          !!d.assetId.trim() &&
+          typeof d.action === 'string' &&
+          ['KEEP', 'UPDATE', 'REVIEW'].includes(d.action) &&
+          text(d.reason) &&
+          !!d.reason.trim() &&
+          d.reason.length <= 2000,
+      )) &&
     rows(value.blockers, (b) => text(b) && !!b.trim() && b.length <= 2000) &&
     rows(
       value.additions,

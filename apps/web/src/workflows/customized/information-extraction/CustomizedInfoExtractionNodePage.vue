@@ -24,6 +24,7 @@ import { requestActionConfirmation } from '../../../shared/composables/action-co
 import WorkflowInformationDialog from '../../../platform/workflow/components/WorkflowInformationDialog.vue';
 import ImportMaterialRow from '../../../platform/file/components/ImportMaterialRow.vue';
 import ImportImagePreview from '../../../platform/file/components/ImportImagePreview.vue';
+import CustomizedNodeHeading from '../shared/CustomizedNodeHeading.vue';
 import {
   emptyCustomizedExtractionView,
   customizedExtractionEditable,
@@ -282,20 +283,13 @@ const useAlternative = (id: string, index: number) => {
       <button type="button" @click="emit('retry')"><RefreshCw :size="14" />重新加载</button>
     </div>
     <template v-else>
-      <WorkflowEditingBanner
-        v-if="view.temporary"
-        node-label="信息提炼"
-        description="修改先保留在编辑副本中；保存版本后用于脚本创作，取消编辑返回原版本。"
-      />
-      <header class="extraction-heading">
-        <div class="extraction-heading__title">
-          <span>02</span>
-          <div>
-            <h2 id="customized-extraction-title">视频创作信息卡</h2>
-            <p>整理品牌信息、产品信息与视觉约束，确认后用于脚本创作</p>
-          </div>
-        </div>
-        <div class="extraction-heading__actions">
+      <CustomizedNodeHeading
+        index="02"
+        title-id="customized-extraction-title"
+        title="视频创作信息卡"
+        description="整理品牌信息、产品信息与视觉约束，确认后用于脚本创作"
+      >
+        <template #actions>
           <WorkflowNodeEditActions
             :editing="view.editing"
             :temporary="view.temporary"
@@ -314,8 +308,15 @@ const useAlternative = (id: string, index: number) => {
             @extract="emit('extract')"
             @details="workflowOpen = true"
           />
-        </div>
-      </header>
+        </template>
+        <template v-if="$slots['local-update']" #update><slot name="local-update" /></template>
+      </CustomizedNodeHeading>
+      <slot name="notices" />
+      <WorkflowEditingBanner
+        v-if="view.temporary"
+        node-label="信息提炼"
+        description="修改先保留在编辑副本中；保存版本后用于脚本创作，取消编辑返回原版本。"
+      />
 
       <div v-if="sourceConfirmed && !available" class="state-alert information" role="status">
         <AlertCircle :size="17" />
@@ -598,30 +599,6 @@ const useAlternative = (id: string, index: number) => {
   border-radius: 20px;
   box-shadow: 0 8px 25px #7a4e3b0c;
 }
-.extraction-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 22px;
-  flex-wrap: wrap;
-}
-.extraction-heading__title {
-  display: flex;
-  gap: 13px;
-  align-items: center;
-}
-.extraction-heading__title > span {
-  display: grid;
-  flex: 0 0 44px;
-  height: 44px;
-  place-items: center;
-  color: #d83e69;
-  background: #fff0f4;
-  border-radius: 14px;
-  font-size: 13px;
-  font-weight: 900;
-}
 h2,
 h3,
 h4,
@@ -638,18 +615,6 @@ h3 {
 h4 {
   color: #263247;
   font-size: 14px;
-}
-.extraction-heading p {
-  margin-top: 5px;
-  color: #7d899d;
-  font-size: 12px;
-  line-height: 1.6;
-}
-.extraction-heading__actions {
-  display: flex;
-  flex-wrap: wrap;
-  margin-left: auto;
-  gap: 10px;
 }
 button {
   display: inline-flex;
@@ -960,9 +925,6 @@ button:focus-visible {
   .customized-extraction-node {
     padding: 16px;
   }
-  .extraction-heading__actions {
-    margin-left: 0;
-  }
   .base-fields {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -979,5 +941,3 @@ button:focus-visible {
   }
 }
 </style>
-
-<style scoped src="../../../platform/workflow/components/workflow-extraction-heading.css"></style>

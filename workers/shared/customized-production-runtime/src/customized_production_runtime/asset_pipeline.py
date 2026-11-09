@@ -12,6 +12,18 @@ EDITABLE = ('name', 'description', 'knownFacts', 'designNotes', 'sourceText', 'i
 KIND_NAMES = {'PRODUCT': '产品', 'CHARACTER': '人物', 'SCENE': '场景', 'PROP': '道具'}
 FIELD_NAMES = {'structure': '结构与形态', 'material': '材质与颜色', 'markings': '标识与位置', 'appearance': '外形特征', 'styling': '服装与造型', 'layout': '空间与陈设', 'lighting': '光线与氛围', 'name': '名称', 'description': '公共形象', 'knownFacts': '已确认信息', 'designNotes': '设计内容', 'sourceText': '依据说明', 'imageRequirements': '图片制作要求', 'preparation': '分类定义'}
 
+TEXT_UPDATE_BOUNDARY = (
+    '本任务交付的是资产文字定义和未来图片的文字制作要求。现有参考图的有无、旧款外观、是否匹配或是否换图，'
+    '都属于文字保存之后的独立图片制作步骤，不影响本次文字更新或审校。'
+    '即使补充说明提及旧图和暂不换图，也按已确认事实更新文字，不要求再次确认旧图。'
+    '只判断资料事实、人工保护字段与文字制作要求是否存在实际冲突。不要用旧图的外观改写新定义。'
+)
+
+def asset_text_definitions(assets: list[dict[str, Any]], snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    if snapshot.get('assetTextUpdateVersion') != 1:
+        return assets
+    return [{k: v for k, v in asset.items() if k not in ('image', 'imageBasis')} for asset in assets]
+
 def source_rows(value: Any, path: str = '') -> list[dict[str, str]]:
     if isinstance(value, str):
         return [{'path': path, 'text': value}] if value.strip() else []
@@ -193,6 +205,10 @@ def describe(assets: list[dict[str, Any]]) -> str:
 
 async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> None:
     snapshot = claim['input']
+    if snapshot.get('assetClarification', {}).get('version') == 1:
+        from .asset_clarification import run_clarification
+        await run_clarification(api, provider, claim)
+        return
     steps = {s['id']: s for s in claim['steps']}
     stored = copy.deepcopy(claim.get('output') or {})
     index = evidence_index(snapshot)
@@ -202,8 +218,13 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
     locked = [{'id': a['id'], 'fields': {k: a[k] for k in protected_fields(a) if k in a}} for a in existing]
     context = {'sources': sources, 'existingIdentities': identity, 'protectedDefinitions': locked, 'targetAssetId': snapshot.get('targetAssetId')}
     if snapshot.get('incremental'):
-        context['localUpdate']={'version':1,'possibleAffectedIds':snapshot['incremental']['targetIds'],'existingDefinitions':existing,
+        context['localUpdate']={'version':1,'possibleAffectedIds':snapshot['incremental']['targetIds'],'existingDefinitions':asset_text_definitions(existing, snapshot),
             'instructions':'这是当前目录的局部更新，核对最新来源。相同实体必须复用已有ID；未受影响的定义原样保留，不换设计、不重命名、不改制作归属；人工字段和已有图片保持。只补充必要新增对象，不隐式删除旧对象。'}
+    if snapshot.get('assetProductionNote'):
+        context['confirmedProductionRequirement'] = {
+            'text': snapshot['assetProductionNote'],
+            'boundary': '只用于这次资产制作判断，不作为产品事实或原文依据。遵循明确的展示取舍；只影响实际出现在定义与制作要求中的内容。省略不确定的可选展示时，不再要求确定其数值；不能保留仍会误导实际画面的表述。不要借此覆盖人工字段或更改已确认脚本。',
+        }
 
     async def checkpoint(node: str, status: str, title: str, content: str) -> None:
         await api.call('PUT', 'checkpoint', {'step': {'id': node, 'status': status, 'title': title, 'content': content}, 'output': stored})
@@ -356,6 +377,9 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
             raise result
     assets_by_id = {a['id']: a for values in stored['batches'].values() for a in values}
     assets = base_assets + [assets_by_id[a['id']] for a in inventory]
+    if scoped_update and snapshot.get('assetTextUpdateVersion') == 1:
+        from .asset_update import repair_update_evidence
+        assets = await repair_update_evidence(provider, snapshot, assets, stored, checkpoint)
     assets_by_id = {a['id']: a for a in assets}
     def validate_candidate(values: list[dict[str, Any]]) -> None:
         if scoped_update:
@@ -375,10 +399,12 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
         '资产公共参考图不是逐镜分镜图。仅检查已写明的对象结构与状态是否自洽，不以未复现每个剧情阶段、动作结果、全部相连设备或人物为REQUIRED；中性场景图、独立产品图均合法。逐镜动作与完整画面绑定留给视频制作节点。必要对象遗漏与已明确状态的实质矛盾仍须指出，同时核对knownFacts是否混入受众、安装位置、标识工艺等推导。'
         '跨对象设定若间接确定了未知产品结构、插脚/接口制式或兼容性，首次审校即为REQUIRED，不能只列优化建议后在复核升级。每个assetId+field只列一条，合并该字段内的全部问题。'
         '发现遗漏时定位最相关对象preparation字段并说明缺失对象；遗漏动作必需的独立对象仍属于必须修正的问题，不能用待确认说明掩盖。受保护字段存在冲突应指出，不允许自动重写。')
+    if snapshot.get('assetTextUpdateVersion') == 1:
+        audit_instruction += TEXT_UPDATE_BOUNDARY + '仅因既有图片需要核对，不得产生REQUIRED或返修要求。'
     if steps['REVIEW']['status'] != 'SUCCEEDED':
         await checkpoint('REVIEW', 'RUNNING', '全局独立审校', '正在核对实际对象、事实依据和制作要求')
         audit = AssetAudit.model_validate(await checked_audit('audit', 'ASSET_REVIEW', 'REVIEW', assets,
-            {**context, 'inventory': inventory, 'assets': assets}, audit_instruction))
+            {**context, 'inventory': inventory, 'assets': asset_text_definitions(assets, snapshot)}, audit_instruction))
         await checkpoint('REVIEW', 'SUCCEEDED', '审校结论', audit.summary+'\n'+'\n'.join(next(a['name'] for a in assets if a['id']==f.assetId)+'：'+f.issue+'；依据：'+f.basis for f in audit.findings))
     if steps['REPAIR']['status'] != 'SUCCEEDED':
         required = [f for f in stored['audit']['findings'] if f['severity'] == 'REQUIRED']
@@ -400,7 +426,7 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
                     raise ValueError('protected asset field requires manual review')
                 await checkpoint('REPAIR', 'RUNNING', '修订具体字段', '\n'.join(f['issue'] for f in required))
                 patch = await provider.generate('ASSET_REPAIR', snapshot['models']['creative'], AssetRepair,
-                    {**context, 'assets': assets, 'findings': required},
+                    {**context, 'assets': asset_text_definitions(assets, snapshot), 'findings': required},
                     '仅返回findings指定assetId和field的补丁，每个准确字段一次，不返回整份目录。正常字段不改。preparation字段填结构对象、text为null；其他字段填text、preparation为null。保留身份、归属和来源引用规则。未知信息明确待确认，不编造产品事实。')
                 revised = apply_repair(assets, patch.model_dump(), stored['audit'], snapshot)
                 validate_candidate(revised)
@@ -413,7 +439,7 @@ async def run_assets(api: Api, provider: Provider, claim: dict[str, Any]) -> Non
                 await checkpoint('REPAIR', 'RUNNING', '修改内容', changes)
             assets = stored['revised']
             audit = AssetAudit.model_validate(await checked_audit('recheck', 'ASSET_RECHECK', 'REPAIR', assets,
-                {**context, 'assets': assets, 'previousFindings': stored['audit']['findings']}, '核查原问题是否解决，复核修订后的完整目录。对照首次审校全部结论，解释确有新依据的问题；不能仅因未修改原建议就将其升级为必须修改。'+audit_instruction))
+                {**context, 'assets': asset_text_definitions(assets, snapshot), 'previousFindings': stored['audit']['findings']}, '核查原问题是否解决，复核修订后的完整目录。对照首次审校全部结论，解释确有新依据的问题；不能仅因未修改原建议就将其升级为必须修改。'+audit_instruction))
             await checkpoint('REPAIR', 'RUNNING', '复核结论', stored.get('repairChanges', '')+'\n\n'+audit.summary+'\n'+'\n'.join(f.issue for f in audit.findings))
             if any(f['severity'] == 'REQUIRED' for f in stored['recheck']['findings']):
                 raise ValueError('asset review still has unresolved issues')

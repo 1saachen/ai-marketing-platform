@@ -3,11 +3,13 @@ withDefaults(
   defineProps<{
     disabled?: boolean;
     loading?: boolean;
+    variant?: 'primary' | 'secondary' | 'accent';
     type?: 'button' | 'submit' | 'reset';
   }>(),
   {
     disabled: false,
     loading: false,
+    variant: 'primary',
     type: 'button',
   },
 );
@@ -20,6 +22,7 @@ defineEmits<{
 <template>
   <button
     class="base-button"
+    :class="`base-button--${variant}`"
     :type="type"
     :disabled="disabled || loading"
     @click="$emit('click', $event)"
@@ -31,6 +34,10 @@ defineEmits<{
 
 <style scoped>
 .base-button {
+  --button-fill: #155eef;
+  --button-hover: #004eeb;
+  --button-text: #fff;
+  --button-border: transparent;
   display: inline-flex;
   min-height: 42px;
   align-items: center;
@@ -39,8 +46,8 @@ defineEmits<{
   border: 0;
   border-radius: 10px;
   padding: 0 18px;
-  color: #ffffff;
-  background: #155eef;
+  color: var(--button-text);
+  background: var(--button-fill);
   font: inherit;
   font-weight: 650;
   cursor: pointer;
@@ -50,8 +57,26 @@ defineEmits<{
 }
 
 .base-button:hover:not(:disabled) {
-  background: #004eeb;
+  background: var(--button-hover);
   transform: translateY(-1px);
+}
+
+.base-button--secondary,
+.base-button--accent {
+  border: 1px solid var(--button-border);
+}
+.base-button--secondary {
+  --button-fill: #fff;
+  --button-hover: #f3f7fd;
+  --button-text: #3b506b;
+  --button-border: #d6e0ee;
+}
+
+.base-button--accent {
+  --button-fill: #fff6e3;
+  --button-hover: #ffedc6;
+  --button-text: #7d4710;
+  --button-border: #ebcc94;
 }
 
 .base-button:focus-visible {
@@ -67,10 +92,21 @@ defineEmits<{
 .base-button__spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid rgb(255 255 255 / 45%);
-  border-top-color: #ffffff;
+  border: 2px solid currentColor;
+  border-inline-end-color: transparent;
   border-radius: 50%;
   animation: spin 700ms linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .base-button {
+    transition: none;
+  }
+  .base-button:hover:not(:disabled) {
+    transform: none;
+  }
+  .base-button__spinner {
+    animation: none;
+  }
 }
 
 @keyframes spin {

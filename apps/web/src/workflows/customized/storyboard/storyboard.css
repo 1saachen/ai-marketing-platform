@@ -7,9 +7,6 @@
   border-radius: 24px;
   box-shadow: 0 10px 36px #345a9407;
 }
-.storyboard-heading,
-.heading-copy,
-.heading-actions,
 .settings-head,
 .scripts-toolbar,
 .toolbar-actions,
@@ -20,43 +17,6 @@
   display: flex;
   align-items: center;
   gap: 12px;
-}
-.storyboard-heading {
-  flex-wrap: wrap;
-  justify-content: space-between;
-  margin-bottom: 24px;
-  gap: 20px;
-}
-.heading-copy {
-  gap: 14px;
-}
-.node-index {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  flex-shrink: 0;
-  color: #2563eb;
-  background: #eaf1ff;
-  border: 1px solid #d7e4fc;
-  border-radius: 12px;
-  font-size: 15px;
-  font-weight: 750;
-}
-.heading-copy h2 {
-  margin: 0 0 6px;
-  font-size: 22px;
-  letter-spacing: -0.5px;
-}
-.heading-copy p {
-  margin: 0;
-  color: #8190a7;
-  font-size: 12px;
-  line-height: 1.6;
-}
-.heading-actions {
-  gap: 10px;
-  flex-wrap: wrap;
 }
 .storyboard-page button,
 .storyboard-page select,
@@ -81,7 +41,7 @@
 .storyboard-page h4 {
   margin: 0;
 }
-.storyboard-page button,
+.storyboard-page button:not(.base-button),
 .export-menu summary {
   display: inline-flex;
   align-items: center;
@@ -684,22 +644,6 @@
   .storyboard-page {
     padding: 18px 16px;
     border-radius: 19px;
-  }
-  .heading-copy h2 {
-    font-size: 20px;
-  }
-  .heading-copy p {
-    font-size: 11px;
-  }
-  .heading-actions {
-    gap: 7px;
-    width: 100%;
-  }
-  .heading-actions :deep(button) {
-    padding: 0 10px;
-  }
-  .heading-actions :deep(.secondary-button) {
-    min-width: 0;
   }
   .creation-settings .settings-head {
     padding: 15px;

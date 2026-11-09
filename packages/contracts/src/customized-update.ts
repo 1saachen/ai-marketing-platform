@@ -5,7 +5,19 @@ export type ActivateCustomizedBranchRequest = { informationMode?: CustomizedInfo
 /** Read-only impact projection. Creating a task must validate this fingerprint again. */
 export type CustomizedUpdateNode =
   'INFORMATION_EXTRACTION' | 'SCRIPT' | 'ASSETS' | 'SHOTS' | 'PROMPT' | 'RENDER';
-export type CustomizedUpdateRequest = { version: 1; fingerprint: string };
+export type CustomizedUpdateRequest = {
+  version: 1;
+  fingerprint: string;
+  /** The user confirmed that this asset update can also generate images. */
+  refreshAssetImages?: true;
+  /** Exact selected subjects for an image-only update. */
+  imageAssetIds?: string[];
+};
+export type CustomizedAssetImageRetentionRequest = {
+  version: 1;
+  fingerprint: string;
+  assetIds: string[];
+};
 export type CustomizedUpdateItem = {
   id: string;
   name: string;
@@ -21,6 +33,8 @@ export type CustomizedUpdatePreview = {
   items: CustomizedUpdateItem[];
   blockers: string[];
   calls: ('TEXT' | 'IMAGE' | 'VIDEO')[];
+  /** Maximum existing images considered when text is pending, exact count for an image-only update. */
+  assetImageCount?: number;
   /** Scope is a dependency-based upper bound; the model determines semantic changes. */
   scope: 'DEPENDENCIES';
 };

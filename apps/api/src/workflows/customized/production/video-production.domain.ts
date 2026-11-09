@@ -97,7 +97,9 @@ export function videoEvidenceValue(
     SOURCE: plan.sourceUnits,
   };
   const item =
-    e.entity === 'TIMING' ? plan.timing : collections[e.entity]?.find((x) => x.id === e.id);
+    e.entity === 'TIMING'
+      ? plan[e.id === 'durationPolicy' || e.id === 'capability' ? e.id : 'timing']
+      : collections[e.entity]?.find((x) => x.id === e.id);
   if (!item || !Object.hasOwn(item, e.field)) return null;
   const value = (item as unknown as Record<string, unknown>)[e.field];
   if (e.entity === 'CUE' && e.field === 'sourceRef') {

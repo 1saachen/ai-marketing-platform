@@ -27,7 +27,12 @@
           "type": "string"
         },
         "kind": {
-          "enum": ["PRODUCT", "CHARACTER", "SCENE", "PROP"],
+          "enum": [
+            "PRODUCT",
+            "CHARACTER",
+            "SCENE",
+            "PROP"
+          ],
           "title": "Kind",
           "type": "string"
         },
@@ -47,7 +52,11 @@
           "type": "string"
         },
         "treatment": {
-          "enum": ["INDEPENDENT", "SCENE_DETAIL", "CHARACTER_DETAIL"],
+          "enum": [
+            "INDEPENDENT",
+            "SCENE_DETAIL",
+            "CHARACTER_DETAIL"
+          ],
           "title": "Treatment",
           "type": "string"
         },
@@ -90,7 +99,10 @@
       "additionalProperties": false,
       "properties": {
         "source": {
-          "enum": ["BRIEF", "SCRIPT"],
+          "enum": [
+            "BRIEF",
+            "SCRIPT"
+          ],
           "title": "Source",
           "type": "string"
         },
@@ -113,7 +125,12 @@
           "type": "string"
         }
       },
-      "required": ["source", "path", "quote", "field"],
+      "required": [
+        "source",
+        "path",
+        "quote",
+        "field"
+      ],
       "title": "Evidence",
       "type": "object"
     }
@@ -130,7 +147,9 @@
       "type": "array"
     }
   },
-  "required": ["objects"],
+  "required": [
+    "objects"
+  ],
   "title": "Inventory",
   "type": "object"
 }

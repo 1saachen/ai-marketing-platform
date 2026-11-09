@@ -3,6 +3,7 @@ import type {
   CustomizedUpdatePreview,
   ProductionDocument,
   ProductionAsset,
+  ProductionInput,
   StoryboardInput,
 } from '@ai-marketing/contracts';
 import { isVideoDocument, resolveCustomizedAssetImageSource } from '@ai-marketing/contracts';
@@ -17,6 +18,11 @@ import {
   sharedCustomizedBrief,
   scriptUsesBrief,
 } from '../../../platform/workflow/customized-shared-brief';
+import { assetImageReviewItems, picturedAssetOwners } from './asset-image-refresh';
+import {
+  ASSET_IMAGE_RETENTION_NODE,
+  retainedAssetImageFingerprints,
+} from './asset-image-retention';
 
 export async function updatePreview(
   tx: Prisma.TransactionClient,
@@ -109,6 +115,8 @@ export async function updatePreview(
           ? 'customized-clip-prompt:'
           : 'customized-clip-video:';
   const items: CustomizedUpdatePreview['items'] = [];
+  let calls: CustomizedUpdatePreview['calls'] | undefined;
+  let assetImageCount: number | undefined;
   if (node === 'INFORMATION_EXTRACTION') {
     const source = get('customized-source-package'),
       brief = get('customized-brief');
@@ -148,6 +156,7 @@ export async function updatePreview(
     if (node !== 'ASSETS' && (!catalog || catalog.freshness !== 'CURRENT'))
       blockers.push('请先局部更新并确认资产目录');
     if (node === 'ASSETS') {
+      if (get('customized-brief')?.freshness !== 'CURRENT') blockers.push('请先确认当前信息卡');
       for (const asset of assets) {
         const row = get(prefix + asset.id);
         if (!row || row.freshness !== 'CURRENT')
@@ -165,6 +174,51 @@ export async function updatePreview(
           action: 'UPDATE',
           reason: '核对新脚本中的新增对象及已有对象依据',
         });
+      if (items.length) {
+        assetImageCount = picturedAssetOwners(assets).length;
+        calls = assetImageCount ? ['TEXT', 'IMAGE'] : ['TEXT'];
+      } else {
+        const pictures = assetImageReviewItems(
+          assets,
+          await retainedAssetImageFingerprints(tx, projectId, runId),
+        );
+        const previous = await tx.customizedProductionTask.findFirst({
+          where: {
+            projectId,
+            workflowRunId: runId,
+            operation: 'IMAGE',
+            inputSnapshot: { path: ['assetImageRefresh', 'version'], equals: 1 },
+          },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        });
+        const input = previous?.inputSnapshot as unknown as ProductionInput | undefined;
+        if (
+          previous?.status === 'FAILED' &&
+          input?.draftRevision ===
+            (drafts.find((draft) => draft.nodeId === 'CUSTOMIZED_PRODUCTION_DRAFT')?.revision ??
+              0) &&
+          input.sources.every((source) =>
+            rows.some(
+              (row) =>
+                row.id === source.id &&
+                row.revision === source.revision &&
+                row.contentHash === source.hash &&
+                row.freshness === 'CURRENT' &&
+                row.availability === 'AVAILABLE',
+            ),
+          )
+        )
+          blockers.push('上次图片更新未完成，请在页头下方继续图片更新');
+        for (const { asset } of pictures)
+          items.push({
+            id: asset.id,
+            name: asset.name,
+            action: 'UPDATE',
+            reason: '制作说明曾变化，请按图片的实际画面判断是否要重做',
+          });
+        assetImageCount = pictures.length;
+        calls = pictures.length ? ['IMAGE'] : [];
+      }
     } else if (!document || !isVideoDocument(document))
       blockers.push('历史分镜缺少可靠的局部更新基线，请使用本节点重新生成');
     else {
@@ -242,7 +296,8 @@ export async function updatePreview(
     targetId,
     items,
     blockers: [...new Set(blockers)],
-    calls: items.length ? [node === 'RENDER' ? 'VIDEO' : 'TEXT'] : [],
+    calls: calls ?? (items.length ? [node === 'RENDER' ? 'VIDEO' : 'TEXT'] : []),
+    ...(assetImageCount !== undefined ? { assetImageCount } : {}),
     scope: 'DEPENDENCIES',
     fingerprint: workflowStateHash({
       runId,
@@ -257,9 +312,12 @@ export async function updatePreview(
           [...a.dependencies].sort((a, b) => a.sourceKey.localeCompare(b.sourceKey)),
         ])
         .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
-      drafts: drafts.sort((a, b) => a.nodeId.localeCompare(b.nodeId)),
+      drafts: drafts
+        .filter((draft) => node === 'ASSETS' || draft.nodeId !== ASSET_IMAGE_RETENTION_NODE)
+        .sort((a, b) => a.nodeId.localeCompare(b.nodeId)),
       active: active.map((a) => a.id).sort(),
       scriptTask: scriptTask ? [scriptTask.id, scriptTask.status] : null,
+      ...(node === 'ASSETS' ? { calls, assetImageCount, blockers } : {}),
     }),
   };
 }

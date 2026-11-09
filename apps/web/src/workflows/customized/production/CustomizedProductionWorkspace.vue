@@ -2,7 +2,9 @@
 import { productionTasksConflict } from '@ai-marketing/contracts';
 import type { CustomizedUpdatePreview } from '@ai-marketing/contracts';
 import CustomizedLocalUpdate from '../shared/CustomizedLocalUpdate.vue';
+import CustomizedNodeHeading from '../shared/CustomizedNodeHeading.vue';
 import AssetUpdateScope from './AssetUpdateScope.vue';
+import AssetClarificationPanel from './AssetClarificationPanel.vue';
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import {
   Clapperboard,
@@ -14,7 +16,7 @@ import {
   Sparkles,
   SlidersHorizontal,
 } from '@lucide/vue';
-import { WorkflowNodeFooter, WorkflowRunProgress } from '@ai-marketing/ui';
+import { BaseButton, WorkflowNodeFooter, WorkflowRunProgress } from '@ai-marketing/ui';
 import {
   productionStages,
   isVideoDocument,
@@ -216,32 +218,129 @@ const imageDialogAssets = computed(() =>
 );
 const imageSubmitting = ref(false),
   imageError = ref('');
+const latestAssetTask = computed(() =>
+  props.mode === 'ASSETS'
+    ? workspace.value?.tasks.find((t) => t.operation === 'ASSETS')
+    : undefined,
+);
+const latestLocalHead = computed(() =>
+  workspace.value?.tasks.find((task) =>
+    props.mode === 'ASSETS'
+      ? task.operation === 'ASSETS' || (task.operation === 'IMAGE' && !!task.assetImageRefresh)
+      : task.operation !== 'ASSETS' && task.operation !== 'IMAGE' && !!task.incremental?.batchKey,
+  ),
+);
+const clarificationTask = computed(() => {
+  const task = latestAssetTask.value;
+  return task?.id === latestLocalHead.value?.id &&
+    (task?.assetClarification || task?.assetReviewQuestions?.length)
+    ? task
+    : undefined;
+});
 const localTasks = computed(() => {
-  const first = workspace.value?.tasks.find((t) => t.incremental?.batchKey);
-  return first
+  const first = latestLocalHead.value;
+  return first?.incremental?.batchKey
     ? workspace.value!.tasks.filter((t) => t.incremental?.batchKey === first.incremental!.batchKey)
     : [];
 });
-const localRunning = computed(() =>
-  localTasks.value.some((t) => ['QUEUED', 'RUNNING'].includes(t.status)),
+const activeLocalTask = computed(() =>
+  localTasks.value.find((task) => ['QUEUED', 'RUNNING'].includes(task.status)),
+);
+const progressClock = ref(Date.now());
+watch(
+  () => activeLocalTask.value?.localStoryboard?.startedAt,
+  (startedAt, _, onCleanup) => {
+    if (!startedAt) return;
+    progressClock.value = Date.now();
+    const ticker = setInterval(() => (progressClock.value = Date.now()), 1000);
+    onCleanup(() => clearInterval(ticker));
+  },
+);
+const localUpdateDialog = ref<InstanceType<typeof CustomizedLocalUpdate> | null>(null);
+const localStoryboardStages: Record<string, string> = {
+  SNAPSHOT: '读取已保存的资料',
+  PLAN: '核对更新范围',
+  GENERATE: '生成分镜候选',
+  REVIEW: '独立审校',
+  REPAIR: '校验审校结果',
+  SAVE: '保存分镜',
+};
+const needsNewShotUpdate = (task: ProductionTask) =>
+  task.operation === 'SHOTS' &&
+  !!task.incremental &&
+  (task.failureReason === 'INVALID_CANDIDATE' ||
+    (task.failureReason === 'REVIEW_UNRESOLVED' && !task.localStoryboard?.reviewAvailable));
+const localImageTask = computed(() =>
+  localTasks.value.find((task) => task.operation === 'IMAGE' && task.assetImageRefresh),
+);
+const imagesPendingReview = computed(() => {
+  if (props.mode !== 'ASSETS') return [];
+  const task = localImageTask.value;
+  const trackedIds =
+    task && ['QUEUED', 'RUNNING', 'FAILED'].includes(task.status)
+      ? task.imageSettings?.assetIds
+      : [];
+  return document.value.assets.filter(
+    (asset) =>
+      workspace.value?.imageReviewObjectIds?.includes(asset.id) && !trackedIds?.includes(asset.id),
+  );
+});
+const hasRefreshablePictures = computed(() =>
+  document.value.assets.some(
+    (asset) => asset.image && independentlyPrepared(document.value.assets, asset),
+  ),
 );
 const assetUpdateTask = computed(() =>
   props.mode === 'ASSETS'
     ? localTasks.value.find((t) => t.operation === 'ASSETS' && t.assetUpdateScope)
     : undefined,
 );
-const localProgress = computed(() =>
-  localRunning.value
-    ? Math.min(
-        99,
-        Math.floor(
-          localTasks.value.reduce((n, t) => n + t.progress, 0) /
-            Math.max(1, localTasks.value.length),
-        ),
-      )
-    : null,
-);
-async function updateLocal(preview: CustomizedUpdatePreview) {
+const localProgress = computed(() => {
+  const task = activeLocalTask.value;
+  if (!task) return null;
+  if (props.mode === 'ASSETS') return task.progress;
+  return Math.min(
+    99,
+    Math.floor(
+      localTasks.value.reduce((total, item) => total + item.progress, 0) / localTasks.value.length,
+    ),
+  );
+});
+const localSummary = computed(() => {
+  const task = activeLocalTask.value;
+  if (!task) return '';
+  if (task.operation === 'IMAGE') {
+    const count = task.completedImageAssetIds?.length ?? 0;
+    const total = task.imageSettings?.assetIds.length ?? 0;
+    return task.status === 'QUEUED'
+      ? `等待更新 ${total} 张关联图片`
+      : `关联图片已生成 ${count} / ${total} 张，完成后自动保存`;
+  }
+  const runningStep = task.steps.find((item) => item.status === 'RUNNING');
+  const step = runningStep?.title;
+  if (task.operation === 'ASSETS')
+    return step ? `正在更新资产定义 · ${step}` : '正在核对并更新资产定义';
+  if (task.localStoryboard) {
+    const { startedAt, attempt } = task.localStoryboard;
+    const elapsed = Math.max(0, Math.floor((progressClock.value - Date.parse(startedAt)) / 1000));
+    const stage =
+      task.status === 'QUEUED'
+        ? attempt > 0
+          ? '等待重试'
+          : '等待处理'
+        : ((runningStep && localStoryboardStages[runningStep.id]) ?? step ?? '准备分镜更新');
+    return [
+      stage,
+      attempt > 1 ? `第 ${attempt} 次尝试` : '',
+      Number.isFinite(elapsed) ? `已用时 ${Math.floor(elapsed / 60)} 分 ${elapsed % 60} 秒` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  }
+  const done = localTasks.value.filter((item) => item.status === 'COMPLETED').length;
+  return `本次局部更新已完成 ${done} / ${localTasks.value.length} 项${step ? ` · ${step}` : ''}`;
+});
+async function updateLocal(preview: CustomizedUpdatePreview, imageAssetIds?: string[]) {
   if (
     !workspace.value ||
     busy.value ||
@@ -262,7 +361,14 @@ async function updateLocal(preview: CustomizedUpdatePreview) {
       props.projectId,
       props.workflowRunId,
       preview.node as 'ASSETS' | 'SHOTS' | 'PROMPT' | 'RENDER',
-      { version: 1, fingerprint: preview.fingerprint },
+      {
+        version: 1,
+        fingerprint: preview.fingerprint,
+        ...(preview.node === 'ASSETS' && preview.calls.includes('IMAGE')
+          ? { refreshAssetImages: true }
+          : {}),
+        ...(imageAssetIds ? { imageAssetIds } : {}),
+      },
       crypto.randomUUID(),
       scope.signal,
     );
@@ -279,15 +385,86 @@ async function updateLocal(preview: CustomizedUpdatePreview) {
     if (scope === controller) busy.value = false;
   }
 }
+function hideRetainedImages(assetIds: string[]) {
+  if (!workspace.value?.imageReviewObjectIds) return;
+  workspace.value.imageReviewObjectIds = workspace.value.imageReviewObjectIds.filter(
+    (id) => !assetIds.includes(id),
+  );
+}
 const retryingTaskId = ref('');
 const retryError = ref<{ taskId: string; message: string } | null>(null);
+const clarificationError = ref<{ taskId: string; message: string } | null>(null);
+const clarificationDisabled = computed(
+  () =>
+    busy.value ||
+    editing.value ||
+    dirty.value ||
+    activeTasks.value.length > 0 ||
+    imageSubmitting.value,
+);
+async function handleClarification(
+  action: { explanation: string; key: string } | { adopt: boolean },
+) {
+  const task = clarificationTask.value;
+  if (!task || clarificationDisabled.value) return;
+  const scope = controller;
+  const { projectId, workflowRunId } = props;
+  busy.value = true;
+  clarificationError.value = null;
+  try {
+    if ('explanation' in action) {
+      const next = await productionApi.clarifyAssets(
+        projectId,
+        task.id,
+        {
+          workflowRunId,
+          explanation: action.explanation,
+          idempotencyKey: action.key,
+        },
+        scope.signal,
+      );
+      if (scope !== controller || !workspace.value) return;
+      workspace.value.tasks = [next, ...workspace.value.tasks.filter((t) => t.id !== next.id)];
+      schedule();
+    } else {
+      await productionApi.decideAssetClarification(
+        projectId,
+        task.id,
+        {
+          workflowRunId,
+          adopt: action.adopt,
+          ...(action.adopt &&
+          !task.assetClarification?.proposal?.changes.length &&
+          hasRefreshablePictures.value
+            ? { refreshAssetImages: true }
+            : {}),
+        },
+        scope.signal,
+      );
+      if (scope !== controller) return;
+      emit('saved');
+      await load(true);
+    }
+  } catch (e) {
+    if (scope === controller && !isAbortError(e))
+      clarificationError.value = {
+        taskId: task.id,
+        message: safeApiErrorMessage(e, '操作未完成，原内容已保留。请重试或重新加载。'),
+      };
+  } finally {
+    if (scope === controller) busy.value = false;
+  }
+}
 async function retryTask(taskId: string) {
   const target = workspace.value?.tasks.find((t) => t.id === taskId);
   if (
-    (props.mode !== 'SHOTS' && !target?.incremental) ||
+    (props.mode !== 'SHOTS' && !target?.incremental && !target?.assetClarification) ||
     !target ||
     target.status !== 'FAILED' ||
-    (!['PROMPT', 'RENDER'].includes(target.operation) && !target.incremental) ||
+    needsNewShotUpdate(target) ||
+    (!['PROMPT', 'RENDER'].includes(target.operation) &&
+      !target.incremental &&
+      !target.assetClarification) ||
     busy.value ||
     activeTasks.value.some((task) => productionTasksConflict(target, task)) ||
     imageSubmitting.value ||
@@ -298,6 +475,7 @@ async function retryTask(taskId: string) {
   const latest = workspace.value?.tasks.find(
     (t) =>
       t.operation === target.operation &&
+      (!target.assetImageRefresh || !!t.assetImageRefresh) &&
       (target.target ? t.target?.id === target.target.id : t.shotId === target.shotId),
   );
   if (latest?.id !== taskId) {
@@ -703,6 +881,7 @@ async function refreshTask() {
     if (['RUNNING', 'QUEUED'].includes(result.status)) {
       if (
         result.operation === 'IMAGE' &&
+        !result.assetImageRefresh &&
         !dirty.value &&
         !promptDirty.value &&
         !videoWorkbench.value?.hasDirty &&
@@ -1219,6 +1398,7 @@ watch(
     imageSubmitting.value = false;
     retryingTaskId.value = '';
     retryError.value = null;
+    clarificationError.value = null;
     imageDialogOpen.value = false;
     imageDialogTaskId.value = '';
     imageDialogSettings.value = undefined;
@@ -1248,28 +1428,16 @@ defineExpose({ flushPendingEdits });
     icon="extraction"
   />
   <section v-else class="production-page">
-    <header class="production-heading">
-      <div>
-        <span class="eyebrow">{{ mode === 'ASSETS' ? '04 / 资产准备' : '05 / 视频制作' }}</span>
-        <h2>{{ mode === 'ASSETS' ? '资产准备' : '视频制作' }}</h2>
-        <p>
-          {{ workspace?.script.name || '请先选定完整脚本' }} ·
-          {{
-            mode === 'ASSETS'
-              ? '统一产品、人物与空间定义，图片可以稍后准备'
-              : '分镜创作、素材绑定、提示词与逐镜视频'
-          }}
-        </p>
-      </div>
-      <div class="actions extraction-heading__actions">
-        <CustomizedLocalUpdate
-          v-if="workspace && (mode === 'ASSETS' ? document.assets.length : legacyShots.length)"
-          :project-id="projectId"
-          :workflow-run-id="workflowRunId"
-          :nodes="mode === 'ASSETS' ? ['ASSETS'] : ['SHOTS', 'PROMPT', 'RENDER']"
-          :disabled="busy || !!running || editing || dirty || promptDirty"
-          @execute="updateLocal"
-        />
+    <CustomizedNodeHeading
+      :index="mode === 'ASSETS' ? '04' : '05'"
+      :title="mode === 'ASSETS' ? '资产准备' : '视频制作'"
+      :description="
+        workspace?.script.name
+          ? `${workspace.script.name} · ${mode === 'ASSETS' ? '资产定义与参考图片' : '分镜、提示词与逐镜视频'}`
+          : '请先选定完整脚本'
+      "
+    >
+      <template #actions>
         <WorkflowNodeEditActions
           v-if="mode === 'ASSETS'"
           :editing="editing"
@@ -1281,9 +1449,14 @@ defineExpose({ flushPendingEdits });
           @cancel="cancelEdit"
           @save="save()"
         />
-        <button v-if="mode === 'SHOTS'" :disabled="busy || !!running" @click="addShot">
+        <BaseButton
+          v-if="mode === 'SHOTS'"
+          variant="secondary"
+          :disabled="busy || !!running"
+          @click="addShot"
+        >
           <Plus :size="15" />添加分镜
-        </button>
+        </BaseButton>
         <WorkflowExtractionActions
           :disabled="
             busy ||
@@ -1297,8 +1470,22 @@ defineExpose({ flushPendingEdits });
           @extract="generate(mode)"
           @details="openWorkflow()"
         />
-      </div>
-    </header>
+      </template>
+      <template
+        v-if="workspace && (mode === 'ASSETS' ? document.assets.length : legacyShots.length)"
+        #update
+      >
+        <CustomizedLocalUpdate
+          ref="localUpdateDialog"
+          :project-id="projectId"
+          :workflow-run-id="workflowRunId"
+          :nodes="mode === 'ASSETS' ? ['ASSETS'] : ['SHOTS', 'PROMPT', 'RENDER']"
+          :disabled="busy || !!running || editing || dirty || promptDirty"
+          @execute="updateLocal"
+          @images-retained="hideRetainedImages"
+        />
+      </template>
+    </CustomizedNodeHeading>
     <WorkflowExtractionFeedback
       v-if="error"
       title="操作未完成"
@@ -1307,7 +1494,11 @@ defineExpose({ flushPendingEdits });
       @action="saveFailed ? retrySave() : load()"
     />
     <WorkflowExtractionFeedback
-      v-if="pollingInterrupted && !error && running?.operation !== 'IMAGE'"
+      v-if="
+        pollingInterrupted &&
+        !error &&
+        (running?.operation !== 'IMAGE' || running.assetImageRefresh)
+      "
       tone="information"
       title="正在恢复进度查询"
       message="查询暂时中断，后台任务仍会继续；连接恢复后自动更新。"
@@ -1322,16 +1513,15 @@ defineExpose({ flushPendingEdits });
     />
     <!-- 总时长沿用脚本创作及已有制作策略，不在视频制作重复设置。 -->
     <WorkflowExtractionFeedback
-      v-if="workspace?.imageReviewObjectIds?.length"
+      v-if="imagesPendingReview.length"
       tone="warning"
-      title="资产定义已变化，请核对图片"
-      :message="`以下图片仍保留原版本，可在图片制作窗口替换或重新生成：${document.assets
-        .filter((a) => workspace?.imageReviewObjectIds?.includes(a.id))
+      title="这些参考图可按需核对"
+      :message="`可沿用原图，或从「局部更新」勾选需要重做的图片：${imagesPendingReview
         .map((a) => a.name)
         .join('、')}`"
     />
     <WorkflowRunProgress
-      v-if="pageProgress && localProgress === null"
+      v-if="pageProgress && !pageProgress.assetClarification && localProgress === null"
       :progress="pageProgress.progress"
       :summary="pageProgress.operation === 'ASSETS' ? '正在整理资产定义' : '正在创作连续分镜'"
       :terminal="false"
@@ -1341,25 +1531,88 @@ defineExpose({ flushPendingEdits });
     <WorkflowRunProgress
       v-if="localProgress !== null"
       :progress="localProgress"
-      :summary="`本次局部更新：${localTasks.filter((t) => t.status === 'COMPLETED').length}/${localTasks.length} 项完成 · ${localTasks.flatMap((t) => t.steps).find((s) => s.status === 'RUNNING')?.title || '等待执行'}`"
+      :summary="localSummary"
       :terminal="false"
       action-label="查看工作流"
-      @show-details="openWorkflow(localTasks.find((t) => ['QUEUED', 'RUNNING'].includes(t.status)))"
+      @show-details="openWorkflow(activeLocalTask)"
+    />
+    <WorkflowExtractionFeedback
+      v-if="localImageTask?.status === 'COMPLETED' && !imagesPendingReview.length"
+      tone="information"
+      title="关联图片已更新"
+      :message="`${localImageTask.completedImageAssetIds?.length ?? 0} 张新图已保存到当前资产。`"
     />
     <div
       v-for="task in localTasks.filter(
-        (t) => t.status === 'FAILED' && ['ASSETS', 'SHOTS'].includes(t.operation),
+        (t) =>
+          t.status === 'FAILED' &&
+          !t.assetReviewQuestions?.length &&
+          (['ASSETS', 'SHOTS'].includes(t.operation) ||
+            (t.operation === 'IMAGE' && t.assetImageRefresh)),
       )"
       :key="task.id"
       class="local-update-recovery"
     >
-      <span>{{ task.errorMessage || '局部更新未完成，旧内容保留' }}</span
-      ><button :disabled="busy || !!running" @click="retryTask(task.id)">继续本次更新</button
-      ><button @click="openWorkflow(task, true)">查看原因</button>
+      <div class="update-feedback-copy">
+        <strong>{{
+          task.operation === 'IMAGE'
+            ? '关联图片更新未完成'
+            : task.operation === 'SHOTS'
+              ? '分镜更新未完成'
+              : '局部更新未完成'
+        }}</strong>
+        <p>{{ task.errorMessage || '原有内容已保留。' }}</p>
+        <p v-if="retryError?.taskId === task.id" class="update-feedback-error" role="alert">
+          {{ retryError.message }}
+        </p>
+      </div>
+      <div class="update-feedback-actions">
+        <BaseButton variant="secondary" @click="openWorkflow(task, true)">查看原因</BaseButton>
+        <BaseButton
+          v-if="needsNewShotUpdate(task)"
+          :disabled="busy || !!running || editing || dirty || promptDirty"
+          @click="localUpdateDialog?.show()"
+          >重新查看更新范围</BaseButton
+        >
+        <BaseButton
+          v-else-if="!task.assetEvidenceNeedsRestart"
+          :disabled="busy || !!running || editing || dirty"
+          @click="retryTask(task.id)"
+          >{{
+            task.operation === 'IMAGE'
+              ? '继续图片更新'
+              : task.operation === 'SHOTS'
+                ? task.localStoryboard?.reviewAvailable
+                  ? '继续审校'
+                  : '继续更新分镜'
+                : '继续本次更新'
+          }}</BaseButton
+        >
+      </div>
     </div>
+    <AssetClarificationPanel
+      v-if="clarificationTask"
+      :key="clarificationTask.id"
+      :task="clarificationTask"
+      :disabled="clarificationDisabled"
+      :source-ready="!!workspace?.sourceReady"
+      :refresh-images="hasRefreshablePictures"
+      :error="
+        clarificationError?.taskId === clarificationTask.id
+          ? clarificationError.message
+          : retryError?.taskId === clarificationTask.id
+            ? retryError.message
+            : ''
+      "
+      @submit="(explanation, key) => handleClarification({ explanation, key })"
+      @decide="(adopt) => handleClarification({ adopt })"
+      @retry="retryTask(clarificationTask.id)"
+      @script="emit('back')"
+    />
     <AssetUpdateScope
       v-if="assetUpdateTask?.assetUpdateScope"
       :scope="assetUpdateTask.assetUpdateScope"
+      :refresh-images="!!assetUpdateTask.assetImageRefresh"
     />
     <template v-if="workspace">
       <ProductionAssetStudio
@@ -1664,9 +1917,11 @@ defineExpose({ flushPendingEdits });
           ? '当前分镜提示词工作流'
           : graphOperation === 'RENDER'
             ? '当前分镜视频渲染工作流'
-            : mode === 'ASSETS'
-              ? '当前资产整理工作流'
-              : '当前分镜生成工作流'
+            : graphOperation === 'IMAGE'
+              ? '关联图片更新'
+              : mode === 'ASSETS'
+                ? '当前资产整理工作流'
+                : '当前分镜生成工作流'
       "
       eyebrow="执行详情"
       :description="
@@ -1819,7 +2074,6 @@ defineExpose({ flushPendingEdits });
   border-radius: 24px;
   background: #fff;
 }
-.production-heading,
 .actions,
 .editor-heading {
   display: flex;
@@ -1827,24 +2081,11 @@ defineExpose({ flushPendingEdits });
   gap: 12px;
   justify-content: space-between;
 }
-.production-heading {
-  margin-bottom: 24px;
-  flex-wrap: wrap;
-}
-.production-heading h2 {
-  font-size: 22px;
-  margin: 8px 0;
-}
-.production-heading p,
-.eyebrow {
-  font-size: 12px;
-  color: #8190a7;
-}
 .actions {
   justify-content: flex-end;
   flex-wrap: wrap;
 }
-.production-page button,
+.production-page button:not(.base-button),
 .execution-actions button {
   display: inline-flex;
   align-items: center;
@@ -1869,6 +2110,38 @@ defineExpose({ flushPendingEdits });
 .execution-actions button:focus-visible {
   outline: 2px solid #2563eb;
   outline-offset: 2px;
+}
+.local-update-recovery {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 16px;
+  margin: 0 0 14px;
+  border: 1px solid #eddbb5;
+  border-radius: 10px;
+  background: #fffaf0;
+}
+.update-feedback-copy {
+  min-width: 0;
+  color: #503819;
+  font-size: 14px;
+}
+.update-feedback-copy p {
+  margin: 5px 0 0;
+  color: #6c5a43;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.update-feedback-copy .update-feedback-error {
+  color: #a03131;
+}
+.update-feedback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-inline-start: auto;
 }
 .video-workspace {
   display: grid;
@@ -2150,12 +2423,6 @@ defineExpose({ flushPendingEdits });
   .asset-facts {
     grid-template-columns: 1fr;
   }
-  .production-heading {
-    gap: 18px;
-  }
-  .production-heading p {
-    line-height: 1.8;
-  }
   .shot-editor :deep(.reference-grid) {
     grid-template-columns: 1fr;
   }
@@ -2164,5 +2431,3 @@ defineExpose({ flushPendingEdits });
   }
 }
 </style>
-
-<style scoped src="../../../platform/workflow/components/workflow-extraction-heading.css"></style>

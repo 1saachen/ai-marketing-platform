@@ -437,27 +437,6 @@ onBeforeUnmount(() => {
 defineExpose({ flushPendingEdits: flush });
 </script>
 <template>
-  <CustomizedLocalUpdate
-    v-if="workspace?.result && !loading"
-    :project-id="projectId"
-    :workflow-run-id="workflowRunId"
-    :nodes="['INFORMATION_EXTRACTION']"
-    :disabled="view.saving || ['QUEUED', 'RUNNING'].includes(view.status)"
-    @execute="extract(false, true, true, $event)"
-  />
-  <WorkflowExtractionFeedback
-    v-for="warning in workspace?.sourceWarnings ?? []"
-    :key="warning"
-    title="资料提示"
-    :message="warning"
-  />
-  <WorkflowExtractionFeedback
-    v-if="feedback"
-    title="操作提示"
-    :message="feedback"
-    :action="recoveryAction"
-    @action="recover"
-  />
   <CustomizedInfoExtractionNodePage
     :project-id="projectId"
     :workflow-run-id="workflowRunId"
@@ -489,5 +468,30 @@ defineExpose({ flushPendingEdits: flush });
     "
     @next="emit('next')"
     @view-source="(id, event, focus) => emit('viewSource', id, event, focus)"
-  />
+  >
+    <template v-if="workspace?.result && !loading" #local-update>
+      <CustomizedLocalUpdate
+        :project-id="projectId"
+        :workflow-run-id="workflowRunId"
+        :nodes="['INFORMATION_EXTRACTION']"
+        :disabled="view.saving || ['QUEUED', 'RUNNING'].includes(view.status)"
+        @execute="extract(false, true, true, $event)"
+      />
+    </template>
+    <template #notices>
+      <WorkflowExtractionFeedback
+        v-for="warning in workspace?.sourceWarnings ?? []"
+        :key="warning"
+        title="资料提示"
+        :message="warning"
+      />
+      <WorkflowExtractionFeedback
+        v-if="feedback"
+        title="操作提示"
+        :message="feedback"
+        :action="recoveryAction"
+        @action="recover"
+      />
+    </template>
+  </CustomizedInfoExtractionNodePage>
 </template>

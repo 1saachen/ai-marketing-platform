@@ -22,6 +22,7 @@ import {
   saveScriptUpdate,
 } from '../../workflows/customized/storyboard/script-update';
 import { updatePreview } from '../../workflows/customized/production/update-preview';
+import { rebindUnchanged } from '../../workflows/customized/production/unchanged-media';
 import { ProductionRepository } from '../../workflows/customized/production/production.repository';
 import { CustomizedExtractionRepository } from '../../workflows/customized/information-extraction/customized-extraction.repository';
 
@@ -174,8 +175,10 @@ it.skipIf(process.env.CUSTOMIZED_STORYBOARD_DATABASE_TEST !== '1')(
                 beats: [{ id: 'beat', content: '拿起杯子', durationSeconds: 15 }],
               },
             });
-            const sa = story(aId, '方案一'),
-              sb = story(bId, '方案二');
+            const sa = story(aId, '方案一');
+            sa.synopsis = '拿起杯子阅读';
+            sa.story!.content = '她拿起杯子，继续阅读。';
+            const sb = story(bId, '方案二');
             const aa = await make(a.id, `customized-script:${aId}`, sa),
               ba = await make(b.id, `customized-script:${bId}`, sb);
             for (const [r, id, script, artifact, brief] of [
@@ -382,15 +385,21 @@ it.skipIf(process.env.CUSTOMIZED_STORYBOARD_DATABASE_TEST !== '1')(
             );
             const blueScript = { ...adopted, synopsis: '拿起蓝色杯子阅读' };
             await candidate(second!.id, blueScript);
-            await tx.workingArtifact.update({
+            const grey = { ...blue, productAppearance: '灰色杯子' };
+            const greyHead = await tx.workingArtifact.update({
               where: { id: head.id },
               data: {
                 revision: 4,
-                payload: { ...blue, productAppearance: '灰色杯子' },
-                contentHash: 'changed-again',
+                payload: grey,
+                contentHash: workingArtifactContentHash({
+                  kind: 'STRUCTURED',
+                  name: head.name,
+                  directory: head.directory,
+                  type: head.type,
+                  payload: grey,
+                }),
               },
             });
-            const grey = { ...blue, productAppearance: '灰色杯子' };
             await tx.customizedExtractionResult.update({
               where: { projectId_workflowRunId: { projectId: p, workflowRunId: headRun.id } },
               data: {
@@ -404,6 +413,40 @@ it.skipIf(process.env.CUSTOMIZED_STORYBOARD_DATABASE_TEST !== '1')(
             expect(
               (await tx.workingArtifact.findUniqueOrThrow({ where: { id: ba.id } })).payload,
             ).toEqual(adopted);
+            await expect(rebindUnchanged(tx, p, a.id, aa.id, [foreign])).rejects.toThrow(
+              'UNCHANGED_SOURCE_CHANGED',
+            );
+            const unchangedPreview = await updatePreview(tx, p, a.id, 'SCRIPT', aId);
+            const unchangedTask = await createScriptUpdate(
+              tx,
+              p,
+              a.id,
+              aId,
+              'grey-no-text-change',
+              { version: 1, fingerprint: unchangedPreview.fingerprint },
+              { creative: 'controlled', detail: 'controlled' },
+            );
+            await candidate(unchangedTask!.id, sa);
+            for (let i = 0; i < 2; i++) {
+              expect(await saveScriptUpdate(tx, working, p, a.id, unchangedTask!.id, sa)).toEqual({
+                workflowRunId: a.id,
+                unchanged: true,
+              });
+            }
+            const rebound = await tx.workingArtifact.findUniqueOrThrow({
+              where: { id: aa.id },
+              include: { dependencies: true },
+            });
+            expect(rebound.revision).toBe(aa.revision);
+            expect(rebound.payload).toEqual(sa);
+            expect(rebound.dependencies).toMatchObject([
+              {
+                sourceArtifactId: greyHead.id,
+                sourceRevision: greyHead.revision,
+                sourceHash: greyHead.contentHash,
+              },
+            ]);
+            expect((await updatePreview(tx, p, a.id, 'SCRIPT', aId)).items).toEqual([]);
             // Entering information edit seeds the current shared facts, not the selected scheme's frozen old copy.
             await tx.workflowRun.update({
               where: { id: headRun.id },

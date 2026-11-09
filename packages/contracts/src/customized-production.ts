@@ -32,6 +32,11 @@ import {
   type AssetPreparation,
 } from './customized-asset-preparation';
 export * from './customized-asset-preparation';
+import type {
+  AssetClarificationInput,
+  AssetClarificationReview,
+} from './customized-asset-clarification';
+export * from './customized-asset-clarification';
 
 export const PRODUCTION_ASSET_KINDS = ['PRODUCT', 'CHARACTER', 'SCENE', 'PROP'] as const;
 export type ProductionAsset = {
@@ -81,6 +86,12 @@ export const withProductionAssets = (
   assets: ProductionAsset[],
 ): ProductionDocument => ({ ...v, assets });
 export type ProductionOperation = 'ASSETS' | 'SHOTS' | 'PROMPT' | 'IMAGE' | 'RENDER';
+export type AssetImageRefresh = {
+  version: 1;
+  definitionTaskId?: string;
+  /** Frozen on definition tasks that separately decide which pictures need a visual change. */
+  scopeVersion?: 1;
+};
 export type ProductionInput = {
   incremental?: {
     version: 1;
@@ -100,6 +111,11 @@ export type ProductionInput = {
   assetWorkflowVersion?: 2;
   /** New asset local updates only; historical tasks retain the original definition pipeline. */
   assetUpdateVersion?: 1;
+  /** New scoped updates review definitions separately from existing picture files. */
+  assetTextUpdateVersion?: 1;
+  assetImageRefresh?: AssetImageRefresh;
+  assetClarification?: AssetClarificationInput;
+  assetProductionNote?: string;
   targetAssetId?: string | null;
   identitySeed?: string;
   imageSettings?: CustomizedImageSettings;
@@ -195,6 +211,11 @@ export type ProductionStep = {
   detail?: ProductionExecutionDetail;
 };
 export type ProductionTask = {
+  localStoryboard?: { startedAt: string; attempt: number; reviewAvailable?: true };
+  assetReviewQuestions?: string[];
+  assetEvidenceNeedsRestart?: boolean;
+  assetImageRefresh?: AssetImageRefresh;
+  assetClarification?: AssetClarificationReview;
   assetUpdateScope?: { name: string; action: 'KEEP' | 'UPDATE' | 'SYNC' | 'ADD'; reason: string }[];
   incremental?: { version: 1; targetIds: string[]; batchKey?: string };
   id: string;

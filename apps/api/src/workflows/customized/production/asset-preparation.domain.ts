@@ -28,6 +28,20 @@ export function assetImageBasis(a: ProductionAsset) {
   });
 }
 
+/** Use the pre-update definition to flag changed legacy images that have no recorded basis. */
+export function markLegacyImagesForReview(
+  previous: ProductionAsset[],
+  updated: ProductionAsset[],
+): ProductionAsset[] {
+  const byId = new Map(previous.map((a) => [a.id, a]));
+  return updated.map((asset) => {
+    const old = byId.get(asset.id);
+    if (!old?.image || old.imageBasis) return asset;
+    const basis = assetImageBasis(old);
+    return basis === assetImageBasis(asset) ? asset : { ...asset, imageBasis: basis };
+  });
+}
+
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 export function recordAssetEdits(
   previous: ProductionAsset[],

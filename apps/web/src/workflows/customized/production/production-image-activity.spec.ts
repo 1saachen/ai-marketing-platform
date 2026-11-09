@@ -45,6 +45,11 @@ it('keeps saved items complete when the remaining batch fails, and uses the late
   const retry = { ...task('QUEUED'), id: 'new', completedImageAssetIds: [] };
   expect(assetImageActivity([retry, failed], 'a')).toEqual({ state: 'QUEUED', taskId: 'new' });
 });
+it('reports an automatic refresh as incomplete until the replacement batch is attached', () => {
+  const refresh: ProductionTask = { ...task('FAILED'), assetImageRefresh: { version: 1 } };
+  expect(assetImageActivity([refresh], 'a')?.state).toBe('FAILED');
+  expect(assetImageActivity([{ ...refresh, status: 'COMPLETED' }], 'a')?.state).toBe('SUCCEEDED');
+});
 it('uses spinners and stage text, never percentages or a progress track', async () => {
   for (const state of ['QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'] as const) {
     const html = await renderToString(createSSRApp(Status, { activity: { state, taskId: 't' } }));

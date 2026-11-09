@@ -722,8 +722,13 @@ export class CustomizedExtractionRepository {
     });
   }
 
-  update(projectId: string, resultId: string, request: SaveCustomizedExtractionRequest) {
-    return this.db.$transaction(async (tx) => {
+  update(
+    projectId: string,
+    resultId: string,
+    request: SaveCustomizedExtractionRequest,
+    transaction?: Prisma.TransactionClient,
+  ) {
+    const perform = async (tx: Prisma.TransactionClient) => {
       await lockCustomizedProject(tx, projectId);
       const old = await tx.customizedExtractionResult.findFirst({
         where: { projectId, id: resultId },
@@ -771,96 +776,100 @@ export class CustomizedExtractionRepository {
           revision: { increment: 1 },
         },
       });
-    });
+    };
+    return transaction ? perform(transaction) : this.db.$transaction(perform);
   }
 
-  confirm(projectId: string, resultId: string, expectedRevision: number) {
-    return this.db.$transaction(
-      async (tx) => {
-        await lockCustomizedProject(tx, projectId);
-        const result = await tx.customizedExtractionResult.findFirst({
-          where: { projectId, id: resultId },
-        });
-        if (!result) throw missing();
-        const run = await this.scope(tx, projectId, result.workflowRunId, true);
-        const latest = await tx.customizedExtractionTask.findFirst({
-          where: { projectId, workflowRunId: run.id },
-          orderBy: { createdAt: 'desc' },
-        });
-        const source = await this.input(tx, projectId, run.id);
-        if (
-          result.revision !== expectedRevision ||
-          result.sourceFingerprint !== source?.source.fingerprint ||
-          (latest && (latest.id !== result.taskId || latest.status !== 'COMPLETED'))
-        )
-          return customizedConflict('结果或来源已变化，请重新提炼或加载最新内容');
-        const draft = result.draftResult as unknown as CustomizedBriefCandidate;
-        if (
-          !draft.fields.productName.trim() ||
-          !draft.fields.sellingPoints.some((s) => s.trim()) ||
-          draft.issues.some((i) => i.blocking)
-        )
-          throw new ApiHttpException(
-            '请补齐产品名称、核心卖点并处理待确认事项',
-            400,
-            'VALIDATION_ERROR',
-          );
-        const ownSource = await tx.workingArtifact.findFirstOrThrow({
-          where: { projectId, workflowRunId: run.id, artifactKey: CUSTOMIZED_SOURCE_ARTIFACT_KEY },
-        });
-        const [committed] = await this.working.commitValidatedArtifactsInTransaction(
-          tx,
-          projectId,
-          run.id,
-          'INFORMATION_EXTRACTION',
-          [
-            {
-              artifactKey: CUSTOMIZED_BRIEF_ARTIFACT_KEY,
-              input: {
-                kind: 'STRUCTURED',
-                name: '视频创作信息卡',
-                directory: 'INSIGHTS',
-                type: 'INSIGHT_RESULT',
-                payload: draft.fields,
-                dependencies: [
-                  {
-                    sourceType: 'WORKING_ARTIFACT',
-                    sourceArtifactId: ownSource.id,
-                    sourceNodeId: 'SOURCE_IMPORT',
-                    sourceKey: CUSTOMIZED_SOURCE_ARTIFACT_KEY,
-                    sourceRevision: ownSource.revision,
-                    sourceHash: ownSource.contentHash,
-                  },
-                ],
-              },
-            },
-          ],
+  confirm(
+    projectId: string,
+    resultId: string,
+    expectedRevision: number,
+    transaction?: Prisma.TransactionClient,
+  ) {
+    const perform = async (tx: Prisma.TransactionClient) => {
+      await lockCustomizedProject(tx, projectId);
+      const result = await tx.customizedExtractionResult.findFirst({
+        where: { projectId, id: resultId },
+      });
+      if (!result) throw missing();
+      const run = await this.scope(tx, projectId, result.workflowRunId, true);
+      const latest = await tx.customizedExtractionTask.findFirst({
+        where: { projectId, workflowRunId: run.id },
+        orderBy: { createdAt: 'desc' },
+      });
+      const source = await this.input(tx, projectId, run.id);
+      if (
+        result.revision !== expectedRevision ||
+        result.sourceFingerprint !== source?.source.fingerprint ||
+        (latest && (latest.id !== result.taskId || latest.status !== 'COMPLETED'))
+      )
+        return customizedConflict('结果或来源已变化，请重新提炼或加载最新内容');
+      const draft = result.draftResult as unknown as CustomizedBriefCandidate;
+      if (
+        !draft.fields.productName.trim() ||
+        !draft.fields.sellingPoints.some((s) => s.trim()) ||
+        draft.issues.some((i) => i.blocking)
+      )
+        throw new ApiHttpException(
+          '请补齐产品名称、核心卖点并处理待确认事项',
+          400,
+          'VALIDATION_ERROR',
         );
-        if (run.editSessionNodeId === 'INFORMATION_EXTRACTION' && run.parentWorkflowRunId) {
-          if (committed!.unchanged) {
-            const parent = await cancelCustomizedEdit(
-              tx,
-              projectId,
-              run.id,
-              'INFORMATION_EXTRACTION',
-            );
-            return { workflowRunId: parent.id, unchanged: true };
-          }
-          await tx.workflowRun.update({
-            where: { id: run.id },
-            data: {
-              branchPublishedAt: new Date(),
-              editSessionNodeId: null,
-              editSessionPurpose: null,
-              editBaselineHash: null,
+      const ownSource = await tx.workingArtifact.findFirstOrThrow({
+        where: { projectId, workflowRunId: run.id, artifactKey: CUSTOMIZED_SOURCE_ARTIFACT_KEY },
+      });
+      const [committed] = await this.working.commitValidatedArtifactsInTransaction(
+        tx,
+        projectId,
+        run.id,
+        'INFORMATION_EXTRACTION',
+        [
+          {
+            artifactKey: CUSTOMIZED_BRIEF_ARTIFACT_KEY,
+            input: {
+              kind: 'STRUCTURED',
+              name: '视频创作信息卡',
+              directory: 'INSIGHTS',
+              type: 'INSIGHT_RESULT',
+              payload: draft.fields,
+              dependencies: [
+                {
+                  sourceType: 'WORKING_ARTIFACT',
+                  sourceArtifactId: ownSource.id,
+                  sourceNodeId: 'SOURCE_IMPORT',
+                  sourceKey: CUSTOMIZED_SOURCE_ARTIFACT_KEY,
+                  sourceRevision: ownSource.revision,
+                  sourceHash: ownSource.contentHash,
+                },
+              ],
             },
-          });
+          },
+        ],
+      );
+      if (run.editSessionNodeId === 'INFORMATION_EXTRACTION' && run.parentWorkflowRunId) {
+        if (committed!.unchanged) {
+          const parent = await cancelCustomizedEdit(
+            tx,
+            projectId,
+            run.id,
+            'INFORMATION_EXTRACTION',
+          );
+          return { workflowRunId: parent.id, unchanged: true };
         }
-        await setCustomizedInformationMode(tx, projectId, run.id, 'CURRENT');
-        return { workflowRunId: run.id, unchanged: committed!.unchanged };
-      },
-      { timeout: 30000 },
-    );
+        await tx.workflowRun.update({
+          where: { id: run.id },
+          data: {
+            branchPublishedAt: new Date(),
+            editSessionNodeId: null,
+            editSessionPurpose: null,
+            editBaselineHash: null,
+          },
+        });
+      }
+      await setCustomizedInformationMode(tx, projectId, run.id, 'CURRENT');
+      return { workflowRunId: run.id, unchanged: committed!.unchanged };
+    };
+    return transaction ? perform(transaction) : this.db.$transaction(perform, { timeout: 30000 });
   }
 
   beginEdit(projectId: string, runId: string) {

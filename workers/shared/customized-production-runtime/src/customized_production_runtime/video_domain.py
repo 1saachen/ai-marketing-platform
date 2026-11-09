@@ -317,7 +317,8 @@ def evidence_value(
             )
         return prompt[e["field"]]
     if e["entity"] == "TIMING":
-        item = plan["timing"]
+        key = e["id"] if e["id"] in ("durationPolicy", "capability") else "timing"
+        item = plan[key]
     else:
         key = {
             "SHOT": "shots",

@@ -103,6 +103,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
               designNotes: '',
               sourceText: '',
               manualFields: [],
+              ...(id === 'cup' ? { image: { assetId: randomUUID(), version: 1 } } : {}),
               preparation: {
                 aliases: [],
                 usage: '出场',
@@ -134,7 +135,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
             } as unknown as PrismaService;
             const repo = new ProductionRepository(transactional, new WorkflowWorkingRepository(db));
             const models = { creative: 'controlled', detail: 'controlled' };
-            let adopted = original;
+            let adoptedAssets = original.assets;
             const completed: { id: string; token: string; result: ProductionDocument }[] = [];
             for (const round of [1, 2]) {
               if (round === 2) {
@@ -171,6 +172,9 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
               const task = tasks[0]!;
               const claim = await repo.claim(p, task.id, 'ASSETS');
               expect((claim.input as { assetUpdateVersion: number }).assetUpdateVersion).toBe(1);
+              expect(
+                (claim.input as { assetTextUpdateVersion: number }).assetTextUpdateVersion,
+              ).toBe(1);
               const plan = {
                 decisions: original.assets.map((a) => ({
                   assetId: a.id,
@@ -181,7 +185,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
                 blockers: [],
               };
               const result = {
-                assets: adopted.assets.map((a) =>
+                assets: adoptedAssets.map((a) =>
                   a.id === 'cup' ? { ...a, description: '黑色' } : a,
                 ),
                 shots: [],
@@ -220,7 +224,9 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
               });
               await repo.complete(p, task.id, claim.attemptToken!, result, 'ASSETS');
               await repo.complete(p, task.id, claim.attemptToken!, result, 'ASSETS');
-              expect((await updatePreview(tx, p, run.id, 'ASSETS')).items).toEqual([]);
+              const nextPreview = await updatePreview(tx, p, run.id, 'ASSETS');
+              expect(nextPreview.calls).toEqual(['IMAGE']);
+              expect(nextPreview.items.map((item) => item.id)).toEqual(['cup']);
               const stored = await tx.workingArtifact.findMany({
                 where: {
                   projectId: p,
@@ -232,7 +238,10 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
               expect(stored.find((a) => a.artifactKey.endsWith(':cup'))?.revision).toBe(2);
               expect(await tx.workflowRun.count({ where: { projectId: p } })).toBe(2);
               completed.push({ id: task.id, token: claim.attemptToken!, result });
-              adopted = result;
+              const workspace = await repo.workspace(p, run.id);
+              expect(workspace.imageReviewObjectIds).toEqual(['cup']);
+              expect(workspace.document.assets[0]?.image).toEqual(original.assets[0]?.image);
+              adoptedAssets = workspace.document.assets;
             }
             await repo.complete(
               p,
@@ -241,7 +250,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
               completed[0]!.result,
               'ASSETS',
             );
-            expect((await repo.workspace(p, run.id)).document.assets).toEqual(adopted.assets);
+            expect((await repo.workspace(p, run.id)).document.assets).toEqual(adoptedAssets);
             expect(
               (await tx.workingArtifact.findUniqueOrThrow({ where: { id: untouched.id } })).payload,
             ).toEqual(original.assets[1]);

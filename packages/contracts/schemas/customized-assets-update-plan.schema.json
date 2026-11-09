@@ -33,7 +33,11 @@
           "type": "string"
         }
       },
-      "required": ["assetId", "fields", "reason"],
+      "required": [
+        "assetId",
+        "fields",
+        "reason"
+      ],
       "title": "AssetUpdateDecision",
       "type": "object"
     },
@@ -64,7 +68,12 @@
           "type": "string"
         },
         "kind": {
-          "enum": ["PRODUCT", "CHARACTER", "SCENE", "PROP"],
+          "enum": [
+            "PRODUCT",
+            "CHARACTER",
+            "SCENE",
+            "PROP"
+          ],
           "title": "Kind",
           "type": "string"
         },
@@ -84,7 +93,11 @@
           "type": "string"
         },
         "treatment": {
-          "enum": ["INDEPENDENT", "SCENE_DETAIL", "CHARACTER_DETAIL"],
+          "enum": [
+            "INDEPENDENT",
+            "SCENE_DETAIL",
+            "CHARACTER_DETAIL"
+          ],
           "title": "Treatment",
           "type": "string"
         },
@@ -127,7 +140,10 @@
       "additionalProperties": false,
       "properties": {
         "source": {
-          "enum": ["BRIEF", "SCRIPT"],
+          "enum": [
+            "BRIEF",
+            "SCRIPT"
+          ],
           "title": "Source",
           "type": "string"
         },
@@ -150,7 +166,12 @@
           "type": "string"
         }
       },
-      "required": ["source", "path", "quote", "field"],
+      "required": [
+        "source",
+        "path",
+        "quote",
+        "field"
+      ],
       "title": "Evidence",
       "type": "object"
     }
@@ -184,7 +205,11 @@
       "type": "array"
     }
   },
-  "required": ["decisions", "additions", "blockers"],
+  "required": [
+    "decisions",
+    "additions",
+    "blockers"
+  ],
   "title": "AssetUpdatePlan",
   "type": "object"
 }

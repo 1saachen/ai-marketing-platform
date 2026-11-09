@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { createRenderer, createSSRApp, h, nextTick, ssrContextKey } from 'vue';
+import { createRenderer, createSSRApp, h, nextTick, ssrContextKey, type SetupContext } from 'vue';
 import { renderToString } from 'vue/server-renderer';
 import { emptyCustomizedBrief, type StoryboardWorkspace } from '@ai-marketing/contracts';
 import Workspace from './CustomizedStoryboardWorkspace.vue';
@@ -26,7 +26,13 @@ vi.mock('./ScriptLocalUpdate.vue', () => ({
     },
   },
 }));
-vi.mock('./CustomizedStoryboardNodePage.vue', () => ({ default: { render: () => null } }));
+vi.mock('./CustomizedStoryboardNodePage.vue', () => ({
+  default: {
+    setup(_: unknown, { slots }: SetupContext) {
+      return () => h('section', slots['local-update-status']?.());
+    },
+  },
+}));
 vi.mock('./storyboard.api', () => ({
   storyboardApi: { workspace: vi.fn(), settings: vi.fn(), edit: vi.fn() },
 }));

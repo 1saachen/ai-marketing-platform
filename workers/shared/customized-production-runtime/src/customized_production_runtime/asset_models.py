@@ -39,6 +39,17 @@ class AssetUpdatePlan(Model):
     additions: Annotated[list[Candidate], Field(max_length=1000)]
     blockers: Annotated[list[Annotated[str, Field(min_length=1, max_length=2000)]], Field(max_length=100)]
 
+
+class AssetImageDecision(Model):
+    assetId: Id
+    action: Literal['KEEP', 'UPDATE', 'REVIEW']
+    reason: Annotated[str, Field(min_length=1, max_length=2000)]
+
+
+class AssetVisualUpdatePlan(AssetUpdatePlan):
+    imageDecisions: Annotated[list[AssetImageDecision], Field(max_length=1000)]
+
+
 class Detail(Model):
     key: Literal['structure', 'material', 'markings', 'appearance', 'styling', 'layout', 'lighting']
     value: Text

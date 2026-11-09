@@ -18,6 +18,7 @@ const props = defineProps<{
   scriptId: string;
   affectedScripts?: Pick<CustomizedStoryboardScript, 'id' | 'name'>[];
   disabled?: boolean;
+  hideTrigger?: boolean;
 }>();
 const emit = defineEmits<{ saved: [] }>();
 const localUpdate = ref<InstanceType<typeof CustomizedLocalUpdate> | null>(null);
@@ -38,6 +39,10 @@ const candidate = ref<CustomizedScriptUpdateCandidate | null>(null),
 const inProgress = computed(
   () => !!candidate.value && ['QUEUED', 'RUNNING'].includes(candidate.value.status),
 );
+const canStart = computed(() => !props.disabled && !busy.value && !inProgress.value);
+function showPreview() {
+  if (canStart.value) localUpdate.value?.show();
+}
 const needsChanges = computed(
   () => candidate.value?.status === 'FAILED' && candidate.value.reviewStatus === 'NEEDS_CHANGES',
 );
@@ -220,39 +225,44 @@ onBeforeUnmount(() => {
   clearTimeout(timer);
   clearInterval(clock);
 });
+defineExpose({ canStart, showPreview });
 </script>
 <template>
-  <div class="script-local-update">
-    <CustomizedLocalUpdate
-      ref="localUpdate"
-      :project-id="projectId"
-      :workflow-run-id="workflowRunId"
-      :target-id="scriptId"
-      :nodes="['SCRIPT']"
-      subject-label="当前方案"
-      execute-label="更新当前方案"
-      :disabled="
-        disabled || busy || (!!candidate && ['QUEUED', 'RUNNING'].includes(candidate.status))
-      "
-      @execute="execute"
-    >
-      <template #context="{ preview }">
-        <section
-          v-if="affectedForPreview(preview).length"
-          class="affected-scripts"
-          aria-label="信息卡变化影响的脚本"
-        >
-          <h3>信息卡变化影响的脚本（{{ affectedForPreview(preview).length }}）</h3>
-          <ul>
-            <li v-for="script in affectedForPreview(preview)" :key="script.id">
-              <strong>{{ script.name }}</strong
-              >：{{ script.id === scriptId ? '当前方案 · 待更新' : '其他方案 · 待更新' }}
-            </li>
-          </ul>
-          <p>本次只更新当前方案；其他方案需切换后分别更新，已有内容保留。</p>
-        </section>
-      </template>
-    </CustomizedLocalUpdate>
+  <CustomizedLocalUpdate
+    ref="localUpdate"
+    :hide-trigger="hideTrigger"
+    :project-id="projectId"
+    :workflow-run-id="workflowRunId"
+    :target-id="scriptId"
+    :nodes="['SCRIPT']"
+    subject-label="当前方案"
+    execute-label="更新当前方案"
+    :disabled="!canStart"
+    @execute="execute"
+  >
+    <template #context="{ preview }">
+      <section
+        v-if="affectedForPreview(preview).length"
+        class="affected-scripts"
+        aria-label="信息卡变化影响的脚本"
+      >
+        <h3>信息卡变化影响的脚本（{{ affectedForPreview(preview).length }}）</h3>
+        <ul>
+          <li v-for="script in affectedForPreview(preview)" :key="script.id">
+            <strong>{{ script.name }}</strong
+            >：{{ script.id === scriptId ? '当前方案 · 待更新' : '其他方案 · 待更新' }}
+          </li>
+        </ul>
+        <p>本次只更新当前方案；其他方案需切换后分别更新，已有内容保留。</p>
+      </section>
+    </template>
+  </CustomizedLocalUpdate>
+  <div
+    v-if="
+      (candidate && !candidate.applied && !open) || (syncError && !candidate) || (error && !open)
+    "
+    class="script-local-update"
+  >
     <ScriptUpdateStatus
       v-if="candidate && !open && !candidate.applied"
       :candidate="candidate"
@@ -260,19 +270,28 @@ onBeforeUnmount(() => {
       :now="now"
       :sync-error="syncError"
     />
-    <button v-if="candidate?.after && !candidate.applied" type="button" @click="show">
-      查看更新候选
-    </button>
-    <button
-      v-if="candidate?.status === 'FAILED'"
-      type="button"
-      :disabled="busy || disabled"
-      @click="retry"
+    <div
+      v-if="candidate && !candidate.applied && (candidate.after || candidate.status === 'FAILED')"
+      class="candidate-actions"
     >
-      {{ needsChanges ? '按审核意见修正' : '继续本次更新' }}
-    </button>
+      <BaseButton
+        v-if="candidate.status === 'FAILED'"
+        variant="secondary"
+        :disabled="busy || disabled"
+        @click="retry"
+      >
+        {{ needsChanges ? '按审核意见修正' : '继续本次更新' }}
+      </BaseButton>
+      <BaseButton
+        v-if="candidate.after"
+        :variant="candidate.status === 'COMPLETED' ? 'primary' : 'secondary'"
+        @click="show"
+      >
+        查看更新候选
+      </BaseButton>
+    </div>
     <p v-if="syncError && !candidate" role="alert">
-      暂时无法读取更新状态，正在重新查询。<button type="button" @click="refresh">重新查询</button>
+      暂时无法读取更新状态。<BaseButton variant="secondary" @click="refresh">重新查询</BaseButton>
     </p>
     <p v-if="error && !open" role="alert">{{ error }}</p>
   </div>
@@ -379,8 +398,8 @@ onBeforeUnmount(() => {
     </div>
     <p v-if="error" role="alert">{{ error }}</p>
     <div class="script-update-actions">
-      <button class="secondary" type="button" :disabled="busy" @click="open = false">
-        {{ inProgress ? '关闭，后台继续' : '暂不采用' }}</button
+      <BaseButton variant="secondary" :disabled="busy" @click="open = false">
+        {{ inProgress ? '关闭，后台继续' : '暂不采用' }}</BaseButton
       ><BaseButton v-if="needsChanges" :disabled="disabled || busy || !draftCurrent" @click="repair"
         >按审核意见修正</BaseButton
       ><BaseButton
@@ -397,11 +416,15 @@ onBeforeUnmount(() => {
 </template>
 <style scoped>
 .script-local-update {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 18px;
+}
+.candidate-actions {
   display: flex;
-  gap: 12px;
-  align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
-  margin: 12px 0;
+  justify-content: flex-end;
 }
 .review-findings {
   margin: 16px 0;
@@ -479,6 +502,7 @@ label {
   background: white;
   padding: 14px 0;
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
 }
@@ -486,16 +510,6 @@ summary {
   cursor: pointer;
   padding: 10px 0;
   color: #64748b;
-}
-.secondary {
-  padding: 0 16px;
-  min-height: 42px;
-  background: white;
-  border: 1px solid #cbd8ea;
-  border-radius: 10px;
-  color: #3f5f8c;
-  cursor: pointer;
-  font: inherit;
 }
 @media (max-width: 680px) {
   .script-comparison {

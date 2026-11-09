@@ -59,6 +59,11 @@ export type CustomizedImageSettings = {
   /** Omitted by historical tasks and the original batch UI. */
   inputs?: CustomizedImageInput[];
 };
+export const CUSTOMIZED_DEFAULT_IMAGE_SETTINGS = {
+  model: CUSTOMIZED_IMAGE_MODELS[0].id,
+  resolution: '2K',
+  ratio: '1:1',
+} as const satisfies Omit<CustomizedImageSettings, 'assetIds' | 'inputs'>;
 export const CUSTOMIZED_IMAGE_SETTINGS_SCHEMA = {
   type: 'object',
   additionalProperties: false,

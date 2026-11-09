@@ -38,6 +38,7 @@ import WorkflowInformationCard from '../../../platform/workflow/components/Workf
 import WorkflowInformationField from '../../../platform/workflow/components/WorkflowInformationField.vue';
 import WorkflowInformationDialog from '../../../platform/workflow/components/WorkflowInformationDialog.vue';
 import WorkflowExtractionFeedback from '../../../platform/workflow/components/WorkflowExtractionFeedback.vue';
+import CustomizedNodeHeading from '../shared/CustomizedNodeHeading.vue';
 import {
   createStoryboardScript,
   scriptDuration,
@@ -232,15 +233,12 @@ defineExpose({ guardEditor });
 </script>
 <template>
   <section class="storyboard-page" aria-label="完整脚本工作台">
-    <header class="storyboard-heading">
-      <div class="heading-copy">
-        <span class="node-index">03</span>
-        <div>
-          <h2>完整脚本</h2>
-          <p>围绕产品创作完整脚本，比较不同创意与表达</p>
-        </div>
-      </div>
-      <div class="heading-actions extraction-heading__actions">
+    <CustomizedNodeHeading
+      index="03"
+      title="完整脚本"
+      description="围绕产品创作完整脚本，比较不同创意与表达"
+    >
+      <template #actions>
         <WorkflowNodeEditActions
           v-if="active"
           :editing="editing"
@@ -261,8 +259,10 @@ defineExpose({ guardEditor });
           @extract="emit('generate')"
           @details="graphOpen = true"
         />
-      </div>
-    </header>
+      </template>
+      <template v-if="$slots['local-update']" #update><slot name="local-update" /></template>
+    </CustomizedNodeHeading>
+    <slot name="local-update-status" />
     <WorkflowExtractionFeedback
       v-if="error"
       title="操作未完成"
@@ -686,4 +686,3 @@ defineExpose({ guardEditor });
   </section>
 </template>
 <style scoped src="./storyboard.css"></style>
-<style scoped src="../../../platform/workflow/components/workflow-extraction-heading.css"></style>

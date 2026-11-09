@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import ScriptLocalUpdate from './ScriptLocalUpdate.vue';
+import CustomizedUpdateTrigger from '../shared/CustomizedUpdateTrigger.vue';
 import {
   validateStoryboardSettings,
   type StoryboardWorkspace,
@@ -49,6 +50,7 @@ const loading = ref(true),
   pollInterrupted = ref(false),
   savedMessage = ref('');
 const page = ref<InstanceType<typeof CustomizedStoryboardNodePage> | null>(null);
+const scriptUpdate = ref<InstanceType<typeof ScriptLocalUpdate> | null>(null);
 // Local updates have their own per-scheme candidate, progress and recovery controls.
 const graphTask = computed(() =>
   workspace.value?.task?.incremental ? null : (workspace.value?.task ?? null),
@@ -641,22 +643,6 @@ defineExpose({ flushPendingEdits, selectByRun, nextRunId });
     @action="load"
   />
   <template v-else>
-    <ScriptLocalUpdate
-      v-if="currentRecord?.confirmedRevision"
-      :project-id="projectId"
-      :workflow-run-id="workflowRunId"
-      :script-id="currentRecord.id"
-      :affected-scripts="
-        workspace?.scripts
-          .filter((s) => s.confirmedRevision && s.stale)
-          .map((s) => ({ id: s.id, name: s.script.name })) ?? []
-      "
-      :disabled="saving || editing || dirty || running || scopeReadonly"
-      @saved="
-        refresh();
-        emit('published');
-      "
-    />
     <CustomizedStoryboardNodePage
       ref="page"
       v-model:draft="draft"
@@ -688,6 +674,32 @@ defineExpose({ flushPendingEdits, selectByRun, nextRunId });
       @select="select"
       @create="create"
       @remove="remove"
-    />
+    >
+      <template v-if="currentRecord?.confirmedRevision" #local-update>
+        <CustomizedUpdateTrigger
+          :disabled="!scriptUpdate?.canStart"
+          @open="scriptUpdate?.showPreview()"
+        />
+      </template>
+      <template v-if="currentRecord?.confirmedRevision" #local-update-status>
+        <ScriptLocalUpdate
+          ref="scriptUpdate"
+          hide-trigger
+          :project-id="projectId"
+          :workflow-run-id="workflowRunId"
+          :script-id="currentRecord.id"
+          :affected-scripts="
+            workspace?.scripts
+              .filter((s) => s.confirmedRevision && s.stale)
+              .map((s) => ({ id: s.id, name: s.script.name })) ?? []
+          "
+          :disabled="saving || editing || dirty || running || scopeReadonly"
+          @saved="
+            refresh();
+            emit('published');
+          "
+        />
+      </template>
+    </CustomizedStoryboardNodePage>
   </template>
 </template>

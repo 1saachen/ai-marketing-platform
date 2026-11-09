@@ -39,11 +39,15 @@ it('accepts per-asset keep decisions and rejects invalid fields or blank reasons
     blockers: [],
   };
   expect(isAssetUpdatePlan(plan)).toBe(true);
+  const imageDecision = { assetId: 'cup', action: 'REVIEW', reason: '配色是否画入图中待核对' };
+  expect(isAssetUpdatePlan({ ...plan, imageDecisions: [imageDecision] })).toBe(true);
   for (const invalid of [
     null,
     {},
     { ...plan, decisions: [{ assetId: 'cup', fields: ['image'], reason: '不能换图片' }] },
     { ...plan, decisions: [{ assetId: 'cup', fields: [], reason: '' }] },
+    { ...plan, imageDecisions: [{ ...imageDecision, action: 'ALL' }] },
+    { ...plan, imageDecisions: [{ ...imageDecision, reason: '' }] },
   ])
     expect(isAssetUpdatePlan(invalid)).toBe(false);
 });

@@ -17,7 +17,10 @@ export function assetImageActivity(
     (t) => t.operation === 'IMAGE' && t.imageSettings?.assetIds.includes(assetId),
   );
   if (!task) return;
-  if (task.completedImageAssetIds?.includes(assetId) || task.status === 'COMPLETED')
+  if (
+    task.status === 'COMPLETED' ||
+    (!task.assetImageRefresh && task.completedImageAssetIds?.includes(assetId))
+  )
     return { taskId: task.id, state: 'SUCCEEDED' };
   if (
     task.status === 'QUEUED' ||

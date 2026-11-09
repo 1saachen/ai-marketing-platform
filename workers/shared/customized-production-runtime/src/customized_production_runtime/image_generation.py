@@ -65,6 +65,11 @@ class ImageSettings(BaseModel):
         return self
 
 
+class AssetImageRefreshSettings(ImageSettings):
+    # The server chooses this scope from a validated catalog, not the manual image selection.
+    assetIds: list[str] = Field(min_length=1, max_length=1000)
+
+
 def image_prompt(asset: dict[str, Any], brief: dict[str, Any], settings: ImageSettings) -> str:
     override = next((i for i in settings.inputs or [] if i.assetId == asset['id']), None)
     if override:
@@ -146,7 +151,8 @@ async def upload_image(api: Any, object_id: str, image: bytes) -> None:
 
 async def run_image(api: Any, provider: Any, claim: dict[str, Any]) -> None:
     snapshot = claim['input']
-    settings = ImageSettings.model_validate(snapshot['imageSettings'])
+    refresh = snapshot.get('assetImageRefresh', {}).get('version') == 1
+    settings = (AssetImageRefreshSettings if refresh else ImageSettings).model_validate(snapshot['imageSettings'])
     assets = {a['id']: a for a in snapshot['document']['assets']}
     if len(set(settings.assetIds)) != len(settings.assetIds) or any(i not in assets for i in settings.assetIds):
         raise ValueError('invalid image scope')
@@ -165,7 +171,9 @@ async def run_image(api: Any, provider: Any, claim: dict[str, Any]) -> None:
     saved = claim.get('output') or {}
     model_name = 'Seedream 5.0 Pro' if '-pro-' in settings.model else 'Seedream 5.0 Flash'
     summary = [f'制作设置：{model_name} · {settings.resolution} · {settings.ratio}']
-    for object_id in settings.assetIds:
+    if refresh:
+        summary.append(f'本次更新 {len(settings.assetIds)} 张关联图片，生成完成后自动保存到当前资产。')
+    for object_id in settings.assetIds if not refresh else []:
         asset = assets[object_id]
         summary.extend([f"\n{asset['name']}：{asset['description'][:1200]}",
             f"已知特征：{asset.get('knownFacts', '')[:800]}",

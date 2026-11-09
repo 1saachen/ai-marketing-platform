@@ -32,6 +32,7 @@ class UpdateProvider(Provider):
         if stage in ('ASSET_UPDATE_SCOPE', 'ASSET_UPDATE_SCOPE_CORRECTION'):
             self.calls.append(stage)
             return schema.model_validate({'decisions': [{'assetId': a['id'], 'fields': FIELDS if self.change and a['kind'] == 'PRODUCT' else [], 'reason': '产品配色变更' if self.change and a['kind'] == 'PRODUCT' else '外观、用途及归属未变'} for a in old],
+                **({'imageDecisions': [{'assetId': a['id'], 'action': 'UPDATE' if self.change and a['kind'] == 'PRODUCT' else 'KEEP', 'reason': '核对实际参考图外观'} for a in old if a['id'] in context['picturedAssetIds']]} if 'picturedAssetIds' in context else {}),
                 'additions': [{'key': 'seat', 'existingId': None, 'name': '座椅', 'kind': 'PROP', 'aliases': [], 'usage': '必要新道具', 'treatment': 'INDEPENDENT', 'parentKey': None, 'sources': [{'source': 'SCRIPT', 'path': '/story/content', 'quote': '周越在候车区使用充电器。', 'field': 'usage'}]}] if self.add else [], 'blockers': []})
         if stage == 'ASSET_UPDATE_PATCHES':
             self.calls.append(stage)
@@ -55,6 +56,8 @@ class UpdateProvider(Provider):
 @pytest.mark.asyncio
 async def test_small_color_change_only_patches_product_and_preserves_every_other_byte_and_picture() -> None:
     claim = await baseline()
+    claim['input']['assetImageRefresh'] = {'version': 1, 'scopeVersion': 1}
+    claim['input']['document']['assets'][1]['image'] = {'assetId': 'person-image', 'version': 1}
     old = copy.deepcopy(claim['input']['document']['assets'])
     claim['input']['brief']['product'] = 'G65，黑色外壳。'
     api, provider = Api(claim), UpdateProvider(claim, change=True)
@@ -64,6 +67,9 @@ async def test_small_color_change_only_patches_product_and_preserves_every_other
     assert api.completed['assets'][0]['image'] == old[0]['image']
     assert api.completed['assets'][0]['designNotes'] == old[0]['designNotes']
     assert api.completed['assets'][1:] == old[1:]
+    assert [(d['assetId'], d['action']) for d in claim['output']['assetUpdatePlan']['imageDecisions']] == [
+        (old[0]['id'], 'UPDATE'), (old[1]['id'], 'KEEP'),
+    ]
     assert claim['input']['document']['assets'] == old
 
 
@@ -101,6 +107,61 @@ async def test_update_resume_keeps_the_scope_and_does_not_repurchase_it() -> Non
     retry = UpdateProvider(claim, change=True)
     await run_assets(api, retry, claim)  # type: ignore[arg-type]
     assert retry.calls == ['ASSET_UPDATE_PATCHES', 'ASSET_REVIEW']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('valid_replacement', [True, False])
+async def test_resume_repairs_only_stale_evidence_in_prepared_definitions(valid_replacement: bool) -> None:
+    claim = await baseline()
+    snapshot = claim['input']
+    snapshot['brief']['product'] = 'G65，黑色外壳。'
+    product = snapshot['document']['assets'][0]
+
+    class MissingReference(UpdateProvider):
+        async def generate(self, stage: str, model: str, schema: Any, context: dict[str, Any], instruction: str) -> Any:
+            output = (await super().generate(stage, model, schema, context, instruction)).model_dump()
+            if stage == 'ASSET_UPDATE_SCOPE':
+                output['decisions'][0]['fields'].remove('preparation')
+            if stage == 'ASSET_UPDATE_PATCHES':
+                output['patches'] = [p for p in output['patches'] if p['field'] != 'preparation']
+            return schema.model_validate(output)
+
+    api = Api(claim)
+    with pytest.raises(ValueError, match='asset evidence quote not found'):
+        await run_assets(api, MissingReference(claim, change=True), claim)  # type: ignore[arg-type]
+    prepared = copy.deepcopy(claim['output']['assetUpdateBase'])
+    snapshot['assetTextUpdateVersion'] = 1
+
+    class EvidenceProvider(UpdateProvider):
+        async def generate(self, stage: str, model: str, schema: Any, context: dict[str, Any], instruction: str) -> Any:
+            if stage != 'ASSET_UPDATE_EVIDENCE':
+                return await super().generate(stage, model, schema, context, instruction)
+            self.calls.append(stage)
+            [entry] = context['invalidEvidence']
+            assert entry['assetId'] == product['id']
+            return schema.model_validate({'replacements': [{
+                'assetId': entry['assetId'],
+                'sourceIndex': entry['sourceIndex'],
+                'replacement': {**entry['old'], 'quote': 'G65，黑色外壳。' if valid_replacement else '不在资料中'},
+            }]})
+
+    provider = EvidenceProvider(claim)
+    if valid_replacement:
+        await run_assets(api, provider, claim)  # type: ignore[arg-type]
+        assert provider.calls == ['ASSET_UPDATE_EVIDENCE', 'ASSET_REVIEW']
+        assets = api.completed['assets']
+        assert assets[0]['preparation']['sources'] != prepared[0]['preparation']['sources']
+        assets[0]['preparation']['sources'] = prepared[0]['preparation']['sources']
+        assert assets == prepared
+    else:
+        with pytest.raises(ValueError, match='asset evidence quote not found'):
+            await run_assets(api, provider, claim)  # type: ignore[arg-type]
+        assert claim['output']['assetUpdateEvidenceFailure'] == 'INVALID'
+        assert next(s for s in claim['steps'] if s['id'] == 'IMAGE_PLAN')['status'] == 'FAILED'
+        with pytest.raises(ValueError, match='asset evidence quote not found'):
+            await run_assets(api, provider, claim)  # type: ignore[arg-type]
+        assert provider.calls == ['ASSET_UPDATE_EVIDENCE']
+        assert api.completed is None
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import {
   type ProductionTask,
 } from '@ai-marketing/contracts';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
+import { picturedAssetOwners } from './asset-image-refresh';
 
 export function assetUpdateScope(
   input: ProductionInput,
@@ -72,6 +73,16 @@ export function validateAssetUpdateScope(
   const plan = (checkpoint as { assetUpdatePlan?: unknown } | null)?.assetUpdatePlan;
   if (!isAssetUpdatePlan(plan) || !assetUpdateScope(input, checkpoint))
     return '资产更新缺少完整有效的模型判断范围';
+  if (input.assetImageRefresh?.scopeVersion === 1) {
+    const owners = picturedAssetOwners(input.document.assets);
+    const ids = new Set(plan.imageDecisions?.map((decision) => decision.assetId));
+    if (
+      ids.size !== plan.imageDecisions?.length ||
+      ids.size !== owners.length ||
+      owners.some((asset) => !ids.has(asset.id))
+    )
+      return '图片判断缺少当前参考图主体，请重新核对范围';
+  }
   if (plan.blockers.length) return '资产更新存在待人工核对的问题';
   const before = new Map(input.document.assets.map((a) => [a.id, a]));
   const expected = new Set([

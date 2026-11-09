@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "BriefChange": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "enum": [
+            "brandName",
+            "projectName",
+            "projectBackground",
+            "brandTone",
+            "visualConsistencyRules",
+            "avoidedElements",
+            "productName",
+            "productDescription",
+            "productSpecifications",
+            "productAppearance",
+            "sellingPoints",
+            "targetAudience"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "maxLength": 50000,
+              "type": "string"
+            },
+            {
+              "items": {
+                "maxLength": 10000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 100,
+              "type": "array"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "field",
+        "value"
+      ],
+      "title": "BriefChange",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "changes": {
+      "items": {
+        "$ref": "#/$defs/BriefChange"
+      },
+      "maxItems": 12,
+      "title": "Changes",
+      "type": "array"
+    },
+    "productionNote": {
+      "maxLength": 4000,
+      "title": "Productionnote",
+      "type": "string"
+    },
+    "questions": {
+      "items": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 12,
+      "title": "Questions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "changes",
+    "productionNote",
+    "questions"
+  ],
+  "title": "ClarificationProposal",
+  "type": "object"
+}
