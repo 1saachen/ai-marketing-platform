@@ -17,6 +17,7 @@ import {
   type WorkflowWorkingRepository,
 } from '../../../platform/workflow/workflow-working.repository';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
+import { sharedCustomizedBrief } from '../../../platform/workflow/customized-shared-brief';
 import { clipPayload } from './video-production.domain';
 import { rebindUnchanged } from './unchanged-media';
 
@@ -58,7 +59,9 @@ export function imageOnlyPlanRebase(
   if (!isVideoDocument(document)) return null;
   const rows = artifacts.filter((a) => a.artifactKey.startsWith('customized-'));
   if (
-    rows.some((a) => a.projectId !== p || a.workflowRunId !== r) ||
+    rows.some(
+      (a) => a.projectId !== p || (a.workflowRunId !== r && a.artifactKey !== 'customized-brief'),
+    ) ||
     new Set(rows.map((a) => a.artifactKey)).size !== rows.length
   )
     return null;
@@ -300,7 +303,14 @@ export async function applyImageOnlyPlanRebase(
   const deps = await tx.workingArtifactDependency.findMany({
     where: { projectId: p, workflowRunId: r, dependentArtifactId: { in: rows.map((a) => a.id) } },
   });
-  const proof = imageOnlyPlanRebase(p, r, document, rows, deps);
+  // Resolve the same card as the workspace. The proof still requires its exact frozen identity.
+  const localBrief = rows.find((a) => a.artifactKey === 'customized-brief') ?? null;
+  const brief = await sharedCustomizedBrief(tx, p, r, localBrief);
+  const sources =
+    brief && brief.id !== localBrief?.id
+      ? [...rows.filter((a) => a.artifactKey !== 'customized-brief'), brief]
+      : rows;
+  const proof = imageOnlyPlanRebase(p, r, document, sources, deps);
   if (!proof) return null;
   for (const a of document.assets)
     if (a.image) {
@@ -325,7 +335,7 @@ export async function applyImageOnlyPlanRebase(
       if (!file || file.sizeBytes !== version.sizeBytes || !/^[a-f0-9]{64}$/i.test(file.sha256))
         return null;
     }
-  const current = new Map(rows.map((a) => [a.artifactKey, a]));
+  const current = new Map(sources.map((a) => [a.artifactKey, a]));
   for (const step of proof.steps) {
     if (workflowStateHash(step.artifact.payload) === workflowStateHash(step.payload)) {
       const record = await rebindUnchanged(

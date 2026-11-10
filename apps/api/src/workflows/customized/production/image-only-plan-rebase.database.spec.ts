@@ -12,13 +12,17 @@ import {
 import { PrismaService } from '../../../database/prisma.service';
 import { WorkflowWorkingRepository } from '../../../platform/workflow/workflow-working.repository';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
+import { setCustomizedInformationMode } from '../../../platform/workflow/customized-shared-brief';
 import { ProductionRepository } from './production.repository';
 import { imageOnlyPlanRebase, applyImageOnlyPlanRebase } from './image-only-plan-rebase';
 import type { Prisma } from '../../../generated/prisma/client';
 
-it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
-  'C11 keeps six clips across late images, repairs legacy blockage, fences definitions and preserves sibling scope',
-  async () => {
+it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1').each([
+  { card: 'local brief', shared: false },
+  { card: 'shared brief', shared: true },
+])(
+  'C11 keeps six clips across late images and preserves sibling scope with a $card',
+  async ({ shared }) => {
     const url = process.env.DATABASE_URL;
     if (!url || !['localhost', '127.0.0.1', '[::1]'].includes(new URL(url).hostname))
       throw new Error('Local database required');
@@ -45,9 +49,23 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
           { id: other, name: 'C11 other isolated' },
         ],
       });
-      const run = await working.initializeCustomizedRun(p),
-        r = run.id;
-      await db.workflowRun.update({ where: { id: r }, data: { forkScriptId: scriptId } });
+      const root = await working.initializeCustomizedRun(p);
+      const run = shared
+        ? await db.workflowRun.create({
+            data: {
+              projectId: p,
+              workflow: 'CUSTOMIZED',
+              workflowSpace: 'CUSTOMIZED_PROJECT',
+              status: 'PAUSED',
+              activeKey: null,
+              parentWorkflowRunId: root.id,
+              forkNodeId: 'STORYBOARD',
+              forkScriptId: scriptId,
+              branchPublishedAt: new Date(),
+            },
+          })
+        : await db.workflowRun.update({ where: { id: root.id }, data: { forkScriptId: scriptId } });
+      const r = run.id;
       const f = JSON.parse(
         readFileSync(
           resolve(
@@ -85,7 +103,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
         await db.workingArtifact.create({
           data: {
             projectId: p,
-            workflowRunId: r,
+            workflowRunId: key === 'customized-brief' ? root.id : r,
             nodeId: node,
             artifactKey: key,
             name: key,
@@ -96,6 +114,34 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
             contentHash: workflowStateHash(payload),
           },
         });
+      const brief = await db.workingArtifact.findFirstOrThrow({
+        where: { projectId: p, workflowRunId: root.id, artifactKey: 'customized-brief' },
+      });
+      if (shared) {
+        const source = await db.workingArtifact.findFirstOrThrow({
+          where: { projectId: p, workflowRunId: r, artifactKey: `customized-script:${scriptId}` },
+        });
+        await db.workingArtifactDependency.create({
+          data: {
+            projectId: p,
+            workflowRunId: r,
+            dependentArtifactId: source.id,
+            sourceType: 'WORKING_ARTIFACT',
+            sourceArtifactId: brief.id,
+            sourceNodeId: brief.nodeId,
+            sourceKey: brief.artifactKey,
+            sourceRevision: brief.revision,
+            sourceHash: brief.contentHash,
+          },
+        });
+        await db.$transaction((tx) => setCustomizedInformationMode(tx, p, r, 'CURRENT'));
+      }
+      const sourceArtifacts = async () => {
+        const rows = await db.workingArtifact.findMany({
+          where: { projectId: p, workflowRunId: r },
+        });
+        return shared ? [...rows, brief] : rows;
+      };
       await repo.save(p, r, 0, { assets: f.document.assets, shots: [] }, 'ASSETS', true);
       let w = await repo.workspace(p, r);
       let d = structuredClone(f.document);
@@ -110,9 +156,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
           shotIds: [shot.id],
         });
       }
-      d.videoPlan.sources = (
-        await db.workingArtifact.findMany({ where: { projectId: p, workflowRunId: r } })
-      )
+      d.videoPlan.sources = (await sourceArtifacts())
         .filter(
           (a) =>
             a.artifactKey === 'customized-asset-catalog' ||
@@ -199,6 +243,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
       d = structuredClone(w.document) as ProductionVideoDocument;
       d.assets[0]!.image = await image(1);
       const draft = await repo.save(p, r, w.draftRevision, d, 'ASSETS', false);
+      d = (await repo.workspace(p, r)).document as ProductionVideoDocument;
       await db.$transaction((tx) => api.commitAssets(tx, p, r, d));
       expect((await repo.workspace(p, r)).draftRevision).toBe(draft.revision);
       expect(
@@ -302,7 +347,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
       expect(await db.workingArtifact.findUnique({ where: { id: siblingArtifact.id } })).toEqual(
         siblingArtifact,
       );
-      const rows = await db.workingArtifact.findMany({ where: { projectId: p, workflowRunId: r } }),
+      const rows = await sourceArtifacts(),
         deps = await db.workingArtifactDependency.findMany({
           where: { projectId: p, workflowRunId: r },
         });
@@ -312,10 +357,9 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
       d = structuredClone(w.document) as ProductionVideoDocument;
       d.assets[0]!.image = await image(3);
       const third = await repo.save(p, r, w.draftRevision, d, 'ASSETS', false);
+      d = (await repo.workspace(p, r)).document as ProductionVideoDocument;
       await db.$transaction((tx) => api.commitAssets(tx, p, r, d));
-      const pendingRows = await db.workingArtifact.findMany({
-        where: { projectId: p, workflowRunId: r },
-      });
+      const pendingRows = await sourceArtifacts();
       const pendingDeps = await db.workingArtifactDependency.findMany({
         where: { projectId: p, workflowRunId: r },
       });
@@ -340,6 +384,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
       const invalidImageTx = {
         workingArtifact: { findMany: vi.fn().mockResolvedValue(pendingRows) },
         workingArtifactDependency: { findMany: vi.fn().mockResolvedValue(pendingDeps) },
+        workflowNodeState: { findUnique: vi.fn().mockResolvedValue(null) },
         assetVersion: { findFirst: vi.fn().mockResolvedValue(null) },
       } as unknown as Prisma.TransactionClient;
       expect(
@@ -625,7 +670,7 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
       expect(await db.customizedProductionTask.count({ where: { projectId: p } })).toBe(count);
       expect((await repo.workspace(p, r)).prompts[0]!.stale).toBe(true);
       expect(outbox).toHaveBeenCalledTimes(5);
-      expect(await db.workflowRun.count({ where: { projectId: p } })).toBe(2);
+      expect(await db.workflowRun.count({ where: { projectId: p } })).toBe(shared ? 3 : 2);
       expect(await db.jobOutbox.count({ where: { projectId: p } })).toBe(0);
     } finally {
       outbox.mockRestore();
