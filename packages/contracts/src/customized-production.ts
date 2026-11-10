@@ -210,8 +210,16 @@ export type ProductionStep = {
   content: string;
   detail?: ProductionExecutionDetail;
 };
+export type ProductionLocalMediaRetryRequest = {
+  workflowRunId: string;
+  tasks: { id: string; version: string }[];
+};
 export type ProductionTask = {
   localStoryboard?: { startedAt: string; attempt: number; reviewAvailable?: true };
+  /** Version of a failed item in a local prompt or video batch. */
+  localMediaRetryVersion?: string;
+  renderCreateUnconfirmed?: true;
+  renderInputRejected?: true;
   assetReviewQuestions?: string[];
   assetEvidenceNeedsRestart?: boolean;
   assetImageRefresh?: AssetImageRefresh;

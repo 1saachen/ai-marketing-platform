@@ -271,16 +271,30 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
           'VIDEO',
         ),
       ).rejects.toThrow();
+      const rejection = '视频平台拒绝了本次请求，请核对生成参数和参考素材（HTTP 400）。';
       await repo.checkpoint(
         p,
         denied.id,
         dc.attemptToken!,
-        { id: 'GENERATE', title: '生成视频', status: 'RUNNING', content: '请求被拒绝' },
-        { createStarted: false, createRejected: true },
+        { id: 'GENERATE', title: '生成视频', status: 'FAILED', content: rejection },
+        { createStarted: false, createRejected: true, createRejectedHttpStatus: 400 },
         'VIDEO',
       );
       await repo.fail(p, denied.id, dc.attemptToken!, false, 'VIDEO');
-      expect((await repo.getTask(p, denied.id)).errorMessage).toContain('未受理');
+      const rejected = await repo.getTask(p, denied.id);
+      expect(rejected.errorMessage).toBe(rejection);
+      expect(rejected.renderInputRejected).toBe(true);
+      expect(rejected.steps.find((step) => step.id === 'GENERATE')).toMatchObject({
+        status: 'FAILED',
+        detail: { summary: rejection, sections: [] },
+      });
+      await expect(repo.action(p, denied.id, false)).rejects.toThrow('已拒绝这份输入');
+      await db.customizedProductionTask.update({
+        where: { id: denied.id },
+        data: { output: { createStarted: false, createRejected: true } },
+      });
+      expect((await repo.getTask(p, denied.id)).renderInputRejected).toBe(true);
+      await expect(repo.action(p, denied.id, false)).rejects.toThrow('已拒绝这份输入');
       const unknown = await repo.start(
           p,
           r,
@@ -303,7 +317,12 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
         'VIDEO',
       );
       await repo.fail(p, unknown.id, uc.attemptToken!, true, 'VIDEO');
-      expect((await repo.getTask(p, unknown.id)).status).toBe('FAILED');
+      const uncertain = await repo.getTask(p, unknown.id);
+      expect(uncertain.status).toBe('FAILED');
+      expect(uncertain.renderCreateUnconfirmed).toBe(true);
+      const step = uncertain.steps.find((item) => item.id === 'GENERATE');
+      expect(step?.detail?.summary).toContain('未取得任务编号');
+      expect(step?.detail?.summary).toContain('未保存具体错误码');
       const late = await repo.start(
           p,
           r,

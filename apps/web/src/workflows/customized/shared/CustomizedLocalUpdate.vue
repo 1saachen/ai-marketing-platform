@@ -11,6 +11,7 @@ const props = defineProps<{
   projectId: string;
   workflowRunId: string;
   nodes: CustomizedUpdateNode[];
+  preferredNode?: CustomizedUpdateNode | undefined;
   targetId?: string;
   subjectLabel?: string;
   executeLabel?: string;
@@ -99,7 +100,10 @@ async function load() {
 }
 function show() {
   if (props.disabled) return;
-  selected.value = props.nodes[0]!;
+  selected.value =
+    props.preferredNode && props.nodes.includes(props.preferredNode)
+      ? props.preferredNode
+      : props.nodes[0]!;
   open.value = true;
   void load();
 }

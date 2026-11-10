@@ -39,6 +39,7 @@ import {
   IsObject,
   IsBoolean,
   IsArray,
+  IsISO8601,
   ArrayMinSize,
   ArrayMaxSize,
   ArrayUnique,
@@ -69,6 +70,7 @@ import { ProductionImageService } from './production-image.service';
 import { ProductionVideoService } from './production-video.service';
 import type {
   ProductionDocument,
+  ProductionLocalMediaRetryRequest,
   ProductionOperation,
   ProductionStep,
 } from '@ai-marketing/contracts';
@@ -133,6 +135,19 @@ class LocalUpdate extends Scope {
     'ASSETS' | 'SHOTS' | 'PROMPT' | 'RENDER';
   @IsUUID() idempotencyKey!: string;
   @IsObject() incremental!: CustomizedUpdateRequest;
+}
+class LocalMediaRetryItem {
+  @IsUUID() id!: string;
+  @IsISO8601({ strict: true }) version!: string;
+}
+class LocalMediaRetry extends Scope implements ProductionLocalMediaRetryRequest {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(500)
+  @ArrayUnique((item: LocalMediaRetryItem) => item?.id)
+  @ValidateNested({ each: true })
+  @Type(() => LocalMediaRetryItem)
+  tasks!: LocalMediaRetryItem[];
 }
 class RetainAssetImages extends Scope implements CustomizedAssetImageRetentionRequest {
   @IsIn([1]) version!: 1;
@@ -256,6 +271,10 @@ export class ProductionService implements OnModuleInit, OnModuleDestroy {
       },
       renderModels,
     );
+  }
+  async retryLocalMedia(p: string, batchKey: string, body: LocalMediaRetry) {
+    await this.projects.get(p);
+    return this.repository.retryLocalMedia(p, batchKey, body);
   }
   async save(p: string, b: Save) {
     await this.projects.get(p);
@@ -392,6 +411,13 @@ export class ProductionController {
     @Body() b: LocalUpdate,
   ) {
     return this.service.localUpdate(p, b);
+  }
+  @Post('local-updates/:batchKey/retry') retryLocalMedia(
+    @Param('projectId', ParseUUIDPipe) p: string,
+    @Param('batchKey', ParseUUIDPipe) batchKey: string,
+    @Body() body: LocalMediaRetry,
+  ) {
+    return this.service.retryLocalMedia(p, batchKey, body);
   }
   @Put('asset-image-retentions') retainAssetImages(
     @Param('projectId', ParseUUIDPipe) p: string,

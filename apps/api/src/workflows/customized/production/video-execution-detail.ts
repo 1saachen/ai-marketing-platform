@@ -20,6 +20,8 @@ export function videoExecutionDetail(
   input: ProductionInput,
   output: unknown,
 ): ProductionExecutionDetail | undefined {
+  if (input.operation === 'RENDER' && step.status === 'FAILED')
+    return { title: step.title, summary: step.content, sections: [] };
   if (input.shotWorkflowVersion !== 2) return;
   const saved = (output ?? {}) as Record<string, unknown>;
   // A review must display the exact candidate it inspected, not a later repair.

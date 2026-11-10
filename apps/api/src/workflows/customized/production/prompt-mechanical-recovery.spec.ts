@@ -110,6 +110,13 @@ describe('explicit mechanical Prompt recovery', () => {
     expect(h.update.mock.calls[0]![0].data).not.toHaveProperty('output');
     expect(h.enqueue).toHaveBeenCalledTimes(1);
   });
+  it('does not enqueue a video with an unconfirmed provider create result', async () => {
+    const h = harness('RENDER');
+    Object.assign(h.row.output, { createStarted: true, providerTaskId: undefined });
+    await expect(h.repo.action('project', 'task', false)).rejects.toThrow('接单结果待确认');
+    expect(h.update).not.toHaveBeenCalled();
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
   it('does not reset normal cached successes or business failures and rejects oversized archives', () => {
     expect(beginPromptMechanicalRecovery('PROMPT', 'COMPLETED', steps, failed())).toBeNull();
     expect(

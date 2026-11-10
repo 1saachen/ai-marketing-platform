@@ -228,6 +228,63 @@ async def upload(api: Any, video: bytes, poster: bytes) -> None:
             await asyncio.sleep(min(8, 2**attempt))
 
 
+def render_failure_message(error: VideoProviderError, accepted: bool) -> str:
+    cause = error.__cause__
+    source = error
+    if error.code == "SEEDANCE_CREATE_RESULT_UNKNOWN" and isinstance(cause, VideoProviderError):
+        source = cause
+    status = re.fullmatch(r"SEEDANCE_HTTP_([45]\d\d)", source.code)
+    service_reasons = {
+        "InputTextSensitiveContentDetected": "视频平台拦截了本镜的提示词，请修改提示词后再生成",
+        "InputImageSensitiveContentDetected": "视频平台拦截了本镜的参考图，请核对或替换参考图",
+        "InputImageSensitiveContentDetected.PolicyViolation": "本镜参考图可能涉及版权限制，请核对或替换参考图",
+        "InputImageSensitiveContentDetected.PrivacyInformation": "视频平台判定参考图可能包含真人，请核对人物参考图",
+        "OutputVideoSensitiveContentDetected": "视频平台未通过成片的内容审核，请核对提示词和参考图",
+        "InvalidParameter.TaskTypeMismatch": "视频平台判定的任务类型与所选设置不一致，请核对提示词和参考图",
+        "InvalidParameter.TaskTypeConstraint": "生成参数与本次视频任务类型不兼容，请核对所选设置",
+        "SetLimitExceeded": "本次调用达到账号设置的模型用量上限，请核对方舟开通管理中的用量设置",
+    }
+    service_code = source.service_code or source.code
+    service_reason = service_reasons.get(service_code)
+    show_code = service_reason is not None or re.fullmatch(
+        r"(?:InvalidParameter|MissingParameter|InvalidArgumentError|InvalidImageURL|InvalidEndpoint)"
+        r"(?:\.[A-Za-z][A-Za-z0-9_]{0,39}){0,2}",
+        service_code,
+    )
+    if status:
+        http_status = status[1]
+        reason = service_reason or {
+            "400": "视频平台拒绝了本次请求，请核对生成参数和参考素材",
+            "401": "视频服务鉴权未通过，请核对 API Key 和 IP 白名单",
+            "403": "视频平台拒绝访问，请核对所选模型的调用权限",
+            "404": "视频平台找不到已提交的任务" if accepted else "视频平台找不到所选模型或接入点",
+            "429": "视频平台触发限流",
+        }.get(
+            http_status,
+            "视频平台返回服务异常" if http_status.startswith("5") else "视频平台拒绝了本次请求",
+        )
+        reason = f"{reason}（HTTP {http_status}）"
+    else:
+        reason = service_reason or {
+            "SEEDANCE_NETWORK_TIMEOUT": "连接视频平台超时",
+            "SEEDANCE_NETWORK": "与视频平台的网络连接中断",
+            "SEEDANCE_TIMEOUT": "等待视频平台生成结果超时",
+            "SEEDANCE_INVALID_RESPONSE": "视频平台返回的响应无法识别",
+            "SEEDANCE_DOWNLOAD_FAILED": "视频已生成，下载原文件失败",
+            "SEEDANCE_EMPTY_OUTPUT": "视频平台返回的文件为空",
+            "SEEDANCE_OUTPUT_TOO_LARGE": "视频原文件超过允许下载的大小",
+        }.get(
+            source.code,
+            "视频平台返回生成失败" if error.reset_provider_task else "视频平台未返回可用结果",
+        )
+    detail = f"{reason}。"
+    if show_code:
+        detail += f"方舟错误码 {service_code}。"
+    if not accepted and error.code in {"SEEDANCE_CREATE_RESULT_UNKNOWN", "SEEDANCE_INVALID_RESPONSE"}:
+        detail += "未取得任务编号，接单结果待确认。"
+    return detail
+
+
 async def run_video(api: Any, _provider: Any, claim: dict[str, Any]) -> None:
     value = RenderInput.model_validate(claim["input"]["videoRender"])
     unique, _ = reference_slots(value)
@@ -347,24 +404,24 @@ async def run_video(api: Any, _provider: Any, claim: dict[str, Any]) -> None:
         poster = await poster_for(output.content)
         await upload(api, output.content, poster)
     except VideoProviderError as error:
+        http_rejection = re.fullmatch(r"SEEDANCE_HTTP_(4\d\d)", error.code)
         if error.code == "SEEDANCE_HTTP_429" and not saved.get("providerTaskId"):
             saved.update(createStarted=False, rateLimited=True)
-            await checkpoint(
-                api, "GENERATE", "RUNNING", "视频服务限流，等待有界自动重试", saved
+        elif not saved.get("providerTaskId") and http_rejection:
+            saved.update(
+                createStarted=False, createRejected=True,
+                createRejectedHttpStatus=int(http_rejection[1]),
             )
-        elif not saved.get("providerTaskId") and re.fullmatch(
-            r"SEEDANCE_HTTP_4\d\d", error.code
-        ):
-            saved.update(createStarted=False, createRejected=True)
-            await checkpoint(
-                api,
-                "GENERATE",
-                "RUNNING",
-                "视频服务未受理本次请求，请检查所选模型权限与配置",
-                saved,
-            )
+        message = render_failure_message(error, bool(saved.get("providerTaskId")))
+        generation_finished = any(
+            step["id"] == "GENERATE" and step["status"] == "SUCCEEDED"
+            for step in claim.get("steps", [])
+        )
+        await checkpoint(
+            api, "REVIEW" if generation_finished else "GENERATE", "FAILED", message, saved
+        )
         raise ProviderError(
-            str(error), retryable=error.retryable and not error.reset_provider_task
+            message, retryable=error.retryable and not error.reset_provider_task
         ) from error
     finally:
         await transport.aclose()

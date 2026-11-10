@@ -43,7 +43,13 @@ const feedback = computed(() => {
       :tone="feedback.tone"
       @action="$emit('workflow', task.id)"
     />
-    <div v-if="task.status === 'FAILED'" class="failure-recovery">
+    <p v-if="task.renderInputRejected" class="retry-error">
+      请核对本镜提示词、参考图和视频设置，调整后选择「重新生成视频」。
+    </p>
+    <div
+      v-else-if="task.status === 'FAILED' && !task.renderCreateUnconfirmed"
+      class="failure-recovery"
+    >
       <button type="button" :disabled="disabled || retrying" @click="$emit('retry', task.id)">
         {{ retrying ? '正在继续任务…' : '继续本次任务' }}
       </button>

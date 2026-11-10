@@ -34,11 +34,13 @@ class ProviderError(RuntimeError):
         *,
         retryable: bool,
         reset_provider_task: bool = False,
+        service_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.reset_provider_task = reset_provider_task
+        self.service_code = service_code
 
 
 @dataclass
@@ -264,10 +266,16 @@ class SeedanceTransport:
             ) from exc
         if response.status_code >= 400:
             retryable = response.status_code == 429 or response.status_code >= 500
+            try:
+                error = _mapping(_mapping(response.json()).get("error"))
+                service_code = _text(error.get("code"))
+            except ValueError:
+                service_code = None
             raise ProviderError(
                 "SEEDANCE_HTTP_" + str(response.status_code),
                 "Seedance 服务暂时不可用" if retryable else "Seedance 请求被拒绝",
                 retryable=retryable,
+                service_code=service_code[:120] if service_code else None,
             )
         try:
             payload = response.json()

@@ -1,4 +1,5 @@
 from typing import Any
+import httpx
 import pytest
 from ai_runtime.responses import ProviderError
 from customized_production_runtime import video_render as render
@@ -242,15 +243,15 @@ async def test_saved_provider_id_resumes_without_reloading_or_recreating_images(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("code", "expected"),
+    ("code", "expected", "reason"),
     [
-        ("SEEDANCE_HTTP_401", "createRejected"),
-        ("SEEDANCE_HTTP_429", "rateLimited"),
-        ("SEEDANCE_CREATE_RESULT_UNKNOWN", "createStarted"),
+        ("SEEDANCE_HTTP_401", "createRejected", "HTTP 401"),
+        ("SEEDANCE_HTTP_429", "rateLimited", "触发限流"),
+        ("SEEDANCE_CREATE_RESULT_UNKNOWN", "createStarted", "连接视频平台超时"),
     ],
 )
 async def test_create_rejection_and_uncertainty_keep_distinct_fences(
-    monkeypatch: pytest.MonkeyPatch, code: str, expected: str
+    monkeypatch: pytest.MonkeyPatch, code: str, expected: str, reason: str
 ) -> None:
     api = Api()
 
@@ -259,9 +260,12 @@ async def test_create_rejection_and_uncertainty_keep_distinct_fences(
             pass
 
         async def render_request(self, *args: Any) -> Any:
-            raise render.VideoProviderError(
-                code, "controlled failure", retryable=code.endswith("429")
-            )
+            error = render.VideoProviderError(code, "controlled failure", retryable=code.endswith("429"))
+            if code == "SEEDANCE_CREATE_RESULT_UNKNOWN":
+                raise error from render.VideoProviderError(
+                    "SEEDANCE_NETWORK_TIMEOUT", "private transport details", retryable=True
+                )
+            raise error
 
         async def aclose(self) -> None:
             pass
@@ -277,3 +281,41 @@ async def test_create_rejection_and_uncertainty_keep_distinct_fences(
     ]
     assert outputs[-1][expected] is True
     assert outputs[-1]["createStarted"] is (expected == "createStarted")
+    assert outputs[-1].get("createRejectedHttpStatus") == (
+        401 if expected == "createRejected" else None
+    )
+    _, failed = api.calls[-1]
+    assert failed["step"]["id"] == "GENERATE"
+    assert failed["step"]["status"] == "FAILED"
+    assert reason in failed["step"]["content"]
+    assert ("接单结果待确认" in failed["step"]["content"]) is (expected == "createStarted")
+    assert "controlled failure" not in failed["step"]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("code", "reason"), [
+    ("InputImageSensitiveContentDetected.PrivacyInformation", "参考图可能包含真人"),
+    ("InvalidParameter.UnsupportedParameter", "核对生成参数和参考素材"),
+])
+async def test_ark_error_code_selects_safe_failure_text(
+    monkeypatch: pytest.MonkeyPatch, code: str, reason: str
+) -> None:
+    provider = render.SeedanceTransport
+    http = httpx.MockTransport(lambda _request: httpx.Response(400, json={
+        "error": {"code": code, "message": "private provider response"},
+    }))
+
+    def transport(**kwargs: Any) -> Any:
+        return provider(**kwargs, transport=http)
+
+    api = Api()
+    monkeypatch.setenv("ARK_API_KEY", "controlled-test-only")
+    monkeypatch.setattr(render, "SeedanceTransport", transport)
+    with pytest.raises(ProviderError, match=reason):
+        await render.run_video(api, None, {"input": {"videoRender": input_value()}})
+    _, failed = api.calls[-1]
+    assert failed["output"]["createRejected"] is True
+    assert failed["output"]["createRejectedHttpStatus"] == 400
+    assert failed["step"]["status"] == "FAILED"
+    assert code in failed["step"]["content"]
+    assert "private provider response" not in failed["step"]["content"]

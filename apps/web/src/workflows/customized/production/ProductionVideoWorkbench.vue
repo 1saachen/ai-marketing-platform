@@ -398,6 +398,7 @@ defineExpose({
   flushPendingEdits: async () => (await saveSettings()) && (await savePrompt()),
   hasDirty: computed(() => promptDirty.value || settingsDirty.value),
   addShot,
+  selectClip,
 });
 </script>
 <template>

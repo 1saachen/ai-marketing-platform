@@ -96,6 +96,7 @@ import {
   productionStages,
   type ProductionDocument,
   type ProductionOperation,
+  type ProductionLocalMediaRetryRequest,
   type ProductionWorkspace,
   type ProductionTask,
   type ProductionStep,
@@ -130,6 +131,46 @@ const missing = (): never => {
 type Tx = Prisma.TransactionClient;
 type Snapshot = ProductionInput;
 const snapshot = (t: CustomizedProductionTask) => t.inputSnapshot as unknown as Snapshot;
+const unconfirmedVideoCreation = (task: CustomizedProductionTask) => {
+  const output = task.output as { createStarted?: boolean; providerTaskId?: string } | null;
+  return task.operation === 'RENDER' && !!output?.createStarted && !output.providerTaskId;
+};
+const rejectedVideoInput = (task: CustomizedProductionTask) => {
+  const output = task.output as {
+    createStarted?: boolean;
+    createRejected?: boolean;
+    createRejectedHttpStatus?: number;
+    providerTaskId?: string;
+  } | null;
+  if (
+    task.operation !== 'RENDER' ||
+    !output?.createRejected ||
+    output.createStarted ||
+    output.providerTaskId
+  )
+    return false;
+  const status = output.createRejectedHttpStatus;
+  // The previous Worker recorded its HTTP status in this exact suffix.
+  return (
+    status === 400 ||
+    status === 422 ||
+    (status === undefined && /（HTTP (?:400|422)）。$/u.test(task.errorMessage ?? ''))
+  );
+};
+const unconfirmedVideoMessage = '视频创建结果尚未确认，为避免重复计费已停止自动重试，已有视频保留';
+const rejectedVideoMessage = '视频服务未受理请求，请检查模型权限与配置，已有视频保留';
+const incompleteProductionMessage = '本次制作未完成，已保存的内容仍然保留';
+const legacyVideoFailureDetails = new Map([
+  [
+    unconfirmedVideoMessage,
+    '提交视频后未取得任务编号，视频平台是否接单待确认。此任务未保存具体错误码，请先核对视频平台的任务记录。',
+  ],
+  [
+    rejectedVideoMessage,
+    '视频服务明确拒绝了本次请求。此任务未保存具体错误码，请核对模型权限和生成参数。',
+  ],
+  [incompleteProductionMessage, '此步骤未能完成，原任务未保存具体错误信息。'],
+]);
 const assetEvidenceFailureMessage = (output: Record<string, unknown> | null) => {
   if (output?.assetUpdateEvidenceFailure === 'PROTECTED')
     return '请在资产编辑中核对受保护的资料引用，再发起局部更新。';
@@ -156,6 +197,16 @@ export const presentProductionTask = (t: CustomizedProductionTask): ProductionTa
   const blockers = t.status === 'FAILED' ? assetBlockers(snapshot(t), saved) : [];
   const evidenceFailure = t.status === 'FAILED' ? assetEvidenceFailureMessage(saved) : undefined;
   const input = snapshot(t);
+  const renderCreateUnconfirmed = t.status === 'FAILED' && unconfirmedVideoCreation(t);
+  const renderInputRejected = t.status === 'FAILED' && rejectedVideoInput(t);
+  const failedRenderStep =
+    t.operation === 'RENDER' && t.status === 'FAILED'
+      ? steps.findLast((step) => step.status === 'RUNNING' || step.status === 'FAILED')
+      : undefined;
+  const renderError = failedRenderStep
+    ? t.errorMessage ||
+      (renderCreateUnconfirmed ? unconfirmedVideoMessage : incompleteProductionMessage)
+    : undefined;
   const localStoryboard = t.operation === 'SHOTS' && !!input.incremental;
   const reviewAvailable =
     localStoryboard && t.status === 'FAILED' && !!reusableLocalShotReview(input, input, saved);
@@ -171,6 +222,15 @@ export const presentProductionTask = (t: CustomizedProductionTask): ProductionTa
     shotId: t.shotId,
     status: t.status as ProductionTask['status'],
     errorMessage: evidenceFailure ?? shotUpdateFailure ?? t.errorMessage,
+    ...(renderCreateUnconfirmed ? { renderCreateUnconfirmed: true as const } : {}),
+    ...(renderInputRejected ? { renderInputRejected: true as const } : {}),
+    ...(t.status === 'FAILED' &&
+    input.incremental?.batchKey &&
+    ['PROMPT', 'RENDER'].includes(t.operation) &&
+    !renderCreateUnconfirmed &&
+    !renderInputRejected
+      ? { localMediaRetryVersion: t.updatedAt.toISOString() }
+      : {}),
     ...(localStoryboard
       ? {
           localStoryboard: {
@@ -247,7 +307,15 @@ export const presentProductionTask = (t: CustomizedProductionTask): ProductionTa
             : {}),
         }
       : {}),
-    steps: steps.map((step) => {
+    steps: steps.map((storedStep) => {
+      const step =
+        renderError && storedStep === failedRenderStep
+          ? {
+              ...storedStep,
+              status: 'FAILED',
+              content: legacyVideoFailureDetails.get(renderError) ?? renderError,
+            }
+          : storedStep;
       const detail =
         videoExecutionDetail(step, snapshot(t), t.output) ??
         assetExecutionDetail(step, snapshot(t), t.output);
@@ -2741,6 +2809,7 @@ export class ProductionRepository {
           createStarted?: unknown;
           rateLimited?: unknown;
           createRejected?: unknown;
+          createRejectedHttpStatus?: unknown;
         };
         const saved = (t.output ?? {}) as { providerTaskId?: string; createStarted?: boolean };
         if (
@@ -2748,7 +2817,13 @@ export class ProductionRepository {
           typeof value !== 'object' ||
           Object.keys(value).some(
             (k) =>
-              !['providerTaskId', 'createStarted', 'rateLimited', 'createRejected'].includes(k),
+              ![
+                'providerTaskId',
+                'createStarted',
+                'rateLimited',
+                'createRejected',
+                'createRejectedHttpStatus',
+              ].includes(k),
           ) ||
           (value.providerTaskId !== undefined &&
             (typeof value.providerTaskId !== 'string' ||
@@ -2756,7 +2831,14 @@ export class ProductionRepository {
               value.providerTaskId.length > 255)) ||
           (value.createStarted !== undefined && typeof value.createStarted !== 'boolean') ||
           (value.rateLimited !== undefined && typeof value.rateLimited !== 'boolean') ||
-          (value.createRejected !== undefined && typeof value.createRejected !== 'boolean')
+          (value.createRejected !== undefined && typeof value.createRejected !== 'boolean') ||
+          (value.createRejectedHttpStatus !== undefined &&
+            (typeof value.createRejectedHttpStatus !== 'number' ||
+              !Number.isInteger(value.createRejectedHttpStatus) ||
+              value.createRejectedHttpStatus < 400 ||
+              value.createRejectedHttpStatus > 499 ||
+              value.createRejectedHttpStatus === 429 ||
+              value.createRejected !== true))
         )
           invalid('渲染检查点无效');
         if (
@@ -3087,12 +3169,8 @@ export class ProductionRepository {
   fail(p: string, id: string, token: string, retryable: boolean, node?: ProductionWorkerNode) {
     return this.db.$transaction(async (tx) => {
       const t = await this.lease(tx, p, id, token, node),
-        saved = (t.output ?? {}) as {
-          createStarted?: boolean;
-          providerTaskId?: string;
-          createRejected?: boolean;
-        },
-        uncertain = t.operation === 'RENDER' && saved.createStarted && !saved.providerTaskId,
+        saved = (t.output ?? {}) as { createRejected?: boolean },
+        uncertain = unconfirmedVideoCreation(t),
         retry = retryable && !uncertain && t.attemptCount < 3;
       const imageRefresh = t.operation === 'IMAGE' && snapshot(t).assetImageRefresh;
       const steps = t.steps as unknown as ProductionStep[];
@@ -3101,7 +3179,17 @@ export class ProductionRepository {
         : 'GENERATE';
       const incompleteMessage = imageRefresh
         ? '资产定义和旧图可继续使用。继续更新时会复用已生成的新图。'
-        : (localShotUpdateFailureMessage(t) ?? '本次制作未完成，已保存的内容仍然保留');
+        : (localShotUpdateFailureMessage(t) ?? incompleteProductionMessage);
+      const renderFailure =
+        t.operation === 'RENDER'
+          ? (!steps.some((s) => s.status === 'RUNNING') &&
+              steps.findLast((s) => s.status === 'FAILED')?.content) ||
+            (uncertain
+              ? unconfirmedVideoMessage
+              : saved.createRejected
+                ? rejectedVideoMessage
+                : incompleteProductionMessage)
+          : undefined;
       await tx.customizedProductionTask.update({
         where: { id },
         data: {
@@ -3115,19 +3203,15 @@ export class ProductionRepository {
                     content: '关联图片未全部保存到资产。已生成的图片会在继续时复用。',
                   }
                 : s.status === 'RUNNING'
-                  ? { ...s, status: 'FAILED' }
+                  ? { ...s, status: 'FAILED', ...(renderFailure ? { content: renderFailure } : {}) }
                   : s,
             ),
           ),
           attemptToken: null,
           leaseExpiresAt: null,
-          errorMessage: uncertain
-            ? '视频创建结果尚未确认，为避免重复计费已停止自动重试，已有视频保留'
-            : saved.createRejected
-              ? '视频服务未受理请求，请检查模型权限与配置，已有视频保留'
-              : retry
-                ? '服务暂时繁忙，正在等待自动重试'
-                : incompleteMessage,
+          errorMessage: retry
+            ? '服务暂时繁忙，正在等待自动重试'
+            : (renderFailure ?? incompleteMessage),
         },
       });
       if (retry) await this.enqueue(tx, t, t.attemptCount * 15000);
@@ -3139,68 +3223,132 @@ export class ProductionRepository {
       await lockCustomizedProject(tx, p);
       const t = await this.task(tx, p, id);
       await this.scope(tx, p, t.workflowRunId);
-      if (t.status === 'COMPLETED' || (!cancel && ['QUEUED', 'RUNNING'].includes(t.status)))
-        return presentProductionTask(t);
-      if (!cancel) {
-        const evidenceFailure = assetEvidenceFailureMessage(
-          t.output as Record<string, unknown> | null,
+      return this.applyTaskAction(tx, t, cancel);
+    });
+  }
+  retryLocalMedia(p: string, batchKey: string, request: ProductionLocalMediaRetryRequest) {
+    const r = request.workflowRunId;
+    return this.db.$transaction(
+      async (tx) => {
+        await lockCustomizedProject(tx, p);
+        await this.scope(tx, p, r);
+        const batch = await tx.customizedProductionTask.findMany({
+          where: {
+            projectId: p,
+            workflowRunId: r,
+            operation: { in: ['PROMPT', 'RENDER'] },
+            inputSnapshot: { path: ['incremental', 'batchKey'], equals: batchKey },
+          },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        });
+        const operation = batch[0]?.operation;
+        if (operation !== 'PROMPT' && operation !== 'RENDER') return missing();
+        if (batch.some((task) => task.operation !== operation))
+          return customizedConflict('本次任务范围已变化，请重新查看局部更新');
+        const versions = new Map(request.tasks.map(({ id, version }) => [id, version]));
+        const requested = batch.filter((task) => versions.has(task.id));
+        if (!requested.length || requested.length !== request.tasks.length)
+          return customizedConflict('本次任务范围已变化，请重新查看局部更新');
+        const failed = requested.filter((task) => task.status === 'FAILED');
+        if (!failed.length) return batch.map(presentProductionTask);
+        const preview = await updatePreview(tx, p, r, operation);
+        const pending = new Set(preview.items.map((item) => item.id));
+        const resumed = new Map<string, ProductionTask>();
+        for (const task of failed) {
+          if (task.updatedAt.toISOString() !== versions.get(task.id))
+            return customizedConflict('有任务状态已变化，请重新查看后继续');
+          const clipId = snapshot(task).target?.id;
+          if (!clipId) return customizedConflict('分镜范围已变化，请重新查看局部更新');
+          if (!pending.has(clipId))
+            return customizedConflict('有分镜已有最新结果，请重新查看更新范围');
+          const latest = await tx.customizedProductionTask.findFirst({
+            where: {
+              projectId: p,
+              workflowRunId: r,
+              operation: task.operation,
+              inputSnapshot: { path: ['target', 'id'], equals: clipId },
+            },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            select: { id: true },
+          });
+          if (latest?.id !== task.id)
+            return customizedConflict('有分镜已有更新的执行记录，请重新查看更新范围');
+          resumed.set(task.id, await this.applyTaskAction(tx, task, false));
+        }
+        return batch.map((task) => resumed.get(task.id) ?? presentProductionTask(task));
+      },
+      { timeout: 30000 },
+    );
+  }
+  private async applyTaskAction(tx: Tx, t: CustomizedProductionTask, cancel: boolean) {
+    const { projectId: p, id } = t;
+    if (t.status === 'COMPLETED' || (!cancel && ['QUEUED', 'RUNNING'].includes(t.status)))
+      return presentProductionTask(t);
+    if (!cancel) {
+      if (unconfirmedVideoCreation(t))
+        return customizedConflict('视频平台的接单结果待确认，请先查看任务详情');
+      if (rejectedVideoInput(t))
+        return customizedConflict(
+          '视频平台已拒绝这份输入。请核对本镜的提示词、参考图或视频设置后重新生成',
         );
-        if (evidenceFailure) return customizedConflict(evidenceFailure);
-        const shotFailure = localShotUpdateFailureMessage(t);
-        if (shotFailure && !reusableLocalShotReview(snapshot(t), snapshot(t), t.output))
-          return customizedConflict(shotFailure);
-        if (assetBlockers(snapshot(t), t.output).length)
-          return customizedConflict('请补充说明并重新判断，继续旧任务不会解决人工核对事项');
-        if (
-          t.operation === 'ASSETS' &&
-          (snapshot(t).assetClarification || snapshot(t).incremental) &&
-          (await this.latestAssetTask(tx, p, t.workflowRunId))?.id !== t.id
+      const evidenceFailure = assetEvidenceFailureMessage(
+        t.output as Record<string, unknown> | null,
+      );
+      if (evidenceFailure) return customizedConflict(evidenceFailure);
+      const shotFailure = localShotUpdateFailureMessage(t);
+      if (shotFailure && !reusableLocalShotReview(snapshot(t), snapshot(t), t.output))
+        return customizedConflict(shotFailure);
+      if (assetBlockers(snapshot(t), t.output).length)
+        return customizedConflict('请补充说明并重新判断，继续旧任务不会解决人工核对事项');
+      if (
+        t.operation === 'ASSETS' &&
+        (snapshot(t).assetClarification || snapshot(t).incremental) &&
+        (await this.latestAssetTask(tx, p, t.workflowRunId))?.id !== t.id
+      )
+        return customizedConflict('已有更新的资产任务，请返回当前记录');
+      await this.valid(tx, t);
+      if (
+        await this.hasTaskConflict(
+          tx,
+          p,
+          t.workflowRunId,
+          { operation: t.operation, target: snapshot(t).target },
+          id,
         )
-          return customizedConflict('已有更新的资产任务，请返回当前记录');
-        await this.valid(tx, t);
-        if (
-          await this.hasTaskConflict(
-            tx,
-            p,
-            t.workflowRunId,
-            { operation: t.operation, target: snapshot(t).target },
-            id,
-          )
-        )
-          return customizedConflict('已有制作任务运行中');
-      }
-      let recoveryOutput: Record<string, unknown> | null = null;
-      if (!cancel) {
-        if (t.operation === 'SHOTS') {
-          if (!(t.output as { localCandidate?: unknown } | null)?.localCandidate)
-            recoveryOutput = await this.findReusableShotReview(tx, p, t.workflowRunId, snapshot(t));
-        } else {
-          try {
-            recoveryOutput = beginPromptMechanicalRecovery(
-              t.operation,
-              t.status,
-              t.steps as unknown as ProductionStep[],
-              t.output,
-            );
-          } catch (error) {
-            invalid(error instanceof Error ? error.message : '机械恢复记录不可用');
-          }
+      )
+        return customizedConflict('已有制作任务运行中');
+    }
+    let recoveryOutput: Record<string, unknown> | null = null;
+    if (!cancel) {
+      if (t.operation === 'SHOTS') {
+        if (!(t.output as { localCandidate?: unknown } | null)?.localCandidate)
+          recoveryOutput = await this.findReusableShotReview(tx, p, t.workflowRunId, snapshot(t));
+      } else {
+        try {
+          recoveryOutput = beginPromptMechanicalRecovery(
+            t.operation,
+            t.status,
+            t.steps as unknown as ProductionStep[],
+            t.output,
+          );
+        } catch (error) {
+          invalid(error instanceof Error ? error.message : '机械恢复记录不可用');
         }
       }
-      const updated = await tx.customizedProductionTask.update({
-        where: { id },
-        data: {
-          status: cancel ? 'CANCELLED' : 'QUEUED',
-          attemptToken: null,
-          leaseExpiresAt: null,
-          errorMessage: null,
-          ...(!cancel ? { attemptCount: 0 } : {}),
-          ...(recoveryOutput ? { output: json(recoveryOutput) } : {}),
-        },
-      });
-      if (!cancel) await this.enqueue(tx, updated);
-      return presentProductionTask(updated);
+    }
+    const updated = await tx.customizedProductionTask.update({
+      where: { id },
+      data: {
+        status: cancel ? 'CANCELLED' : 'QUEUED',
+        attemptToken: null,
+        leaseExpiresAt: null,
+        errorMessage: null,
+        ...(!cancel ? { attemptCount: 0 } : {}),
+        ...(recoveryOutput ? { output: json(recoveryOutput) } : {}),
+      },
     });
+    if (!cancel) await this.enqueue(tx, updated);
+    return presentProductionTask(updated);
   }
   async recoverExpired() {
     const rows = await this.db.customizedProductionTask.findMany({

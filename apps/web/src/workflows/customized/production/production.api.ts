@@ -1,6 +1,7 @@
 import type {
   ApiResponse,
   ProductionDocument,
+  ProductionLocalMediaRetryRequest,
   ProductionOperation,
   ProductionTask,
   ProductionWorkspace,
@@ -82,6 +83,19 @@ export const productionApi = {
       '/local-updates',
       'POST',
       { workflowRunId: r, operation, incremental, idempotencyKey: key },
+      signal,
+    ),
+  retryLocalMedia: (
+    p: string,
+    batchKey: string,
+    request: ProductionLocalMediaRetryRequest,
+    signal?: AbortSignal,
+  ) =>
+    call<ProductionTask[]>(
+      p,
+      `/local-updates/${encodeURIComponent(batchKey)}/retry`,
+      'POST',
+      request,
       signal,
     ),
   preview: (

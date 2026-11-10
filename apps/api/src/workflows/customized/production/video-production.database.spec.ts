@@ -331,6 +331,71 @@ it.skipIf(process.env.CUSTOMIZED_PRODUCTION_DATABASE_TEST !== '1')(
       d.videoPlan.shots[0]!.visual = '拿杯时明确左手持杯';
       revision = (await repo.save(p, r, revision, d, 'SHOTS', true)).revision;
       expect((await repo.workspace(p, r)).prompts[0]!.stale).toBe(true);
+      const promptPreview = await repo.preview(p, r, 'PROMPT');
+      expect(promptPreview.items.map((item) => item.id)).toEqual(['clip-a', 'clip-b']);
+      const batchKey = randomUUID();
+      const batch = await repo.startUpdates(
+        p,
+        r,
+        'PROMPT',
+        { version: 1, fingerprint: promptPreview.fingerprint },
+        batchKey,
+        models,
+        {},
+      );
+      const failedItems = [];
+      for (const item of batch) {
+        const claimed = await repo.claim(p, item.id, 'VIDEO');
+        await repo.checkpoint(
+          p,
+          item.id,
+          claimed.attemptToken!,
+          { id: 'PLAN', title: '本镜计划', status: 'SUCCEEDED', content: '计划已保存' },
+          { plan: item.target!.id },
+          'VIDEO',
+        );
+        await repo.fail(p, item.id, claimed.attemptToken!, false, 'VIDEO');
+        failedItems.push(await repo.getTask(p, item.id));
+      }
+      const recovery = {
+        workflowRunId: r,
+        tasks: failedItems.map((item) => ({ id: item.id, version: item.localMediaRetryVersion! })),
+      };
+      await expect(repo.retryLocalMedia(other, batchKey, recovery)).rejects.toThrow();
+      await expect(
+        repo.retryLocalMedia(p, batchKey, {
+          ...recovery,
+          tasks: recovery.tasks.map((item) => ({ ...item, version: new Date(0).toISOString() })),
+        }),
+      ).rejects.toThrow('任务状态已变化');
+      const resumedBatch = await repo.retryLocalMedia(p, batchKey, recovery);
+      expect(resumedBatch.map((item) => item.status)).toEqual(['QUEUED', 'QUEUED']);
+      const queuedCount = outbox.mock.calls.length;
+      await repo.retryLocalMedia(p, batchKey, recovery);
+      expect(outbox).toHaveBeenCalledTimes(queuedCount);
+      const first = resumedBatch.find((item) => item.target?.id === 'clip-a')!;
+      const second = resumedBatch.find((item) => item.target?.id === 'clip-b')!;
+      const firstClaim = await repo.claim(p, first.id, 'VIDEO');
+      expect(firstClaim.output).toEqual({ plan: 'clip-a' });
+      await finish(first, firstClaim.attemptToken!, prompt, {
+        value: prompt,
+        final: prompt,
+        audit: { ...audit, promptEvidence: [] },
+        auditHash: videoHash(prompt),
+      });
+      const secondClaim = await repo.claim(p, second.id, 'VIDEO');
+      expect(secondClaim.output).toEqual({ plan: 'clip-b' });
+      await repo.fail(p, second.id, secondClaim.attemptToken!, false, 'VIDEO');
+      await expect(repo.retryLocalMedia(p, batchKey, recovery)).rejects.toThrow('任务状态已变化');
+      const latestSecond = await repo.getTask(p, second.id);
+      const partial = await repo.retryLocalMedia(p, batchKey, {
+        workflowRunId: r,
+        tasks: [{ id: second.id, version: latestSecond.localMediaRetryVersion! }],
+      });
+      expect(partial.find((item) => item.id === first.id)?.status).toBe('COMPLETED');
+      expect(partial.find((item) => item.id === second.id)?.status).toBe('QUEUED');
+      expect(outbox).toHaveBeenCalledTimes(queuedCount + 1);
+      await repo.action(p, second.id, true);
       const pending = await repo.start(
           p,
           r,

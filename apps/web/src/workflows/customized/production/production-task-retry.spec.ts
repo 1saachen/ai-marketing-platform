@@ -12,11 +12,13 @@ import Workspace from './CustomizedProductionWorkspace.vue';
 import LocalUpdate from '../shared/CustomizedLocalUpdate.vue';
 import { productionApi } from './production.api';
 import { ApiClientError } from '../../../api/http-client';
+import { useActionConfirmation } from '../../../shared/composables/action-confirmation';
 vi.mock('./production.api', () => ({
   productionApi: {
     workspace: vi.fn(),
     task: vi.fn(),
     retry: vi.fn(),
+    retryLocalMedia: vi.fn(),
     start: vi.fn(),
     localUpdate: vi.fn(),
     preview: vi.fn(),
@@ -117,6 +119,7 @@ async function mount(value: ProductionWorkspace, mode: 'ASSETS' | 'SHOTS' = 'SHO
   };
 }
 afterEach(() => {
+  useActionConfirmation().cancel();
   cleanups.splice(0).forEach((fn) => fn());
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -238,6 +241,96 @@ it('shows the actual storyboard stage, retry attempt, and elapsed time after loa
   expect(await html()).toContain('生成分镜候选 · 第 2 次尝试 · 已用时 2 分 5 秒');
   await vi.advanceTimersByTimeAsync(1000);
   expect(state.localSummary).toContain('已用时 2 分 6 秒');
+});
+it('retains a media batch result and continues only the failed items after confirmation', async () => {
+  const version = '2026-11-10T01:02:54.850Z';
+  const item = (id: string, status: ProductionTask['status']): ProductionTask => ({
+    ...task('PROMPT', status),
+    id,
+    target: { kind: 'CLIP', id },
+    incremental: { version: 1, batchKey: 'batch', targetIds: [id] },
+    ...(status === 'FAILED' ? { localMediaRetryVersion: version } : {}),
+  });
+  const done = item('clip-a', 'COMPLETED');
+  const b = item('clip-b', 'FAILED');
+  const c = item('clip-c', 'FAILED');
+  const value = initial('PROMPT');
+  const { state, html } = await mount({ ...value, tasks: [b, c, done] });
+  expect(await html()).toContain('提示词更新部分完成');
+  expect(await html()).toContain('已完成 1 / 3 条 · 2 条失败');
+  expect(await html()).toContain('继续 2 条提示词更新');
+  vi.mocked(productionApi.retryLocalMedia).mockResolvedValue([
+    item('clip-b', 'QUEUED'),
+    item('clip-c', 'QUEUED'),
+    done,
+  ]);
+  const retry = (state.retryLocalBatch as () => Promise<void>)();
+  expect(useActionConfirmation().state.open).toBe(true);
+  expect(productionApi.retryLocalMedia).not.toHaveBeenCalled();
+  useActionConfirmation().confirm();
+  await retry;
+  expect(productionApi.retryLocalMedia).toHaveBeenCalledWith(
+    'p',
+    'batch',
+    {
+      workflowRunId: 'r',
+      tasks: [
+        { id: b.id, version },
+        { id: c.id, version },
+      ],
+    },
+    expect.any(AbortSignal),
+  );
+  expect(state.localSummary).toContain('已完成 1 / 3 条');
+  const completed = [done, item('clip-b', 'COMPLETED'), item('clip-c', 'COMPLETED')];
+  vi.mocked(productionApi.task).mockImplementation(async (_project, id) =>
+    completed.find((t) => t.id === id)!,
+  );
+  const savedPrompt = value.prompts[0]!;
+  vi.mocked(productionApi.workspace).mockResolvedValue({
+    ...value,
+    tasks: completed,
+    prompts: [
+      savedPrompt,
+      { ...savedPrompt, value: { ...savedPrompt.value, target: { kind: 'CLIP', id: 'clip-b' } } },
+    ],
+  });
+  await vi.advanceTimersByTimeAsync(1801);
+  await settle();
+  expect(await html()).toContain('提示词更新完成');
+  expect(await html()).toContain('已完成 3 / 3 条');
+  expect(await html()).toContain('查看待更新视频');
+  await (state.load as () => Promise<void>)();
+  expect(await html()).toContain('提示词更新完成');
+});
+it('shows a video receipt that still needs checking without offering to resubmit it', async () => {
+  const uncertain: ProductionTask = {
+    ...task('RENDER'),
+    incremental: { version: 1, batchKey: 'video-batch', targetIds: ['clip-a'] },
+    renderCreateUnconfirmed: true,
+  };
+  const { state, html, retry } = await mount({ ...initial('RENDER'), tasks: [uncertain] });
+  expect(await html()).toContain('1 条视频的接单结果待确认');
+  expect(await html()).not.toContain('继续 1 条视频更新');
+  await (state.retryLocalBatch as () => Promise<void>)();
+  await retry();
+  expect(productionApi.retryLocalMedia).not.toHaveBeenCalled();
+  expect(productionApi.retry).not.toHaveBeenCalled();
+});
+it('offers input inspection for a rejected render and blocks resubmission of the frozen request', async () => {
+  const rejected: ProductionTask = {
+    ...task('RENDER'),
+    incremental: { version: 1, batchKey: 'video-batch', targetIds: ['clip-a'] },
+    renderInputRejected: true,
+    localMediaRetryVersion: '2026-11-10T03:39:18.212Z',
+  };
+  const { state, html, retry } = await mount({ ...initial('RENDER'), tasks: [rejected] });
+  expect(await html()).toContain('检查需调整的分镜');
+  expect(await html()).not.toContain('继续 1 条视频更新');
+  await (state.retryLocalBatch as () => Promise<void>)();
+  await retry();
+  expect(productionApi.retryLocalMedia).not.toHaveBeenCalled();
+  expect(productionApi.retry).not.toHaveBeenCalled();
 });
 it('keeps only the selected original and refreshes the remaining image choices without generation', async () => {
   const preview: CustomizedUpdatePreview = {

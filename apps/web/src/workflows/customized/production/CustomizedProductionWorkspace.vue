@@ -88,6 +88,7 @@ const videoWorkbench = ref<{
   flushPendingEdits: () => Promise<boolean>;
   hasDirty: boolean;
   addShot: () => void;
+  selectClip: (id: string) => Promise<boolean>;
 } | null>(null);
 const videoDocument = computed(() => (isVideoDocument(document.value) ? document.value : null));
 const legacyShots = computed(() => productionShots(document.value));
@@ -246,6 +247,75 @@ const localTasks = computed(() => {
 const activeLocalTask = computed(() =>
   localTasks.value.find((task) => ['QUEUED', 'RUNNING'].includes(task.status)),
 );
+const localVideoBatch = computed(() => {
+  const head = latestLocalHead.value;
+  const operation = head?.operation;
+  const key = head?.incremental?.batchKey;
+  if (!key || (operation !== 'SHOTS' && operation !== 'PROMPT' && operation !== 'RENDER'))
+    return null;
+  const items = localTasks.value.filter((task) => task.operation === operation);
+  const completed = items.filter((task) => task.status === 'COMPLETED').length;
+  const failed = items.filter((task) => task.status === 'FAILED');
+  const unconfirmed = failed.filter((task) => task.renderCreateUnconfirmed).length;
+  const rejected = failed.filter((task) => task.renderInputRejected);
+  const firstRejectedClip = videoDocument.value?.videoPlan.clips.find((clip) =>
+    rejected.some((task) => task.target?.id === clip.id),
+  );
+  const cancelled = items.filter((task) => task.status === 'CANCELLED').length;
+  const partial = items.filter((task) => task.status === 'PARTIAL').length;
+  const retry = failed.flatMap((task) => {
+    if (!task.localMediaRetryVersion || !task.target || task.renderInputRejected) return [];
+    const latest = workspace.value?.tasks.find(
+      (item) => item.operation === operation && item.target?.id === task.target!.id,
+    );
+    return latest?.id === task.id ? [{ id: task.id, version: task.localMediaRetryVersion }] : [];
+  });
+  const label = operation === 'SHOTS' ? '分镜' : operation === 'PROMPT' ? '提示词' : '视频';
+  const summary = [
+    `已完成 ${completed} / ${items.length} 条`,
+    failed.length ? `${failed.length} 条失败` : '',
+    partial ? `${partial} 条未完成` : '',
+    cancelled ? `${cancelled} 条取消` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return {
+    key,
+    operation,
+    items,
+    completed,
+    failed,
+    unconfirmed,
+    rejected,
+    firstRejectedClip,
+    retry,
+    label,
+    summary,
+  };
+});
+const nextLocalNode = computed<'PROMPT' | 'RENDER' | undefined>(() => {
+  const batch = localVideoBatch.value;
+  const current = workspace.value;
+  if (
+    !batch ||
+    batch.completed !== batch.items.length ||
+    !current?.shotsConfirmed ||
+    !isVideoDocument(current.confirmedDocument) ||
+    batch.operation === 'RENDER'
+  )
+    return;
+  const clips = current.confirmedDocument.videoPlan.clips;
+  const promptIds = new Set(
+    current.prompts.flatMap(({ value, stale }) =>
+      !stale && 'target' in value ? [value.target.id] : [],
+    ),
+  );
+  if (clips.some((clip) => !promptIds.has(clip.id))) return 'PROMPT';
+  const videoIds = new Set(
+    current.videos?.flatMap(({ value, stale }) => (stale ? [] : [value.clipId])),
+  );
+  if (clips.some((clip) => !videoIds.has(clip.id))) return 'RENDER';
+});
 const progressClock = ref(Date.now());
 watch(
   () => activeLocalTask.value?.localStoryboard?.startedAt,
@@ -337,9 +407,88 @@ const localSummary = computed(() => {
       .filter(Boolean)
       .join(' · ');
   }
-  const done = localTasks.value.filter((item) => item.status === 'COMPLETED').length;
-  return `本次局部更新已完成 ${done} / ${localTasks.value.length} 项${step ? ` · ${step}` : ''}`;
+  const batch = localVideoBatch.value;
+  return batch ? `${batch.label}局部更新 · ${batch.summary}${step ? ` · ${step}` : ''}` : '';
 });
+const localMediaRetryError = ref<{ key: string; message: string } | null>(null);
+async function retryLocalBatch() {
+  const batch = localVideoBatch.value;
+  const scope = controller;
+  const projectId = props.projectId;
+  const workflowRunId = props.workflowRunId;
+  const current = () =>
+    scope === controller &&
+    !scope.signal.aborted &&
+    !disposed &&
+    props.projectId === projectId &&
+    props.workflowRunId === workflowRunId &&
+    localVideoBatch.value?.key === batch?.key;
+  const disabled = () =>
+    busy.value ||
+    !!running.value ||
+    editing.value ||
+    dirty.value ||
+    promptDirty.value ||
+    videoWorkbench.value?.hasDirty;
+  if (!batch?.retry.length || disabled()) return;
+  if (
+    !(await requestActionConfirmation({
+      title: `继续 ${batch.retry.length} 条${batch.label}更新？`,
+      description: `将从已有任务继续处理失败项，未完成步骤可能产生${batch.operation === 'RENDER' ? '视频生成' : '模型调用'}费用。`,
+      confirmLabel: '继续更新',
+    })) ||
+    !current() ||
+    disabled()
+  )
+    return;
+  localMediaRetryError.value = null;
+  busy.value = true;
+  const accept = (next: ProductionTask[]) => {
+    if (!current() || !workspace.value) return;
+    const replacements = new Map(
+      next
+        .filter(
+          (task) => task.incremental?.batchKey === batch.key && task.operation === batch.operation,
+        )
+        .map((task) => [task.id, task]),
+    );
+    workspace.value.tasks = workspace.value.tasks.map((task) => replacements.get(task.id) ?? task);
+    schedule();
+  };
+  try {
+    accept(
+      await productionApi.retryLocalMedia(
+        projectId,
+        batch.key,
+        { workflowRunId, tasks: batch.retry },
+        scope.signal,
+      ),
+    );
+  } catch (e) {
+    if (!current() || isAbortError(e)) return;
+    localMediaRetryError.value = {
+      key: batch.key,
+      message: safeApiErrorMessage(e, '暂时无法继续这批任务，请重新加载后核对。'),
+    };
+    if (isNetworkError(e) || (e instanceof ApiClientError && e.status >= 500)) {
+      // A lost response can mean the retry was accepted. Read the original tasks.
+      const observed = await Promise.allSettled(
+        batch.retry.map(({ id }) => productionApi.task(projectId, id, scope.signal)),
+      );
+      const updated = observed.flatMap((result) =>
+        result.status === 'fulfilled' ? [result.value] : [],
+      );
+      accept(updated);
+      if (
+        current() &&
+        updated.some((task) => ['QUEUED', 'RUNNING', 'COMPLETED'].includes(task.status))
+      )
+        localMediaRetryError.value = null;
+    }
+  } finally {
+    if (scope === controller) busy.value = false;
+  }
+}
 async function updateLocal(preview: CustomizedUpdatePreview, imageAssetIds?: string[]) {
   if (
     !workspace.value ||
@@ -461,6 +610,8 @@ async function retryTask(taskId: string) {
     (props.mode !== 'SHOTS' && !target?.incremental && !target?.assetClarification) ||
     !target ||
     target.status !== 'FAILED' ||
+    target.renderCreateUnconfirmed ||
+    target.renderInputRejected ||
     needsNewShotUpdate(target) ||
     (!['PROMPT', 'RENDER'].includes(target.operation) &&
       !target.incremental &&
@@ -1480,6 +1631,7 @@ defineExpose({ flushPendingEdits });
           :project-id="projectId"
           :workflow-run-id="workflowRunId"
           :nodes="mode === 'ASSETS' ? ['ASSETS'] : ['SHOTS', 'PROMPT', 'RENDER']"
+          :preferred-node="nextLocalNode ?? localVideoBatch?.operation"
           :disabled="busy || !!running || editing || dirty || promptDirty"
           @execute="updateLocal"
           @images-retained="hideRetainedImages"
@@ -1542,6 +1694,74 @@ defineExpose({ flushPendingEdits });
       title="关联图片已更新"
       :message="`${localImageTask.completedImageAssetIds?.length ?? 0} 张新图已保存到当前资产。`"
     />
+    <WorkflowExtractionFeedback
+      v-if="localVideoBatch && localVideoBatch.completed === localVideoBatch.items.length"
+      tone="information"
+      :title="`${localVideoBatch.label}更新完成`"
+      :message="
+        localVideoBatch.operation === 'SHOTS'
+          ? '当前分镜已保存。'
+          : `${localVideoBatch.summary}，结果已保存。`
+      "
+      :action="
+        nextLocalNode === 'PROMPT'
+          ? '查看待更新提示词'
+          : nextLocalNode === 'RENDER'
+            ? '查看待更新视频'
+            : ''
+      "
+      :disabled="busy || !!running || editing || dirty || promptDirty || !!videoWorkbench?.hasDirty"
+      @action="localUpdateDialog?.show()"
+    />
+    <div
+      v-else-if="localVideoBatch && !activeLocalTask && localVideoBatch.operation !== 'SHOTS'"
+      class="local-update-recovery"
+    >
+      <div class="update-feedback-copy" role="status">
+        <strong>{{
+          `${localVideoBatch.label}更新${localVideoBatch.completed ? '部分完成' : '未完成'}`
+        }}</strong>
+        <p>{{ localVideoBatch.summary }}。已完成的结果和旧素材仍可用。</p>
+        <p v-if="localVideoBatch.unconfirmed">
+          {{ localVideoBatch.unconfirmed }} 条视频的接单结果待确认，请查看任务详情。
+        </p>
+        <p v-if="localVideoBatch.rejected.length">
+          {{ localVideoBatch.rejected.length }} 条请求被拒绝。请检查分镜输入，调整后重新生成。
+        </p>
+        <p
+          v-if="localMediaRetryError?.key === localVideoBatch.key"
+          class="update-feedback-error"
+          role="alert"
+        >
+          {{ localMediaRetryError.message }}
+        </p>
+      </div>
+      <div class="update-feedback-actions">
+        <BaseButton
+          v-if="localVideoBatch.failed.length"
+          variant="secondary"
+          @click="openWorkflow(localVideoBatch.failed[0], true)"
+          >查看失败详情</BaseButton
+        >
+        <BaseButton
+          v-if="localVideoBatch.firstRejectedClip"
+          variant="secondary"
+          :disabled="
+            busy || !!running || editing || dirty || promptDirty || !!videoWorkbench?.hasDirty
+          "
+          @click="videoWorkbench?.selectClip(localVideoBatch.firstRejectedClip.id)"
+          >检查需调整的分镜</BaseButton
+        >
+        <BaseButton
+          v-if="localVideoBatch.retry.length"
+          :disabled="
+            busy || !!running || editing || dirty || promptDirty || !!videoWorkbench?.hasDirty
+          "
+          @click="retryLocalBatch"
+          >继续 {{ localVideoBatch.retry.length }} 条{{ localVideoBatch.label }}更新</BaseButton
+        >
+      </div>
+    </div>
     <div
       v-for="task in localTasks.filter(
         (t) =>
