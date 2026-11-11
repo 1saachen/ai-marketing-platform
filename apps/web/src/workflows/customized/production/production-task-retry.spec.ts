@@ -325,7 +325,7 @@ it('offers input inspection for a rejected render and blocks resubmission of the
     localMediaRetryVersion: '2026-11-10T03:39:18.212Z',
   };
   const { state, html, retry } = await mount({ ...initial('RENDER'), tasks: [rejected] });
-  expect(await html()).toContain('检查需调整的分镜');
+  expect(await html()).toContain('查看分镜');
   expect(await html()).not.toContain('继续 1 条视频更新');
   await (state.retryLocalBatch as () => Promise<void>)();
   await retry();
@@ -546,3 +546,80 @@ it('uses the existing exact-ID retry endpoint without a new generation body', as
   );
   expect(fetch.mock.calls[0]![1].body).toBeUndefined();
 });
+
+it('shows recovered batch counts after loading while keeping failed task history', async () => {
+  const value = initial('RENDER');
+  const original = {
+    ...value.tasks[0]!,
+    incremental: { version: 1 as const, batchKey: 'batch', targetIds: ['clip-a', 'clip-b'] },
+  };
+  const failedB = { ...original, id: 'failed-b', target: { kind: 'CLIP' as const, id: 'clip-b' } };
+  const saved = { ...task('RENDER', 'COMPLETED'), id: 'saved', progress: 100 };
+  value.tasks = [saved, original, failedB];
+  value.localMediaBatch = {
+    key: 'batch',
+    operation: 'RENDER',
+    items: [
+      { originalTaskId: original.id, taskId: saved.id, targetId: 'clip-a', status: 'COMPLETED' },
+      { originalTaskId: failedB.id, taskId: failedB.id, targetId: 'clip-b', status: 'FAILED' },
+    ],
+  };
+  const { state, html } = await mount(value);
+  expect(state.localVideoBatch).toMatchObject({
+    completed: 1,
+    summary: '已完成 1 / 2 条 · 1 条失败',
+  });
+  expect(await html()).toContain('查看分镜');
+  expect(
+    (state.workspace as ProductionWorkspace).tasks.find((t) => t.id === original.id)?.status,
+  ).toBe('FAILED');
+  expect(productionApi.start).not.toHaveBeenCalled();
+});
+
+it.each(['PROMPT', 'RENDER'] as const)(
+  'refreshes recovered %s batch counts at completion while edits remain',
+  async (operation) => {
+    const value = initial(operation);
+    const original = {
+      ...value.tasks[0]!,
+      incremental: { version: 1 as const, batchKey: 'batch', targetIds: ['clip-a'] },
+    };
+    const running = { ...task(operation, 'RUNNING'), id: 'new-attempt', progress: 50 };
+    value.tasks = [running, original];
+    value.localMediaBatch = {
+      key: 'batch',
+      operation,
+      items: [
+        { originalTaskId: original.id, taskId: running.id, targetId: 'clip-a', status: 'RUNNING' },
+      ],
+    };
+    const { state } = await mount(value);
+    state.videoWorkbench = { hasDirty: true };
+    const before = structuredClone(value.document);
+    const completed = { ...running, status: 'COMPLETED' as const, progress: 100 };
+    vi.mocked(productionApi.task).mockResolvedValue(completed);
+    vi.mocked(productionApi.workspace).mockResolvedValue({
+      ...value,
+      tasks: [completed, original],
+      localMediaBatch: {
+        key: 'batch',
+        operation,
+        items: [
+          {
+            originalTaskId: original.id,
+            taskId: completed.id,
+            targetId: 'clip-a',
+            status: 'COMPLETED',
+          },
+        ],
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1801);
+    await settle();
+    expect(state.localVideoBatch).toMatchObject({ completed: 1, summary: '已完成 1 / 1 条' });
+    expect(state.document).toEqual(before);
+    expect(productionApi.workspace).toHaveBeenCalledTimes(2);
+    expect(productionApi.save).not.toHaveBeenCalled();
+    expect(productionApi.start).not.toHaveBeenCalled();
+  },
+);

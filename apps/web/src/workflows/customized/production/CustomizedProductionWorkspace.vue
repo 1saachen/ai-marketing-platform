@@ -56,6 +56,8 @@ import ProductionRenderDialog from './ProductionRenderDialog.vue';
 import ProductionAssetVisual from './ProductionAssetVisual.vue';
 import ProductionTaskActivity from './ProductionTaskActivity.vue';
 import ProductionTaskFailureFeedback from './ProductionTaskFailureFeedback.vue';
+import ProductionFailedRenders from './ProductionFailedRenders.vue';
+import { localMediaBatchItems } from './production-local-media-batch';
 import {
   productionNodeTasks,
   productionPageProgressTask,
@@ -244,27 +246,28 @@ const localTasks = computed(() => {
     ? workspace.value!.tasks.filter((t) => t.incremental?.batchKey === first.incremental!.batchKey)
     : [];
 });
-const activeLocalTask = computed(() =>
-  localTasks.value.find((task) => ['QUEUED', 'RUNNING'].includes(task.status)),
-);
 const localVideoBatch = computed(() => {
   const head = latestLocalHead.value;
   const operation = head?.operation;
   const key = head?.incremental?.batchKey;
   if (!key || (operation !== 'SHOTS' && operation !== 'PROMPT' && operation !== 'RENDER'))
     return null;
-  const items = localTasks.value.filter((task) => task.operation === operation);
-  const completed = items.filter((task) => task.status === 'COMPLETED').length;
-  const failed = items.filter((task) => task.status === 'FAILED');
+  const items = localMediaBatchItems(workspace.value!, head);
+  const completed = items.filter((item) => item.status === 'COMPLETED').length;
+  const failed = items.filter((item) => item.status === 'FAILED').map((item) => item.task);
   const unconfirmed = failed.filter((task) => task.renderCreateUnconfirmed).length;
   const rejected = failed.filter((task) => task.renderInputRejected);
-  const firstRejectedClip = videoDocument.value?.videoPlan.clips.find((clip) =>
-    rejected.some((task) => task.target?.id === clip.id),
-  );
-  const cancelled = items.filter((task) => task.status === 'CANCELLED').length;
-  const partial = items.filter((task) => task.status === 'PARTIAL').length;
+  const cancelled = items.filter((item) => item.status === 'CANCELLED').length;
+  const partial = items.filter((item) => item.status === 'PARTIAL').length;
+  const stale = items.filter((item) => item.status === 'STALE').length;
   const retry = failed.flatMap((task) => {
-    if (!task.localMediaRetryVersion || !task.target || task.renderInputRejected) return [];
+    if (
+      !task.localMediaRetryVersion ||
+      !task.target ||
+      task.renderInputRejected ||
+      task.incremental?.batchKey !== key
+    )
+      return [];
     const latest = workspace.value?.tasks.find(
       (item) => item.operation === operation && item.target?.id === task.target!.id,
     );
@@ -276,6 +279,7 @@ const localVideoBatch = computed(() => {
     failed.length ? `${failed.length} 条失败` : '',
     partial ? `${partial} 条未完成` : '',
     cancelled ? `${cancelled} 条取消` : '',
+    stale ? `${stale} 条待更新` : '',
   ]
     .filter(Boolean)
     .join(' · ');
@@ -287,12 +291,16 @@ const localVideoBatch = computed(() => {
     failed,
     unconfirmed,
     rejected,
-    firstRejectedClip,
     retry,
     label,
     summary,
   };
 });
+const activeLocalTask = computed(() =>
+  localVideoBatch.value
+    ? localVideoBatch.value.items.find((item) => ['QUEUED', 'RUNNING'].includes(item.status))?.task
+    : localTasks.value.find((task) => ['QUEUED', 'RUNNING'].includes(task.status)),
+);
 const nextLocalNode = computed<'PROMPT' | 'RENDER' | undefined>(() => {
   const batch = localVideoBatch.value;
   const current = workspace.value;
@@ -303,7 +311,7 @@ const nextLocalNode = computed<'PROMPT' | 'RENDER' | undefined>(() => {
     !isVideoDocument(current.confirmedDocument) ||
     batch.operation === 'RENDER'
   )
-    return;
+    return undefined;
   const clips = current.confirmedDocument.videoPlan.clips;
   const promptIds = new Set(
     current.prompts.flatMap(({ value, stale }) =>
@@ -315,6 +323,7 @@ const nextLocalNode = computed<'PROMPT' | 'RENDER' | undefined>(() => {
     current.videos?.flatMap(({ value, stale }) => (stale ? [] : [value.clipId])),
   );
   if (clips.some((clip) => !videoIds.has(clip.id))) return 'RENDER';
+  return undefined;
 });
 const progressClock = ref(Date.now());
 watch(
@@ -372,7 +381,10 @@ const localProgress = computed(() => {
   return Math.min(
     99,
     Math.floor(
-      localTasks.value.reduce((total, item) => total + item.progress, 0) / localTasks.value.length,
+      (localVideoBatch.value?.items ?? localTasks.value).reduce(
+        (total, item) => total + item.progress,
+        0,
+      ) / (localVideoBatch.value?.items.length ?? localTasks.value.length),
     ),
   );
 });
@@ -1081,7 +1093,10 @@ async function refreshTask() {
         )
           await save();
       } else {
-        notice.value = '任务已结束，保存当前修改后可重新加载结果';
+        if (['PROMPT', 'RENDER'].includes(result.operation)) {
+          await refreshPrompts();
+          notice.value = '当前编辑内容已保留';
+        } else notice.value = '任务已结束，保存当前修改后可重新加载结果';
         schedule();
       }
     }
@@ -1467,6 +1482,8 @@ async function refreshPrompts() {
     workspace.value.tasks = result.tasks;
     workspace.value.videos = result.videos ?? [];
     workspace.value.videoSettings = result.videoSettings ?? [];
+    if (result.localMediaBatch) workspace.value.localMediaBatch = result.localMediaBatch;
+    else delete workspace.value.localMediaBatch;
     emit('saved');
   } catch (e) {
     if (scope === controller && sequence === promptRefreshSequence && !isAbortError(e))
@@ -1714,12 +1731,16 @@ defineExpose({ flushPendingEdits });
       @action="localUpdateDialog?.show()"
     />
     <div
-      v-else-if="localVideoBatch && !activeLocalTask && localVideoBatch.operation !== 'SHOTS'"
+      v-else-if="
+        localVideoBatch &&
+        localVideoBatch.operation !== 'SHOTS' &&
+        (!activeLocalTask || localVideoBatch.failed.length)
+      "
       class="local-update-recovery"
     >
       <div class="update-feedback-copy" role="status">
         <strong>{{
-          `${localVideoBatch.label}更新${localVideoBatch.completed ? '部分完成' : '未完成'}`
+          `${localVideoBatch.label}更新${activeLocalTask ? '进行中' : localVideoBatch.completed ? '部分完成' : '未完成'}`
         }}</strong>
         <p>{{ localVideoBatch.summary }}。已完成的结果和旧素材仍可用。</p>
         <p v-if="localVideoBatch.unconfirmed">
@@ -1738,19 +1759,10 @@ defineExpose({ flushPendingEdits });
       </div>
       <div class="update-feedback-actions">
         <BaseButton
-          v-if="localVideoBatch.failed.length"
+          v-if="localVideoBatch.failed.length && localVideoBatch.operation !== 'RENDER'"
           variant="secondary"
           @click="openWorkflow(localVideoBatch.failed[0], true)"
           >查看失败详情</BaseButton
-        >
-        <BaseButton
-          v-if="localVideoBatch.firstRejectedClip"
-          variant="secondary"
-          :disabled="
-            busy || !!running || editing || dirty || promptDirty || !!videoWorkbench?.hasDirty
-          "
-          @click="videoWorkbench?.selectClip(localVideoBatch.firstRejectedClip.id)"
-          >检查需调整的分镜</BaseButton
         >
         <BaseButton
           v-if="localVideoBatch.retry.length"
@@ -1761,6 +1773,17 @@ defineExpose({ flushPendingEdits });
           >继续 {{ localVideoBatch.retry.length }} 条{{ localVideoBatch.label }}更新</BaseButton
         >
       </div>
+      <ProductionFailedRenders
+        v-if="localVideoBatch.operation === 'RENDER' && videoDocument"
+        :key="projectId + workflowRunId"
+        :project-id="projectId"
+        :tasks="localVideoBatch.failed"
+        :document="videoDocument"
+        :disabled="busy || !!running || imageSubmitting"
+        @select-clip="videoWorkbench?.selectClip($event)"
+        @prepare="prepareImage"
+        @workflow="openWorkflow($event, true)"
+      />
     </div>
     <div
       v-for="task in localTasks.filter(

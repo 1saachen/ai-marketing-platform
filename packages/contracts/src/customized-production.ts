@@ -220,6 +220,11 @@ export type ProductionTask = {
   localMediaRetryVersion?: string;
   renderCreateUnconfirmed?: true;
   renderInputRejected?: true;
+  /** Fixed references from this render request, for checking a failed attempt. */
+  renderReferences?: Pick<
+    CustomizedVideoRenderInput['references'][number],
+    'objectId' | 'name' | 'sourceObjectId' | 'sourceName' | 'assetId' | 'version'
+  >[];
   assetReviewQuestions?: string[];
   assetEvidenceNeedsRestart?: boolean;
   assetImageRefresh?: AssetImageRefresh;
@@ -254,7 +259,19 @@ export type ProductionTask = {
     | 'INVALID_CANDIDATE';
   hasCandidate?: boolean;
 };
+/** Read-only progress for the original targets of a local media batch. */
+export type ProductionLocalMediaBatch = {
+  key: string;
+  operation: 'PROMPT' | 'RENDER';
+  items: {
+    originalTaskId: string;
+    taskId: string;
+    targetId: string;
+    status: ProductionTask['status'] | 'STALE';
+  }[];
+};
 export type ProductionWorkspace = {
+  localMediaBatch?: ProductionLocalMediaBatch;
   imageReviewObjectIds?: string[];
   brandImageReferences?: { assetId: string; version: number; name: string }[];
   script: CustomizedStoryboardScript;

@@ -17,6 +17,7 @@ import type {
   CustomizedUpdateRequest,
 } from '@ai-marketing/contracts';
 import { applyImageOnlyPlanRebase } from './image-only-plan-rebase';
+import { resolveLocalMediaBatch } from './local-media-batch';
 import { beginPromptMechanicalRecovery } from './prompt-mechanical-recovery';
 import {
   hasLocalShotReview,
@@ -224,6 +225,21 @@ export const presentProductionTask = (t: CustomizedProductionTask): ProductionTa
     errorMessage: evidenceFailure ?? shotUpdateFailure ?? t.errorMessage,
     ...(renderCreateUnconfirmed ? { renderCreateUnconfirmed: true as const } : {}),
     ...(renderInputRejected ? { renderInputRejected: true as const } : {}),
+    ...(t.operation === 'RENDER' &&
+    t.status === 'FAILED' &&
+    Array.isArray(input.videoRender?.references)
+      ? {
+          renderReferences: input.videoRender.references.map((ref) => ({
+            objectId: ref.objectId,
+            name: ref.name,
+            assetId: ref.assetId,
+            version: ref.version,
+            ...(ref.sourceObjectId
+              ? { sourceObjectId: ref.sourceObjectId, sourceName: ref.sourceName }
+              : {}),
+          })),
+        }
+      : {}),
     ...(t.status === 'FAILED' &&
     input.incremental?.batchKey &&
     ['PROMPT', 'RENDER'].includes(t.operation) &&
@@ -538,11 +554,16 @@ export class ProductionRepository {
     const assetHead = tasks.find(
       (task) => task.operation === 'ASSETS' || isAssetImageRefresh(task),
     );
-    const videoHead = tasks.find(
-      (task) =>
-        ['SHOTS', 'PROMPT', 'RENDER'].includes(task.operation) &&
-        snapshot(task).incremental?.batchKey,
-    );
+    const videoHead = await tx.customizedProductionTask.findFirst({
+      where: {
+        projectId: p,
+        workflowRunId: r,
+        operation: { in: ['SHOTS', 'PROMPT', 'RENDER'] },
+        inputSnapshot: { path: ['incremental', 'batchKey'], string_starts_with: '' },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+    let localMediaBatch: ProductionWorkspace['localMediaBatch'];
     for (const head of [assetHead, videoHead]) {
       const batchKey = head && snapshot(head).incremental?.batchKey;
       if (!batchKey) continue;
@@ -554,6 +575,12 @@ export class ProductionRepository {
         },
       });
       for (const task of group) if (!tasks.some((t) => t.id === task.id)) tasks.push(task);
+      if (head === videoHead) {
+        const resolved = await resolveLocalMediaBatch(tx, p, r, group, artifacts);
+        localMediaBatch = resolved?.batch;
+        for (const task of resolved?.tasks ?? [])
+          if (!tasks.some((t) => t.id === task.id)) tasks.push(task);
+      }
     }
     tasks.sort(newestFirst);
     const brandMaterials = normalizeCustomizedImportDraft(
@@ -582,6 +609,7 @@ export class ProductionRepository {
           })
         : null;
     return {
+      ...(localMediaBatch ? { localMediaBatch } : {}),
       brandImageReferences: brandVersions
         .filter((v) => v.storageKey && v.sizeBytes <= CUSTOMIZED_IMAGE_REFERENCE_MAX_BYTES)
         .map((v) => ({ assetId: v.assetId, version: v.version, name: v.originalFileName })),

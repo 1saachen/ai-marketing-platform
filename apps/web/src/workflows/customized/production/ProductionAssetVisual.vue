@@ -3,7 +3,11 @@ import { onBeforeUnmount, ref, watch } from 'vue';
 import { Box, UserRound, MapPin, Shapes, Loader2 } from '@lucide/vue';
 import type { ProductionAsset } from '@ai-marketing/contracts';
 import { getAssetVersion } from '../../../platform/asset/api/asset.api';
-const props = defineProps<{ asset: ProductionAsset; projectId: string; compact?: boolean }>();
+const props = defineProps<{
+  asset: Pick<ProductionAsset, 'id' | 'name' | 'kind' | 'image'>;
+  projectId: string;
+  compact?: boolean;
+}>();
 const url = ref(''),
   failed = ref(false),
   loading = ref(false);
