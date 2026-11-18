@@ -9,6 +9,40 @@ const validEnvironment = {
 };
 
 describe('validateEnvironment', () => {
+  it('keeps G2 migrations and task recovery explicitly disabled by default', () => {
+    expect(validateEnvironment(validEnvironment)).toMatchObject({
+      FISSION_CLONE_G2_ENABLED: false,
+      FISSION_CLONE_TASK_MAX_ATTEMPTS: 3,
+      FISSION_CLONE_TASK_LEASE_SECONDS: 90,
+    });
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        FISSION_CLONE_G2_ENABLED: 'true',
+        FISSION_CLONE_ANALYSIS_WORKER_TOKEN: 'clone-only-test-token',
+        FISSION_CLONE_ANALYSIS_MODEL: 'configured-model',
+      }),
+    ).toMatchObject({
+      FISSION_CLONE_G2_ENABLED: true,
+      FISSION_CLONE_ANALYSIS_WORKER_TOKEN: 'clone-only-test-token',
+      FISSION_CLONE_ANALYSIS_MODEL: 'configured-model',
+    });
+    for (const key of ['FISSION_CLONE_TASK_MAX_ATTEMPTS', 'FISSION_CLONE_TASK_LEASE_SECONDS'])
+      expect(() => validateEnvironment({ ...validEnvironment, [key]: '0' })).toThrow(key);
+    expect(() =>
+      validateEnvironment({ ...validEnvironment, FISSION_CLONE_G2_ENABLED: 'yes' }),
+    ).toThrow('FISSION_CLONE_G2_ENABLED');
+  });
+  it('keeps clone disabled before migration and validates its explicit opt-in', () => {
+    expect(validateEnvironment(validEnvironment).FISSION_CLONE_ENABLED).toBe(false);
+    expect(
+      validateEnvironment({ ...validEnvironment, FISSION_CLONE_ENABLED: 'true' })
+        .FISSION_CLONE_ENABLED,
+    ).toBe(true);
+    expect(() =>
+      validateEnvironment({ ...validEnvironment, FISSION_CLONE_ENABLED: 'yes' }),
+    ).toThrow('FISSION_CLONE_ENABLED');
+  });
   it('keeps the asset worker credential independent', () => {
     expect(
       validateEnvironment({

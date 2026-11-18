@@ -27,6 +27,7 @@ import type {
   WorkingArtifactListData,
   WorkingArtifactListQuery,
   WorkflowNodeState,
+  WorkflowPauseRunRequest,
   WorkflowRunOverviewData,
 } from '@ai-marketing/contracts';
 import {
@@ -1699,9 +1700,13 @@ export class WorkflowWorkingService {
     };
   }
 
-  async pauseRun(projectId: string, workflowRunId: string): Promise<{ paused: true }> {
+  async pauseRun(
+    projectId: string,
+    workflowRunId: string,
+    input: WorkflowPauseRunRequest = {},
+  ): Promise<{ paused: true }> {
     await this.projectService.get(projectId);
-    const result = await this.repository.pauseRun(projectId, workflowRunId);
+    const result = await this.repository.pauseRun(projectId, workflowRunId, input);
     if (result.count === 0)
       throw new ApiHttpException('工作流运行不存在', HttpStatus.NOT_FOUND, 'ASSET_NOT_FOUND');
     return { paused: true };

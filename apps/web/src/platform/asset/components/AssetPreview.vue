@@ -17,7 +17,10 @@ import { computed, ref } from 'vue';
 
 import { isCurrentOnlyEffectImportAsset, isImageFileAsset, videoConfigFields } from '../asset-v4';
 
-const props = withDefaults(defineProps<{ asset: Asset; compact?: boolean }>(), { compact: false });
+const props = withDefaults(
+  defineProps<{ asset: Asset; compact?: boolean; filePreview?: boolean }>(),
+  { compact: false, filePreview: false },
+);
 const mediaFailed = ref(false);
 const kind = computed(() => props.asset.type);
 const isCurrentOnly = computed(() => isCurrentOnlyEffectImportAsset(props.asset));
@@ -81,6 +84,19 @@ const isVisual = computed(() =>
         @error="mediaFailed = true"
       />
       <span v-else><Image :size="compact ? 28 : 42" /><small>图片暂不可预览</small></span>
+    </div>
+    <div v-else-if="filePreview" class="preview-file">
+      <video
+        v-if="asset.hasFile && asset.mimeType.startsWith('video/') && !mediaFailed"
+        controls
+        preload="metadata"
+        :src="asset.contentUrl"
+        @error="mediaFailed = true"
+      />
+      <span v-else>
+        <Play :size="compact ? 28 : 42" />
+        <small>{{ mediaFailed ? '视频暂不可预览' : '暂无可预览文件' }}</small>
+      </span>
     </div>
     <div v-else-if="isVideoConfig" class="preview-config">
       <header>
@@ -278,6 +294,28 @@ const isVisual = computed(() =>
   color: #718097;
 }
 .preview-source-image small {
+  font-size: 9px;
+}
+.preview-file {
+  height: 100%;
+  background: #172235;
+  color: #cbd5e1;
+}
+.preview-file video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.preview-file > span {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+}
+.preview-file small {
   font-size: 9px;
 }
 .preview-config {

@@ -32,7 +32,7 @@ import FissionWorkflowPage from '../../workflows/fission/shared/FissionWorkflowP
 import { createProject, deleteProject, listProjects } from './api/project.api';
 import { requestActionConfirmation } from '../../shared/composables/action-confirmation';
 import { presentProjectBinding, projectContextKey, projectCreationScope } from './project-context';
-import { pauseWorkflowRun } from '../workflow/api/workflow-working.api';
+import { flushAndPauseWorkflowRun } from './project-workflow-pause';
 import { loadProjectListWithRetry } from './project-load-retry';
 import { enterLibraryProject } from './enter-library-project';
 import { switchProjectWorkflow } from './project-workflow-switch';
@@ -69,8 +69,15 @@ const customizedNode = ref<{
 const workflowSwitchBusy = ref(false);
 const fissionNode = ref<{
   flushPendingEdits: () => Promise<boolean>;
+  selectModule: (module: 'clone' | 'avatar' | 'replace') => Promise<boolean>;
+  resumeWorkflowNode: (nodeId: string) => Promise<boolean>;
   workflowRunId: string;
+  cloneDraftRevision: number | null;
+  cloneDraftRevisions?: Record<string, number> | null;
 } | null>(null);
+const fissionInitialModule = ref<'clone' | 'avatar' | 'replace' | ''>('');
+const fissionModuleForSpace = (space: AssetWorkflowSpace) =>
+  space === 'FISSION_CLONE' ? 'clone' : space === 'FISSION_AVATAR' ? 'avatar' : 'replace';
 const exitBusy = ref(false);
 const logoutBusy = ref(false);
 const signOut = async (): Promise<void> => {
@@ -408,10 +415,7 @@ const exitProject = async (): Promise<boolean> => {
   exitError.value = '';
   try {
     if (activeNode.value) {
-      const flushed = await activeNode.value.flushPendingEdits();
-      if (flushed === false) throw new Error('仍有编辑未能自动保存，请修复后重试退出');
-      const workflowRunId = activeNode.value.workflowRunId;
-      if (workflowRunId) await pauseWorkflowRun(project.id, workflowRunId);
+      await flushAndPauseWorkflowRun(project.id, activeNode.value);
     }
     selectProject('');
     showCreateToast('草稿已自动保存并退出项目，未创建正式资产');
@@ -447,6 +451,7 @@ const enterAssetProject = async (
       projectEntryError.value = '该项目已不可用或不属于所选工作流，请刷新项目列表。';
       return;
     }
+    if (workflow === 'FISSION') fissionInitialModule.value = fissionModuleForSpace(space);
     if (!(await activateWorkflow(workflow))) {
       projectEntryError.value = '当前草稿尚未保存，请处理后重试。';
       return;
@@ -461,6 +466,13 @@ const enterAssetProject = async (
     if (!entered) {
       projectEntryError.value = exitError.value || '未能进入项目，请稍后重试。';
       return;
+    }
+    if (workflow === 'FISSION') {
+      await nextTick();
+      if ((await fissionNode.value?.selectModule(fissionModuleForSpace(space))) === false) {
+        projectEntryError.value = '当前裂变模块草稿尚未保存，请处理后重试。';
+        return;
+      }
     }
     closeAssetDrawer();
   } catch {
@@ -493,6 +505,8 @@ const submitCreateProject = async (): Promise<void> => {
 
   try {
     // Save the visible workflow, then replace only the target workflow's project binding.
+    if (createScope.value.workflow === 'FISSION' && createScope.value.space)
+      fissionInitialModule.value = fissionModuleForSpace(createScope.value.space);
     if (!(await activateWorkflow(createScope.value.workflow!))) {
       createError.value = '当前草稿尚未保存，请处理后重试';
       return;
@@ -507,6 +521,10 @@ const submitCreateProject = async (): Promise<void> => {
       ...projects.value.filter((project) => project.id !== response.data.id),
     ];
     selectProject(response.data.id);
+    if (createScope.value.workflow === 'FISSION' && createScope.value.space) {
+      await nextTick();
+      await fissionNode.value?.selectModule(fissionModuleForSpace(createScope.value.space));
+    }
     await loadProjects();
     createModalOpen.value = false;
     if (createFromLibrary.value) closeAssetDrawer();
@@ -603,6 +621,7 @@ onBeforeUnmount(() => {
         ref="fissionNode"
         :project-id="currentProject?.id ?? ''"
         :project-name="currentProject?.name ?? ''"
+        :initial-module="fissionInitialModule"
       />
       <section v-else-if="!currentProject" class="workflow-state" role="status">
         <span class="workflow-state-icon">

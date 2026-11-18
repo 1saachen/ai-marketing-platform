@@ -9,6 +9,13 @@ import type {
 export const WORKFLOW_RUN_STATUSES = ['ACTIVE', 'PAUSED', 'COMPLETED'] as const;
 export type WorkflowRunStatus = (typeof WORKFLOW_RUN_STATUSES)[number];
 
+export type WorkflowPauseRunRequest = {
+  /** Required for Clone: the latest saved CLONE_INPUT editing revision, not an artifact revision. */
+  expectedCloneDraftRevision?: number;
+  /** G2: all existing Clone node editing revisions, read after pending edits have flushed. */
+  expectedCloneDraftRevisions?: Record<string, number>;
+};
+
 export const WORKING_ARTIFACT_KINDS = ['FILE', 'STRUCTURED'] as const;
 export type WorkingArtifactKind = (typeof WORKING_ARTIFACT_KINDS)[number];
 

@@ -8,6 +8,7 @@ import type {
   WorkingArtifact,
   EffectWorkflowBranchTreeData,
 } from '@ai-marketing/contracts';
+import { FISSION_CLONE_NODES } from '@ai-marketing/contracts';
 import {
   AlertTriangle,
   ArrowUpRight,
@@ -73,6 +74,7 @@ const props = defineProps<{
   project: Project;
   workflow: AssetWorkflow;
   space: AssetWorkflowSpace;
+  currentWorkflow?: AssetWorkflow;
   currentProject: Project | null;
 }>();
 const emit = defineEmits<{ resumeNode: [nodeId: string] }>();
@@ -222,13 +224,21 @@ const selected = computed(() => catalog.value.find((item) => item.id === selecte
 const projectAsset = computed(() =>
   selected.value?.source.kind === 'project' ? selected.value.source.asset : null,
 );
-const canResume = computed(
-  () =>
-    props.currentProject?.id === props.project.id &&
+const canResume = computed(() => {
+  if (props.currentProject?.id !== props.project.id) return false;
+  if (props.workflow === 'FISSION' && props.space === 'FISSION_CLONE') {
+    return (
+      props.currentWorkflow === 'FISSION' &&
+      selected.value?.source.kind === 'working' &&
+      selected.value.source.artifact.workflowRunId === workflowRunId.value
+    );
+  }
+  return (
     props.workflow === 'EFFECT' &&
     browseVersion.value?.workflowRunId === branchTree.value?.activeWorkflowRunId &&
-    selectedNode.value !== 'FINAL_OUTPUT',
-);
+    selectedNode.value !== 'FINAL_OUTPUT'
+  );
+});
 const canImport = computed(() =>
   Boolean(
     projectAsset.value &&
@@ -248,6 +258,7 @@ const resumeId = computed(() => {
       'SEGMENT_RENDER',
       'TEMPLATE_MIX',
       'FINAL_OUTPUT',
+      ...FISSION_CLONE_NODES,
     ].includes(id)
     ? id
     : null;

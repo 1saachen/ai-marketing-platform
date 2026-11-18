@@ -127,6 +127,30 @@ docker compose --profile effect-segment-render up -d effect-segment-render-worke
 
 代码目录为 `workers/effect-segment-render`，Python 包为 `effect_segment_render`，入口命令为 `effect-segment-render-worker`。从旧服务迁移时，须在没有活动渲染/返修任务时先停止原 `seedance-worker` 容器；新服务不会自动替换旧容器，不得同时运行两个消费者叠加供应商额度。队列、Token 及 `SEEDANCE_*` / `SEGMENT_RENDER_*` 配置保持不变。无付费验证和运行边界见[片段渲染 Worker](../../workers/effect-segment-render/README.md)。
 
+## 爆款复刻拆解与映射 Worker
+
+复刻输入开关 `FISSION_CLONE_ENABLED` 与 G2 开关 `FISSION_CLONE_G2_ENABLED` 默认关闭。先核对目标数据库与备份，再应用 `20261111120000_fission_clone_uploads`、`20261111130000_fission_clone_g2_tasks`；迁移不是只读检查，不因构建或浏览器验收自动迁移日常数据库。API 配置 `FISSION_CLONE_ANALYSIS_MODEL` 及媒体工具，API/Worker 配置相同的独立 `FISSION_CLONE_ANALYSIS_WORKER_TOKEN`。Worker 还需要 `ARK_API_KEY`、含 `/api` 的 `INTERNAL_API_BASE_URL` 和 RabbitMQ 连接。
+
+```powershell
+docker compose --profile fission-clone-analysis build fission-clone-analysis-worker
+# 启动会消费真实任务；仅在调用范围已授权且无活动任务时更新：
+docker compose --profile fission-clone-analysis up -d --no-deps fission-clone-analysis-worker
+```
+
+此 Worker 仅处理 `ANALYZE` 与 `MAP_SUGGEST`，不生成成片。画面采用有界 FFmpeg 采样，音频语义未分析；候选匹配只读元数据，详情见[运行与能力边界](../../workers/fission-clone-analysis/README.md)。开发 Compose 使用可选 profile，默认不启动消费者。无付费验证在该 Worker 目录执行 `uv sync --frozen`、`uv run --frozen pytest`、`uv run --frozen mypy src`；这些检查不代表已部署或真实模型质量验收。API 普通进程的重启规则与其他工作流相同，构建成功不代表代码生效。
+
+## 爆款复刻成片生成 Worker
+
+`FISSION_CLONE_G3_ENABLED` 默认关闭。启用前按 G1/G2 顺序应用迁移，再应用 `20261116100000_fission_clone_generation_operation` 和 `20261116110000_fission_clone_generation_batch`。API 配置 `FISSION_CLONE_GENERATION_MODEL` 和 `FISSION_CLONE_REVIEW_MODEL`；API 和 Worker 使用相同的独立 `FISSION_CLONE_GENERATION_WORKER_TOKEN`。Worker 使用 Ark 与 RabbitMQ，并通过内部 API 处理文件和回调。
+
+三至二十条成片需要额外应用 `20261117120000_fission_clone_generation_slots`，部署包含批次规划契约的生成 Worker，再为 API 设置可用的 `FISSION_CLONE_PLANNING_MODEL`。该模型需支持 Responses 结构化输出。配置空缺时仍可执行 G3 一至两条。停止接收新批次时先关闭规划模型配置，等待已经冻结模型的排队及运行任务结束，再替换旧镜像或处理迁移。
+
+```powershell
+docker compose --profile fission-clone-generation build fission-clone-generation-worker
+```
+
+该 profile 的消费者接收真实付费任务。启动前核对调用授权、模型部署和活动任务。[成片生成 Worker](../../workers/fission-clone-generation/README.md)
+
 ## 服务器部署
 
 独立生产 Compose、运营测试入口、备份及更新方式见[服务器部署说明](server-deployment.md)。本地开发继续使用本指南的开发服务和原有 Compose profile。

@@ -343,6 +343,54 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  fission-clone-analysis-worker:
+    profiles: ['fission-clone-analysis']
+    build:
+      context: .
+      dockerfile: workers/fission-clone-analysis/Dockerfile
+    environment:
+      INTERNAL_API_BASE_URL: http://host.docker.internal:${API_PORT:-3000}/api
+      FISSION_CLONE_ANALYSIS_WORKER_TOKEN: ${FISSION_CLONE_ANALYSIS_WORKER_TOKEN:-}
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      FISSION_CLONE_ANALYSIS_TIMEOUT_SECONDS: ${FISSION_CLONE_ANALYSIS_TIMEOUT_SECONDS:-300}
+      FISSION_CLONE_ANALYSIS_MAX_ATTEMPTS: ${FISSION_CLONE_ANALYSIS_MAX_ATTEMPTS:-2}
+      FISSION_CLONE_ANALYSIS_MAX_OUTPUT_TOKENS: ${FISSION_CLONE_ANALYSIS_MAX_OUTPUT_TOKENS:-16384}
+      FISSION_CLONE_ANALYSIS_MAX_FRAMES: ${FISSION_CLONE_ANALYSIS_MAX_FRAMES:-24}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      OMP_NUM_THREADS: '1'
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cpus: '1.0'
+    mem_limit: 768m
+
+  fission-clone-generation-worker:
+    profiles: ['fission-clone-generation']
+    build:
+      context: .
+      dockerfile: workers/fission-clone-generation/Dockerfile
+    environment:
+      INTERNAL_API_BASE_URL: http://host.docker.internal:${API_PORT:-3000}/api
+      FISSION_CLONE_GENERATION_WORKER_TOKEN: ${FISSION_CLONE_GENERATION_WORKER_TOKEN:-}
+      FISSION_CLONE_GENERATION_TIMEOUT_SECONDS: ${FISSION_CLONE_GENERATION_TIMEOUT_SECONDS:-900}
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=800m,mode=1777
+    cpus: '1.0'
+    mem_limit: 1400m
+
 volumes:
   postgres-data:
   redis-data:

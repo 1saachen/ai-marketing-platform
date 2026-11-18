@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "sourceInput": {
+    "artifactId": "11111111-1111-4111-8111-111111111111",
+    "revision": 1,
+    "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "sourceAnalysis": {
+    "artifactId": "22222222-2222-4222-8222-222222222222",
+    "revision": 1,
+    "contentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "bindings": [
+    {
+      "elementId": "product_a",
+      "type": "product",
+      "action": "REPLACE",
+      "shotIds": [
+        "shot_a"
+      ],
+      "target": {
+        "asset": null,
+        "text": "使用已确认的目标绿色方块包装，保持真实外观",
+        "style": "",
+        "voice": "",
+        "contentStrategy": "REPLACE",
+        "presentationStrategy": "REPLACE",
+        "lockedAttributes": [
+          "商品外观"
+        ],
+        "allowedVariations": [
+          "背景光线"
+        ]
+      }
+    },
+    {
+      "elementId": "product_b",
+      "type": "product",
+      "action": "REPLACE",
+      "shotIds": [
+        "shot_b"
+      ],
+      "target": {
+        "asset": null,
+        "text": "使用已确认的目标绿色方块包装，保持真实外观",
+        "style": "",
+        "voice": "",
+        "contentStrategy": "REPLACE",
+        "presentationStrategy": "REPLACE",
+        "lockedAttributes": [
+          "商品外观"
+        ],
+        "allowedVariations": [
+          "背景光线"
+        ]
+      }
+    }
+  ],
+  "structureLock": {
+    "durationMs": 3000,
+    "stages": [
+      {
+        "stageId": "stage_a",
+        "startMs": 0,
+        "endMs": 1500,
+        "role": "展示",
+        "summary": "测试阶段A",
+        "proportion": 0.5
+      },
+      {
+        "stageId": "stage_b",
+        "startMs": 1500,
+        "endMs": 3000,
+        "role": "收束",
+        "summary": "测试阶段B",
+        "proportion": 0.5
+      }
+    ],
+    "shots": [
+      {
+        "shotId": "shot_a",
+        "stageId": "stage_a",
+        "startMs": 0,
+        "endMs": 1500
+      },
+      {
+        "shotId": "shot_b",
+        "stageId": "stage_b",
+        "startMs": 1500,
+        "endMs": 3000
+      }
+    ],
+    "beatsMs": [],
+    "soundEffectAnchorsMs": [],
+    "hookRanges": [
+      {
+        "startMs": 0,
+        "endMs": 500
+      }
+    ],
+    "conversionRanges": [
+      {
+        "startMs": 2500,
+        "endMs": 3000
+      }
+    ]
+  }
+}

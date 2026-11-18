@@ -1,0 +1,52 @@
+{
+  "draft": {
+    "schemaVersion": 1,
+    "referenceUploadId": "a1111111-1111-4111-8111-111111111111",
+    "productUploadIds": [
+      "b2222222-2222-4222-8222-222222222222",
+      "c3333333-3333-4333-8333-333333333333"
+    ],
+    "productName": "示例商品",
+    "productFacts": "包装规格为 500g。\n资料提供的原料为大米。",
+    "sourceRightsConfirmed": true
+  },
+  "confirm": {
+    "expectedDraftRevision": 3,
+    "expectedInputRevision": 0
+  },
+  "uploads": [
+    {
+      "id": "a1111111-1111-4111-8111-111111111111",
+      "fileObjectId": "d4444444-4444-4444-8444-444444444444",
+      "role": "REFERENCE",
+      "originalFileName": "reference.mp4",
+      "mimeType": "video/mp4",
+      "sizeBytes": 4096,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "media": { "durationMs": 10000, "width": 1080, "height": 1920, "frameRate": 30 },
+      "contentUrl": "/api/clone-fixture/uploads/a1111111-1111-4111-8111-111111111111/content"
+    },
+    {
+      "id": "b2222222-2222-4222-8222-222222222222",
+      "fileObjectId": "e5555555-5555-4555-8555-555555555555",
+      "role": "PRODUCT",
+      "originalFileName": "product-front.png",
+      "mimeType": "image/png",
+      "sizeBytes": 1024,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "media": { "durationMs": null, "width": 800, "height": 800, "frameRate": null },
+      "contentUrl": "/api/clone-fixture/uploads/b2222222-2222-4222-8222-222222222222/content"
+    },
+    {
+      "id": "c3333333-3333-4333-8333-333333333333",
+      "fileObjectId": "f6666666-6666-4666-8666-666666666666",
+      "role": "PRODUCT",
+      "originalFileName": "product-back.png",
+      "mimeType": "image/png",
+      "sizeBytes": 1024,
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "media": { "durationMs": null, "width": 800, "height": 800, "frameRate": null },
+      "contentUrl": "/api/clone-fixture/uploads/c3333333-3333-4333-8333-333333333333/content"
+    }
+  ]
+}

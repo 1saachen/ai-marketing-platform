@@ -16,6 +16,7 @@ import type {
   WorkingArtifactListQuery,
   WorkingArtifact,
   WorkflowNodeState,
+  WorkflowPauseRunRequest,
   WorkflowRunOverviewData,
 } from '@ai-marketing/contracts';
 import { ApiClientError, isNetworkError, requestJson } from '../../../api/http-client';
@@ -287,10 +288,11 @@ export const putWorkflowNodeState = (
 export const pauseWorkflowRun = (
   projectId: string,
   workflowRunId: string,
+  input?: WorkflowPauseRunRequest,
 ): Promise<ApiResponse<{ paused: true }>> =>
   requestJson(
     `${projectPath(projectId)}/workflow-runs/${encodeURIComponent(workflowRunId)}/pause`,
-    { method: 'POST', operation: '暂停工作流' },
+    { method: 'POST', operation: '暂停工作流', ...(input ? { body: input } : {}) },
   );
 
 export const listWorkingArtifacts = (

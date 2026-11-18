@@ -14,6 +14,19 @@ export type EnvironmentVariables = {
   STORAGE_DRIVER: StorageDriver;
   LOCAL_STORAGE_ROOT: string | undefined;
   MAX_UPLOAD_BYTES: number;
+  FISSION_CLONE_ENABLED: boolean;
+  FISSION_CLONE_G2_ENABLED: boolean;
+  FISSION_CLONE_G3_ENABLED: boolean;
+  FISSION_CLONE_GENERATION_WORKER_TOKEN: string | undefined;
+  FISSION_CLONE_GENERATION_MODEL: string | undefined;
+  FISSION_CLONE_REVIEW_MODEL: string | undefined;
+  FISSION_CLONE_PLANNING_MODEL: string | undefined;
+  FISSION_CLONE_ANALYSIS_WORKER_TOKEN: string | undefined;
+  FISSION_CLONE_ANALYSIS_MODEL: string | undefined;
+  FISSION_CLONE_TASK_MAX_ATTEMPTS: number;
+  FISSION_CLONE_TASK_LEASE_SECONDS: number;
+  FISSION_CLONE_FFMPEG_PATH: string | undefined;
+  FISSION_CLONE_FFPROBE_PATH: string | undefined;
   WORKING_FILE_CLEANUP_GRACE_HOURS: number;
   DATABASE_URL: string;
   REDIS_URL: string;
@@ -166,6 +179,37 @@ export const validateEnvironment = (raw: Record<string, unknown>): EnvironmentVa
     API_PORT: parsePort(raw.API_PORT, 'API_PORT', 3000),
     WEB_ORIGIN: requiredString(raw.WEB_ORIGIN ?? 'http://localhost:5173', 'WEB_ORIGIN'),
     STORAGE_DRIVER: storageDriver,
+    FISSION_CLONE_ENABLED: parseBoolean(raw.FISSION_CLONE_ENABLED, 'FISSION_CLONE_ENABLED', false),
+    FISSION_CLONE_G2_ENABLED: parseBoolean(
+      raw.FISSION_CLONE_G2_ENABLED,
+      'FISSION_CLONE_G2_ENABLED',
+      false,
+    ),
+    FISSION_CLONE_G3_ENABLED: parseBoolean(
+      raw.FISSION_CLONE_G3_ENABLED,
+      'FISSION_CLONE_G3_ENABLED',
+      false,
+    ),
+    FISSION_CLONE_GENERATION_WORKER_TOKEN: optionalString(
+      raw.FISSION_CLONE_GENERATION_WORKER_TOKEN,
+    ),
+    FISSION_CLONE_GENERATION_MODEL: optionalString(raw.FISSION_CLONE_GENERATION_MODEL),
+    FISSION_CLONE_REVIEW_MODEL: optionalString(raw.FISSION_CLONE_REVIEW_MODEL),
+    FISSION_CLONE_PLANNING_MODEL: optionalString(raw.FISSION_CLONE_PLANNING_MODEL),
+    FISSION_CLONE_ANALYSIS_WORKER_TOKEN: optionalString(raw.FISSION_CLONE_ANALYSIS_WORKER_TOKEN),
+    FISSION_CLONE_ANALYSIS_MODEL: optionalString(raw.FISSION_CLONE_ANALYSIS_MODEL),
+    FISSION_CLONE_TASK_MAX_ATTEMPTS: parsePositiveInteger(
+      raw.FISSION_CLONE_TASK_MAX_ATTEMPTS,
+      'FISSION_CLONE_TASK_MAX_ATTEMPTS',
+      3,
+    ),
+    FISSION_CLONE_TASK_LEASE_SECONDS: parsePositiveInteger(
+      raw.FISSION_CLONE_TASK_LEASE_SECONDS,
+      'FISSION_CLONE_TASK_LEASE_SECONDS',
+      90,
+    ),
+    FISSION_CLONE_FFMPEG_PATH: optionalString(raw.FISSION_CLONE_FFMPEG_PATH),
+    FISSION_CLONE_FFPROBE_PATH: optionalString(raw.FISSION_CLONE_FFPROBE_PATH),
     LOCAL_STORAGE_ROOT: optionalString(raw.LOCAL_STORAGE_ROOT),
     MAX_UPLOAD_BYTES: parsePositiveInteger(
       raw.MAX_UPLOAD_BYTES,

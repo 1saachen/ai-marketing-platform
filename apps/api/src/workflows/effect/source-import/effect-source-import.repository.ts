@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import type { EffectImportMode, EffectVideoConfig } from '@ai-marketing/contracts';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type {
   Prisma,
   EffectImportDraft,
@@ -72,7 +73,16 @@ export class EffectSourceImportRepository {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(WorkflowWorkingRepository)
     private readonly workingRepository: WorkflowWorkingRepository,
+    @Optional() @Inject(ConfigService) private readonly config?: ConfigService,
   ) {}
+
+  private cloneEnabled() {
+    return this.config?.get<boolean>('FISSION_CLONE_ENABLED') === true;
+  }
+
+  private cloneG2Enabled() {
+    return this.cloneEnabled() && this.config?.get<boolean>('FISSION_CLONE_G2_ENABLED') === true;
+  }
 
   async initialize(projectId: string, config: EffectVideoConfig): Promise<EffectWorkspaceRecord> {
     // Restoration is a read. Updating an already complete workspace on every GET
@@ -1667,6 +1677,30 @@ export class EffectSourceImportRepository {
   }
 
   async isStorageHeld(projectId: string, storageKey: string): Promise<boolean> {
+    // A disabled G2 deployment must neither query unmigrated tables nor delete frozen files.
+    const cloneG2Held = this.cloneG2Enabled()
+      ? (await this.prisma.fissionCloneFileHold.count({
+          where: { projectId, fileObject: { storageKey } },
+        })) +
+        (await this.prisma.fissionCloneMappingFile.count({
+          where: { projectId, fileObject: { storageKey } },
+        }))
+      : await this.prisma.fileObject.count({
+          where: { projectId, storageKey, workflowRun: { workflowSpace: 'FISSION_CLONE' } },
+        });
+    if (cloneG2Held) return true;
+    const cloneHeld = this.cloneEnabled()
+      ? await this.prisma.fissionCloneUpload.count({
+          where: {
+            projectId,
+            status: { in: ['UPLOADING', 'AVAILABLE'] },
+            fileObject: { storageKey },
+          },
+        })
+      : await this.prisma.fileObject.count({
+          where: { projectId, storageKey, nodeId: 'CLONE_INPUT' },
+        });
+    if (cloneHeld) return true;
     const [
       holds,
       materials,
@@ -1725,10 +1759,21 @@ export class EffectSourceImportRepository {
           artifactLinks: { none: {} },
           revisionLinks: { none: {} },
           uploadItems: { none: { session: { status: 'UPLOADING' } } },
+          ...(this.cloneEnabled()
+            ? { cloneUploads: { none: { status: { in: ['UPLOADING', 'AVAILABLE'] } } } }
+            : { NOT: { nodeId: 'CLONE_INPUT' } }),
+          ...(this.cloneG2Enabled()
+            ? { cloneFileHolds: { none: {} }, cloneMappingFiles: { none: {} } }
+            : { workflowRun: { workflowSpace: { not: 'FISSION_CLONE' } } }),
         },
         select: { id: true },
       });
       if (!fileObject) return { count: 0 };
+      if (this.cloneEnabled())
+        await transaction.fissionCloneUpload.updateMany({
+          where: { projectId, fileObjectId: fileObject.id, status: { in: ['REMOVED', 'FAILED'] } },
+          data: { fileObjectId: null },
+        });
       await transaction.effectImportUploadItem.updateMany({
         where: { projectId, fileObjectId: fileObject.id, session: { status: 'COMPLETED' } },
         data: { fileObjectId: null },

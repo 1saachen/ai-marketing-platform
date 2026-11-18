@@ -1,0 +1,243 @@
+{
+  "schemaVersion": 1,
+  "durationMs": 3000,
+  "frameWidth": 360,
+  "frameHeight": 640,
+  "structure": {
+    "overview": {
+      "status": "OBSERVED",
+      "summary": "隔离测试报告：展示后收束",
+      "reason": "",
+      "confidence": 0.8,
+      "evidence": [
+        {
+          "kind": "VISUAL",
+          "startMs": 0,
+          "endMs": 3000,
+          "description": "仅用于隔离契约与流程测试的证据",
+          "confidence": 0.8
+        }
+      ]
+    },
+    "stages": [
+      {
+        "stageId": "stage_a",
+        "startMs": 0,
+        "endMs": 1500,
+        "role": "展示",
+        "summary": "测试阶段A",
+        "proportion": 0.5
+      },
+      {
+        "stageId": "stage_b",
+        "startMs": 1500,
+        "endMs": 3000,
+        "role": "收束",
+        "summary": "测试阶段B",
+        "proportion": 0.5
+      }
+    ],
+    "hookRanges": [
+      {
+        "startMs": 0,
+        "endMs": 500
+      }
+    ],
+    "conversionRanges": [
+      {
+        "startMs": 2500,
+        "endMs": 3000
+      }
+    ],
+    "rhythm": [
+      {
+        "timeMs": 0,
+        "intensity": 0.5,
+        "description": "测试节奏"
+      }
+    ]
+  },
+  "creativity": {
+    "overview": {
+      "status": "OBSERVED",
+      "summary": "测试创意",
+      "reason": "",
+      "confidence": 0.8,
+      "evidence": [
+        {
+          "kind": "VISUAL",
+          "startMs": 0,
+          "endMs": 3000,
+          "description": "仅用于隔离契约与流程测试的证据",
+          "confidence": 0.8
+        }
+      ]
+    },
+    "concept": "合成素材验证界面，不代表模型理解结果",
+    "emotion": "中性",
+    "contrast": "颜色变化",
+    "memoryPoints": [
+      "色块"
+    ]
+  },
+  "product": {
+    "overview": {
+      "status": "OBSERVED",
+      "summary": "两个测试产品元素",
+      "reason": "",
+      "confidence": 0.8,
+      "evidence": [
+        {
+          "kind": "VISUAL",
+          "startMs": 0,
+          "endMs": 3000,
+          "description": "仅用于隔离契约与流程测试的证据",
+          "confidence": 0.8
+        }
+      ]
+    },
+    "originalProductDescription": "仅用于验证逐项产品替换",
+    "closeupRatio": 0.5,
+    "transferAdvice": "目标商品事实来自已确认输入，不继承原产品功效"
+  },
+  "shots": [
+    {
+      "shotId": "shot_a",
+      "stageId": "stage_a",
+      "startMs": 0,
+      "endMs": 1500,
+      "framing": "中景",
+      "cameraMovement": "固定",
+      "transition": "切换",
+      "composition": "居中",
+      "elementIds": [
+        "product_a"
+      ],
+      "evidenceFramesMs": [
+        0
+      ]
+    },
+    {
+      "shotId": "shot_b",
+      "stageId": "stage_b",
+      "startMs": 1500,
+      "endMs": 3000,
+      "framing": "近景",
+      "cameraMovement": "固定",
+      "transition": "结束",
+      "composition": "居中",
+      "elementIds": [
+        "product_b"
+      ],
+      "evidenceFramesMs": [
+        1500
+      ]
+    }
+  ],
+  "audio": {
+    "overview": {
+      "status": "UNASSESSED",
+      "summary": "未评估",
+      "reason": "仅探测音轨存在性，未进行音频内容识别",
+      "confidence": 0,
+      "evidence": []
+    },
+    "hasAudio": true,
+    "voiceover": {
+      "status": "UNASSESSED",
+      "summary": "未评估",
+      "reason": "未接入语音识别",
+      "confidence": 0,
+      "evidence": []
+    },
+    "bgm": {
+      "status": "UNASSESSED",
+      "summary": "未评估",
+      "reason": "未接入音乐识别",
+      "confidence": 0,
+      "evidence": []
+    },
+    "soundEffects": {
+      "status": "UNASSESSED",
+      "summary": "未评估",
+      "reason": "未接入音效识别",
+      "confidence": 0,
+      "evidence": []
+    },
+    "transcript": [],
+    "beatsMs": [],
+    "soundEffectAnchorsMs": [],
+    "silenceRanges": []
+  },
+  "visual": {
+    "overview": {
+      "status": "OBSERVED",
+      "summary": "合成测试画面",
+      "reason": "",
+      "confidence": 0.8,
+      "evidence": [
+        {
+          "kind": "VISUAL",
+          "startMs": 0,
+          "endMs": 3000,
+          "description": "仅用于隔离契约与流程测试的证据",
+          "confidence": 0.8
+        }
+      ]
+    },
+    "subtitles": [],
+    "color": "彩色色块",
+    "stickers": [],
+    "aspectRatio": "9:16",
+    "safeArea": "未识别独立字幕安全区"
+  },
+  "elements": [
+    {
+      "elementId": "product_a",
+      "type": "product",
+      "label": "测试产品一",
+      "description": "测试元素",
+      "shotIds": [
+        "shot_a"
+      ],
+      "ranges": [
+        {
+          "startMs": 0,
+          "endMs": 1500
+        }
+      ],
+      "evidence": [],
+      "required": true,
+      "transcriptText": "",
+      "sourceTrack": "VISUAL",
+      "confidence": 0.8
+    },
+    {
+      "elementId": "product_b",
+      "type": "product",
+      "label": "测试产品二",
+      "description": "测试元素",
+      "shotIds": [
+        "shot_b"
+      ],
+      "ranges": [
+        {
+          "startMs": 1500,
+          "endMs": 3000
+        }
+      ],
+      "evidence": [],
+      "required": true,
+      "transcriptText": "",
+      "sourceTrack": "VISUAL",
+      "confidence": 0.8
+    }
+  ],
+  "transferSuggestions": [
+    "仅使用目标商品已确认事实"
+  ],
+  "limitations": [
+    "显式隔离测试数据，不是供应商分析结果",
+    "音频语义未评估"
+  ]
+}

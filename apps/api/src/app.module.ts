@@ -19,6 +19,7 @@ import { EffectSegmentRenderModule } from './workflows/effect/segment-render/eff
 import { EffectSourceImportModule } from './workflows/effect/source-import/effect-source-import.module';
 import { EffectTemplateMixModule } from './workflows/effect/template-mix/effect-template-mix.module';
 import { CustomizedSourceImportModule } from './workflows/customized/source-import/customized-source-import.module';
+import { CloneModule } from './workflows/fission/clone/clone.module';
 
 @Module({
   imports: [
@@ -35,6 +36,7 @@ import { CustomizedSourceImportModule } from './workflows/customized/source-impo
     ProjectModule,
     AssetModule,
     WorkflowModule,
+    CloneModule,
     EffectSourceImportModule,
     CustomizedSourceImportModule,
     CustomizedExtractionModule,

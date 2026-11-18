@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-clone-generation-variant-shot-draft.schema.json",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 2
+    },
+    "variants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "variantId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+          },
+          "elementId": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,79}$"
+          },
+          "dimension": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1
+          },
+          "shotDirections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "shotId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,79}$"
+                },
+                "direction": {
+                  "type": "string",
+                  "maxLength": 120,
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "shotId",
+                "direction"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 4
+          }
+        },
+        "required": [
+          "variantId",
+          "elementId",
+          "dimension",
+          "shotDirections"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 3,
+      "maxItems": 20
+    }
+  },
+  "required": [
+    "version",
+    "variants"
+  ],
+  "additionalProperties": false
+}

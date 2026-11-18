@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { X } from '@lucide/vue';
-defineProps<{ title: string; wide?: boolean }>();
+defineProps<{ title: string; wide?: boolean; subtitle?: string }>();
 const emit = defineEmits<{ close: [] }>();
 const dialog = ref<HTMLElement | null>(null);
 let trigger: HTMLElement | null = null;
@@ -52,7 +52,7 @@ function trap(event: KeyboardEvent) {
           <header>
             <div>
               <h2 id="clone-dialog-title">{{ title }}</h2>
-              <small>本地 Mock 演示</small>
+              <small v-if="subtitle">{{ subtitle }}</small>
             </div>
             <button class="frg-btn" aria-label="关闭弹窗" @click="emit('close')">
               <X :size="17" />

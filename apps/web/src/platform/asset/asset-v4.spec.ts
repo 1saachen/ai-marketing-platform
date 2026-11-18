@@ -206,7 +206,9 @@ describe('V4 asset center mapping', () => {
   it('enters assets directly instead of a workspace overview', () => {
     expect(assetDrawerSource).toMatch(/<ProjectAssetBrowser\s+v-if="selectedProject"/);
     expect(assetDrawerSource).not.toContain('ProjectWorkspaceOverview');
-    expect(projectAssetBrowserSource).toContain('props.currentProject?.id === props.project.id');
+    expect(projectAssetBrowserSource).toContain(
+      'if (props.currentProject?.id !== props.project.id) return false',
+    );
     expect(projectWorkspaceOverviewSource).toContain('工作流草稿');
     expect(projectWorkspaceOverviewSource).toContain('工作区产物');
     expect(projectWorkspaceOverviewSource).not.toContain('已归档资产');

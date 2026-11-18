@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-clone-generation-review.schema.json",
+  "type": "object",
+  "properties": {
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "shotId": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,79}$"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": ["PASSED", "WARNING", "FAILED"]
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 600,
+            "minLength": 1
+          },
+          "evidenceFrames": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 359
+            },
+            "minItems": 1,
+            "maxItems": 5
+          }
+        },
+        "required": ["shotId", "verdict", "reason", "evidenceFrames"],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 4
+    }
+  },
+  "required": ["checks"],
+  "additionalProperties": false
+}

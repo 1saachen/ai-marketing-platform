@@ -1,0 +1,402 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-clone-mapping-draft.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "sourceInput": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "artifactId": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "contentHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "artifactId",
+            "revision",
+            "contentHash"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sourceAnalysis": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "artifactId": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "contentHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "artifactId",
+            "revision",
+            "contentHash"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "elementId": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,79}$"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "product",
+              "person",
+              "scene",
+              "subtitle",
+              "bgm",
+              "voiceover"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "KEEP",
+              "REPLACE"
+            ]
+          },
+          "shotIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,79}$"
+            },
+            "minItems": 0,
+            "maxItems": 200
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "asset": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "assetId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+                          },
+                          "version": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "assetId",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string",
+                    "maxLength": 20000
+                  },
+                  "style": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "voice": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "contentStrategy": {
+                    "type": "string",
+                    "enum": [
+                      "KEEP",
+                      "REPLACE",
+                      "NONE"
+                    ]
+                  },
+                  "presentationStrategy": {
+                    "type": "string",
+                    "enum": [
+                      "KEEP",
+                      "REPLACE",
+                      "NONE"
+                    ]
+                  },
+                  "lockedAttributes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "minItems": 0,
+                    "maxItems": 30
+                  },
+                  "allowedVariations": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    "minItems": 0,
+                    "maxItems": 30
+                  }
+                },
+                "required": [
+                  "asset",
+                  "text",
+                  "style",
+                  "voice",
+                  "contentStrategy",
+                  "presentationStrategy",
+                  "lockedAttributes",
+                  "allowedVariations"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "elementId",
+          "type",
+          "action",
+          "shotIds",
+          "target"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 200
+    },
+    "structureLock": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "durationMs": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 120000
+            },
+            "stages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "stageId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,79}$"
+                  },
+                  "startMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 120000
+                  },
+                  "endMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 120000
+                  },
+                  "role": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "summary": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "proportion": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": [
+                  "stageId",
+                  "startMs",
+                  "endMs",
+                  "role",
+                  "summary",
+                  "proportion"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 120
+            },
+            "shots": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "shotId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,79}$"
+                  },
+                  "stageId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,79}$"
+                  },
+                  "startMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 120000
+                  },
+                  "endMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 120000
+                  }
+                },
+                "required": [
+                  "shotId",
+                  "stageId",
+                  "startMs",
+                  "endMs"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 240
+            },
+            "beatsMs": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 120000
+              },
+              "minItems": 0,
+              "maxItems": 1000
+            },
+            "soundEffectAnchorsMs": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 120000
+              },
+              "minItems": 0,
+              "maxItems": 1000
+            },
+            "hookRanges": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "startMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 120000
+                  },
+                  "endMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 120000
+                  }
+                },
+                "required": [
+                  "startMs",
+                  "endMs"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 0,
+              "maxItems": 200
+            },
+            "conversionRanges": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "startMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 120000
+                  },
+                  "endMs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 120000
+                  }
+                },
+                "required": [
+                  "startMs",
+                  "endMs"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 0,
+              "maxItems": 200
+            }
+          },
+          "required": [
+            "durationMs",
+            "stages",
+            "shots",
+            "beatsMs",
+            "soundEffectAnchorsMs",
+            "hookRanges",
+            "conversionRanges"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "sourceInput",
+    "sourceAnalysis",
+    "bindings",
+    "structureLock"
+  ],
+  "additionalProperties": false
+}

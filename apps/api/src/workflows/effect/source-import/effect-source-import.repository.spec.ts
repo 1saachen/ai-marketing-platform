@@ -242,6 +242,7 @@ describe('EffectSourceImportRepository project isolation', () => {
     const extractionCount = vi.fn().mockResolvedValue(1);
     const repository = new EffectSourceImportRepository(
       {
+        fileObject: { count: vi.fn().mockResolvedValue(0) },
         effectExtractionFileHold: { count: extractionCount },
         effectImportMaterial: { count: vi.fn().mockResolvedValue(0) },
         workingArtifactFile: { count: vi.fn().mockResolvedValue(0) },
@@ -260,10 +261,95 @@ describe('EffectSourceImportRepository project isolation', () => {
     });
   });
 
+  it('protects clone draft files without accessing an unmigrated clone table', async () => {
+    const count = vi.fn().mockResolvedValue(1);
+    const repository = new EffectSourceImportRepository(
+      { fileObject: { count } } as unknown as PrismaService,
+      {} as never,
+    );
+    await expect(repository.isStorageHeld('project-a', 'clone/object')).resolves.toBe(true);
+    expect(count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-a',
+        storageKey: 'clone/object',
+        workflowRun: { workflowSpace: 'FISSION_CLONE' },
+      },
+    });
+  });
+
+  it('protects available clone uploads once enabled and never hides missing-table errors', async () => {
+    const count = vi.fn().mockResolvedValue(1);
+    const repository = new EffectSourceImportRepository(
+      {
+        fissionCloneUpload: { count },
+        fissionCloneFileHold: { count: vi.fn().mockResolvedValue(0) },
+        fissionCloneMappingFile: { count: vi.fn().mockResolvedValue(0) },
+      } as unknown as PrismaService,
+      {} as never,
+      { get: () => true } as never,
+    );
+    await expect(repository.isStorageHeld('project-a', 'clone/object')).resolves.toBe(true);
+    expect(count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-a',
+        status: { in: ['UPLOADING', 'AVAILABLE'] },
+        fileObject: { storageKey: 'clone/object' },
+      },
+    });
+    count.mockRejectedValue(new Error('missing migration'));
+    await expect(repository.isStorageHeld('project-a', 'clone/object')).rejects.toThrow(
+      'missing migration',
+    );
+  });
+
+  it('excludes held clone uploads from orphan removal', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const repository = new EffectSourceImportRepository(
+      {
+        $transaction: (fn: (tx: unknown) => unknown) => fn({ fileObject: { findFirst } }),
+      } as unknown as PrismaService,
+      {} as never,
+      { get: () => true } as never,
+    );
+    await expect(repository.deleteOrphanedFileObject('project-a', 'clone/object')).resolves.toEqual(
+      { count: 0 },
+    );
+    expect(findFirst.mock.calls[0]![0].where).toMatchObject({
+      projectId: 'project-a',
+      cloneUploads: { none: { status: { in: ['UPLOADING', 'AVAILABLE'] } } },
+      cloneFileHolds: { none: {} },
+      cloneMappingFiles: { none: {} },
+    });
+  });
+
+  it.each(['fissionCloneFileHold', 'fissionCloneMappingFile'])(
+    'protects frozen files held by %s',
+    async (holder) => {
+      const count = vi.fn().mockResolvedValue(1);
+      const repository = new EffectSourceImportRepository(
+        {
+          fissionCloneFileHold: {
+            count: holder === 'fissionCloneFileHold' ? count : vi.fn().mockResolvedValue(0),
+          },
+          fissionCloneMappingFile: {
+            count: holder === 'fissionCloneMappingFile' ? count : vi.fn().mockResolvedValue(0),
+          },
+        } as unknown as PrismaService,
+        {} as never,
+        { get: () => true } as never,
+      );
+      await expect(repository.isStorageHeld('project-a', 'clone/object')).resolves.toBe(true);
+      expect(count).toHaveBeenCalledWith({
+        where: { projectId: 'project-a', fileObject: { storageKey: 'clone/object' } },
+      });
+    },
+  );
+
   it('protects media referenced only by a confirmed revision snapshot', async () => {
     const revisionCount = vi.fn().mockResolvedValue(1);
     const repository = new EffectSourceImportRepository(
       {
+        fileObject: { count: vi.fn().mockResolvedValue(0) },
         effectExtractionFileHold: { count: vi.fn().mockResolvedValue(0) },
         effectImportMaterial: { count: vi.fn().mockResolvedValue(0) },
         workingArtifactFile: { count: vi.fn().mockResolvedValue(0) },

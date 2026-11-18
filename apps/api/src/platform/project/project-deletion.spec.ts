@@ -42,7 +42,7 @@ const restricted = [
   'asset',
 ];
 
-function fixture(busy?: string) {
+function fixture(busy?: string, cloneEnabled = false) {
   const tx: Record<string, any> = {
     $queryRaw: vi.fn().mockImplementation(async (query: { sql?: string }) => {
       if (query.sql?.includes('WITH refs')) return [{ key: 'owned-file' }];
@@ -72,24 +72,106 @@ function fixture(busy?: string) {
       upsert: vi.fn(),
       findUnique: vi.fn().mockResolvedValue({ status: 'QUEUED', phase: 'DATABASE' }),
     },
-    workflowRun: { updateMany: vi.fn() },
+    workflowRun: { updateMany: vi.fn(), count: vi.fn().mockResolvedValue(0) },
+    fissionCloneUpload: {
+      count: vi.fn().mockResolvedValue(busy === 'fissionCloneUpload' ? 1 : 0),
+      deleteMany: vi.fn(),
+    },
   };
-  for (const model of new Set([...activeModels, ...restricted]))
+  for (const model of new Set([
+    ...activeModels,
+    ...restricted,
+    'fissionCloneTask',
+    'fissionCloneTaskStep',
+    'fissionCloneFileHold',
+    'fissionCloneMappingFile',
+  ]))
     tx[model] = {
       count: vi.fn().mockResolvedValue(model === busy ? 1 : 0),
       deleteMany: vi.fn(),
     };
   return {
     tx,
-    repository: new ProjectDeletionRepository({
-      $transaction: (callback: any) => callback(tx),
-      project: tx.project,
-      projectDeletionCleanup: tx.projectDeletionCleanup,
-    } as PrismaService),
+    repository: new ProjectDeletionRepository(
+      {
+        $transaction: (callback: any) => callback(tx),
+        project: tx.project,
+        projectDeletionCleanup: tx.projectDeletionCleanup,
+      } as PrismaService,
+      { get: () => cloneEnabled } as unknown as ConfigService,
+    ),
   };
 }
 
 describe('permanent project deletion', () => {
+  it('does not access the new clone table before the feature is enabled', async () => {
+    const { tx, repository } = fixture();
+    tx.fissionCloneUpload.count.mockRejectedValue(new Error('table does not exist'));
+    tx.fissionCloneUpload.deleteMany.mockRejectedValue(new Error('table does not exist'));
+    await expect(repository.remove('project-a', 'lease')).resolves.toBe(true);
+    expect(tx.fissionCloneUpload.count).not.toHaveBeenCalled();
+    expect(tx.fissionCloneUpload.deleteMany).not.toHaveBeenCalled();
+    expect(
+      tx.$queryRaw.mock.calls.some(([query]: [{ sql?: string }]) =>
+        query.sql?.includes('fission_clone_uploads'),
+      ),
+    ).toBe(false);
+  });
+
+  it('preserves existing clone projects when their cleanup feature is disabled', async () => {
+    const { tx, repository } = fixture();
+    tx.workflowRun.count.mockResolvedValue(1);
+    await expect(repository.remove('project-a', 'lease')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROJECT_BUSY' }),
+    });
+    expect(tx.project.delete).not.toHaveBeenCalled();
+    expect(tx.fissionCloneUpload.count).not.toHaveBeenCalled();
+  });
+
+  it('blocks project removal while an enabled clone upload is active', async () => {
+    const { tx, repository } = fixture('fissionCloneUpload', true);
+    await expect(repository.remove('project-a', 'lease')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROJECT_BUSY' }),
+    });
+    expect(tx.fissionCloneUpload.count).toHaveBeenCalledWith({
+      where: { projectId: 'project-a', status: 'UPLOADING', expiresAt: { gt: expect.any(Date) } },
+    });
+    expect(tx.project.delete).not.toHaveBeenCalled();
+  });
+
+  it('releases clone file references before cascading the project', async () => {
+    const { tx, repository } = fixture(undefined, true);
+    await expect(repository.remove('project-a', 'lease')).resolves.toBe(true);
+    expect(tx.fissionCloneUpload.deleteMany).toHaveBeenCalledWith({
+      where: { projectId: 'project-a' },
+    });
+    expect(tx.fissionCloneUpload.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.project.delete.mock.invocationCallOrder[0],
+    );
+    for (const model of [
+      'fissionCloneFileHold',
+      'fissionCloneMappingFile',
+      'fissionCloneTaskStep',
+      'fissionCloneTask',
+    ]) {
+      expect(tx[model].deleteMany).toHaveBeenCalledWith({ where: { projectId: 'project-a' } });
+      expect(tx[model].deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
+        tx.project.delete.mock.invocationCallOrder[0],
+      );
+    }
+  });
+
+  it('blocks deletion while a Clone G2 task is queued or running', async () => {
+    const { repository, tx } = fixture('fissionCloneTask', true);
+    await expect(repository.remove('project-a', 'lease')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROJECT_BUSY' }),
+    });
+    expect(tx.fissionCloneTask.count).toHaveBeenCalledWith({
+      where: { projectId: 'project-a', status: { in: ['QUEUED', 'RUNNING'] } },
+    });
+    expect(tx.project.delete).not.toHaveBeenCalled();
+  });
+
   it.each(activeModels)('rejects submission while %s is active', async (model) => {
     const { tx, repository } = fixture(model);
     tx.projectDeletionCleanup.findUnique.mockResolvedValue(null);

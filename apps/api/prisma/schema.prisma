@@ -310,6 +310,8 @@ enum JobOutboxStatus {
 }
 
 model Project {
+  fissionCloneTasks FissionCloneTask[]
+  fissionCloneUploads FissionCloneUpload[]
   customizedProductionTasks CustomizedProductionTask[]
   customizedStoryboardTasks CustomizedStoryboardTask[]
   customizedStoryboardScripts CustomizedStoryboardScript[]
@@ -407,6 +409,9 @@ model Asset {
 }
 
 model WorkflowRun {
+  fissionCloneMappingFiles FissionCloneMappingFile[]
+  fissionCloneTasks FissionCloneTask[]
+  fissionCloneUploads FissionCloneUpload[]
   customizedProductionTasks CustomizedProductionTask[]
   customizedStoryboardTasks CustomizedStoryboardTask[]
   customizedStoryboardScripts CustomizedStoryboardScript[]
@@ -562,6 +567,9 @@ model WorkingArtifactRevisionFile {
 }
 
 model FileObject {
+  cloneMappingFiles FissionCloneMappingFile[]
+  cloneFileHolds   FissionCloneFileHold[]
+  cloneUploads     FissionCloneUpload[]
   id               String                   @id @default(uuid()) @db.Uuid
   projectId        String                   @db.Uuid
   workflowRunId    String                   @db.Uuid
@@ -590,6 +598,126 @@ model FileObject {
   @@unique([projectId, workflowRunId, id])
   @@index([projectId, workflowRunId, status, updatedAt])
   @@map("file_objects")
+}
+
+// Upload ownership is a draft-file hold, not a confirmed artifact or project asset.
+model FissionCloneUpload {
+  id                 String      @id @default(uuid()) @db.Uuid
+  attemptToken       String      @default(uuid()) @db.Uuid
+  projectId          String      @db.Uuid
+  workflowRunId      String      @db.Uuid
+  fileObjectId       String?     @db.Uuid
+  role               String?     @db.VarChar(16)
+  status             String      @default("UPLOADING") @db.VarChar(16)
+  media              Json?
+  clientUploadKey    String      @db.VarChar(160)
+  sourceAssetId      String?     @db.Uuid
+  sourceAssetVersion Int?
+  expiresAt          DateTime
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+  project            Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun        WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  fileObject         FileObject? @relation(fields: [projectId, workflowRunId, fileObjectId], references: [projectId, workflowRunId, id], onDelete: Restrict, map: "fission_clone_uploads_file_fkey")
+
+  @@unique([projectId, workflowRunId, clientUploadKey], map: "clone_uploads_client_key")
+  @@index([projectId, workflowRunId, status], map: "clone_uploads_scope_status_idx")
+  @@index([projectId, fileObjectId], map: "clone_uploads_file_idx")
+  @@index([status, expiresAt], map: "clone_uploads_expiration_idx")
+  @@map("fission_clone_uploads")
+}
+
+// Exact project asset versions prepared outside transactions for mapping drafts and results.
+model FissionCloneMappingFile {
+  id             String @id @default(uuid()) @db.Uuid
+  projectId      String @db.Uuid
+  workflowRunId  String @db.Uuid
+  assetId        String @db.Uuid
+  version        Int
+  sourceVersionId String @db.Uuid
+  fileObjectId   String @db.Uuid
+  media          Json
+  createdAt      DateTime @default(now())
+  workflowRun    WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  fileObject     FileObject @relation(fields: [projectId, workflowRunId, fileObjectId], references: [projectId, workflowRunId, id], onDelete: Restrict)
+
+  @@unique([projectId, workflowRunId, assetId, version], map: "clone_mapping_files_version_key")
+  @@index([projectId, fileObjectId], map: "clone_mapping_files_file_idx")
+  @@map("fission_clone_mapping_files")
+}
+
+model FissionCloneTask {
+  id             String @id @default(uuid()) @db.Uuid
+  projectId      String @db.Uuid
+  workflowRunId  String @db.Uuid
+  operation      String @db.VarChar(24)
+  purpose        String? @db.VarChar(32)
+  idempotencyKey String @db.VarChar(160)
+  inputHash      String @db.Char(64)
+  inputSnapshot  Json
+  status         String @default("QUEUED") @db.VarChar(16)
+  progress       Int @default(0)
+  currentStage   String @default("QUEUED") @db.VarChar(80)
+  result         Json?
+  resultHash     String? @db.Char(64)
+  appliedToDraft Boolean @default(false)
+  attemptCount   Int @default(0)
+  attemptToken   String? @db.Uuid
+  leaseExpiresAt DateTime?
+  errorCode      String? @db.VarChar(80)
+  errorMessage   String? @db.VarChar(500)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  completedAt    DateTime?
+  project        Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workflowRun    WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade)
+  steps          FissionCloneTaskStep[]
+  fileHolds      FissionCloneFileHold[]
+  generationParentId String? @db.Uuid
+  generationSlot Int?
+  generationParent FissionCloneTask? @relation("CloneGenerationChildren", fields: [projectId, workflowRunId, generationParentId], references: [projectId, workflowRunId, id], onDelete: Cascade, map: "clone_tasks_generation_parent_fkey")
+  generationChildren FissionCloneTask[] @relation("CloneGenerationChildren")
+
+  @@unique([projectId, workflowRunId, generationParentId, generationSlot], map: "clone_tasks_generation_slot_key")
+  @@unique([projectId, workflowRunId, operation, idempotencyKey], map: "clone_tasks_idempotency_key")
+  @@unique([projectId, workflowRunId, id], map: "clone_tasks_scope_key")
+  @@index([projectId, workflowRunId, status], map: "clone_tasks_scope_status_idx")
+  @@index([status, leaseExpiresAt], map: "clone_tasks_lease_idx")
+  @@map("fission_clone_tasks")
+}
+
+model FissionCloneTaskStep {
+  id            String @id @default(uuid()) @db.Uuid
+  projectId     String @db.Uuid
+  workflowRunId String @db.Uuid
+  taskId        String @db.Uuid
+  stepKey       String @db.VarChar(80)
+  inputHash     String @db.Char(64)
+  outputHash    String @db.Char(64)
+  output        Json
+  attemptToken  String @db.Uuid
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  task          FissionCloneTask @relation(fields: [projectId, workflowRunId, taskId], references: [projectId, workflowRunId, id], onDelete: Cascade)
+
+  @@unique([projectId, workflowRunId, taskId, stepKey], map: "clone_steps_task_key")
+  @@map("fission_clone_task_steps")
+}
+
+model FissionCloneFileHold {
+  id            String @id @default(uuid()) @db.Uuid
+  projectId     String @db.Uuid
+  workflowRunId String @db.Uuid
+  taskId        String @db.Uuid
+  fileObjectId  String @db.Uuid
+  sha256        String @db.Char(64)
+  createdAt     DateTime @default(now())
+  task          FissionCloneTask @relation(fields: [projectId, workflowRunId, taskId], references: [projectId, workflowRunId, id], onDelete: Cascade)
+  fileObject    FileObject @relation(fields: [projectId, workflowRunId, fileObjectId], references: [projectId, workflowRunId, id], onDelete: Restrict)
+
+  @@unique([projectId, workflowRunId, taskId, fileObjectId], map: "clone_holds_task_file_key")
+  @@index([projectId, fileObjectId], map: "clone_holds_file_idx")
+  @@map("fission_clone_file_holds")
 }
 
 model WorkingArtifactFile {

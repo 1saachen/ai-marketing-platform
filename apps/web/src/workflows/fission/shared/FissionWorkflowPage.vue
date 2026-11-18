@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { GitBranch, Replace, UserRound } from '@lucide/vue';
-import { inject, ref, watch } from 'vue';
+import { computed, inject, nextTick, ref, watch } from 'vue';
 import { projectContextKey } from '../../../platform/project/project-context';
 import LocalReplaceWorkspace from '../local-replace/LocalReplaceWorkspace.vue';
 import FissionCloneWorkspace from '../clone/FissionCloneWorkspace.vue';
@@ -29,35 +29,90 @@ watch(active, (value) => localStorage.setItem('ai-marketing.fission.active-modul
 const cloneWorkspace = ref<InstanceType<typeof FissionCloneWorkspace>>();
 const avatarWorkspace = ref<InstanceType<typeof AvatarWorkspace>>();
 const workspace = ref<InstanceType<typeof LocalReplaceWorkspace>>();
+const switching = ref(false);
+const switchError = ref('');
+const activeWorkspace = computed(() =>
+  active.value === 'clone'
+    ? cloneWorkspace.value
+    : active.value === 'avatar'
+      ? avatarWorkspace.value
+      : workspace.value,
+);
+const flushPendingEdits = async () => {
+  if (switching.value) return false;
+  return (await activeWorkspace.value?.flushPendingEdits()) ?? true;
+};
+async function selectModule(target: 'clone' | 'avatar' | 'replace') {
+  if (switching.value) return false;
+  if (target === active.value) return true;
+  switching.value = true;
+  switchError.value = '';
+  try {
+    if ((await activeWorkspace.value?.flushPendingEdits()) === false) {
+      switchError.value = '当前草稿尚未保存，请处理后再切换。';
+      return false;
+    }
+    active.value = target;
+    await nextTick();
+    return true;
+  } catch {
+    switchError.value = '草稿保存失败，当前编辑已保留，请重试。';
+    return false;
+  } finally {
+    switching.value = false;
+  }
+}
 defineExpose({
-  flushPendingEdits: async () =>
-    active.value === 'clone'
-      ? (cloneWorkspace.value?.flushPendingEdits() ?? true)
-      : active.value === 'avatar'
-        ? (avatarWorkspace.value?.flushPendingEdits() ?? true)
-        : (workspace.value?.flushPendingEdits() ?? true),
-  workflowRunId: '',
+  flushPendingEdits,
+  selectModule,
+  workflowRunId: computed(() =>
+    active.value === 'clone' ? (cloneWorkspace.value?.workflowRunId ?? '') : '',
+  ),
+  cloneDraftRevision: computed(() =>
+    active.value === 'clone' ? (cloneWorkspace.value?.cloneDraftRevision ?? null) : null,
+  ),
+  cloneDraftRevisions: computed(() =>
+    active.value === 'clone' ? (cloneWorkspace.value?.cloneDraftRevisions ?? null) : null,
+  ),
+  resumeWorkflowNode: async (nodeId: string) => {
+    if (!nodeId.startsWith('CLONE_') || !(await selectModule('clone'))) return false;
+    await nextTick();
+    return cloneWorkspace.value?.resumeWorkflowNode(nodeId) ?? false;
+  },
 });
 </script>
 <template>
   <div class="fission-page">
     <nav class="fission-module-tabs" aria-label="裂变功能">
-      <button :class="{ active: active === 'clone' }" @click="active = 'clone'">
+      <button
+        :class="{ active: active === 'clone' }"
+        :disabled="switching"
+        @click="selectModule('clone')"
+      >
         <i><GitBranch :size="21" /></i
         ><span><b>爆款视频复刻</b><small>拆解结构 · 映射元素 · 批量裂变</small></span
         ><em>›</em>
       </button>
-      <button :class="{ active: active === 'avatar' }" @click="active = 'avatar'">
+      <button
+        :class="{ active: active === 'avatar' }"
+        :disabled="switching"
+        @click="selectModule('avatar')"
+      >
         <i><UserRound :size="21" /></i
         ><span><b>数字人口播</b><small>定制形象 · 口播驱动 · 长视频输出</small></span
         ><em>›</em>
       </button>
-      <button :class="{ active: active === 'replace' }" @click="active = 'replace'">
+      <button
+        :class="{ active: active === 'replace' }"
+        :disabled="switching"
+        @click="selectModule('replace')"
+      >
         <i><Replace :size="21" /></i
         ><span><b>局部元素替换</b><small>精细替换 · 一致性校验 · 快速变体</small></span
         ><em>›</em>
       </button>
     </nav>
+    <p v-if="switchError" class="fission-switch-error" role="alert">{{ switchError }}</p>
     <FissionCloneWorkspace
       v-if="active === 'clone' && projectContext"
       ref="cloneWorkspace"
@@ -83,7 +138,7 @@ defineExpose({
       <GitBranch :size="36" />
       <h2>爆款视频复刻</h2>
       <p>请从系统项目工作台打开此工作流。</p>
-      <button class="lr-btn primary" @click="active = 'replace'">返回局部元素替换</button>
+      <button class="lr-btn primary" @click="selectModule('replace')">返回局部元素替换</button>
     </section>
   </div>
 </template>
@@ -92,6 +147,13 @@ defineExpose({
   max-width: 1360px;
   margin: auto;
   padding: 24px 24px 64px;
+}
+.fission-switch-error {
+  color: #b42318;
+  background: #fff3f2;
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 12px;
 }
 .fission-module-tabs {
   display: grid;

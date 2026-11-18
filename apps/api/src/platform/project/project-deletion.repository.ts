@@ -1,6 +1,7 @@
 import type { DeleteProjectResult } from '@ai-marketing/contracts';
 import { presentProject } from './project-presenter';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { ApiHttpException } from '../../common/api-http-exception';
@@ -40,7 +41,20 @@ const activityTables = [
 async function assertProjectInactive(
   tx: Prisma.TransactionClient,
   projectId: string,
+  cloneEnabled: boolean,
+  cloneG2Enabled: boolean,
 ): Promise<void> {
+  // A disabled pre-migration deployment must not query a table that may not exist.
+  // If clone data already exists, retain it until the feature's cleanup is enabled again.
+  if (
+    (!cloneEnabled || !cloneG2Enabled) &&
+    (await tx.workflowRun.count({ where: { projectId, workflowSpace: 'FISSION_CLONE' } }))
+  )
+    throw new ApiHttpException(
+      '项目包含复刻工作区，请启用复刻服务及拆解映射清理能力后再删除',
+      409,
+      'PROJECT_BUSY',
+    );
   const active = { projectId, status: { in: ['QUEUED', 'RUNNING'] } };
   const enumActive = {
     projectId,
@@ -48,6 +62,14 @@ async function assertProjectInactive(
   };
   const now = new Date();
   const counts = await Promise.all([
+    ...(cloneG2Enabled ? [tx.fissionCloneTask.count({ where: active })] : []),
+    ...(cloneEnabled
+      ? [
+          tx.fissionCloneUpload.count({
+            where: { projectId, status: 'UPLOADING', expiresAt: { gt: now } },
+          }),
+        ]
+      : []),
     tx.customizedProductionTask.count({ where: active }),
     tx.customizedStoryboardTask.count({ where: active }),
     tx.customizedExtractionTask.count({ where: active }),
@@ -95,7 +117,18 @@ async function assertProjectInactive(
 
 @Injectable()
 export class ProjectDeletionRepository {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Optional() @Inject(ConfigService) private readonly config?: ConfigService,
+  ) {}
+
+  private cloneEnabled() {
+    return this.config?.get<boolean>('FISSION_CLONE_ENABLED') === true;
+  }
+
+  private cloneG2Enabled() {
+    return this.cloneEnabled() && this.config?.get<boolean>('FISSION_CLONE_G2_ENABLED') === true;
+  }
 
   async enqueue(projectId: string): Promise<DeleteProjectResult> {
     await this.prisma.$transaction(
@@ -105,7 +138,7 @@ export class ProjectDeletionRepository {
         if (!locked.length) return;
         const queued = await tx.projectDeletionCleanup.findUnique({ where: { projectId } });
         if (queued && queued.status !== 'FAILED') return;
-        await assertProjectInactive(tx, projectId);
+        await assertProjectInactive(tx, projectId, this.cloneEnabled(), this.cloneG2Enabled());
         const project = await tx.project.findUniqueOrThrow({
           where: { id: projectId },
           include: {
@@ -217,13 +250,17 @@ export class ProjectDeletionRepository {
         if (!held.count) return false;
         // Existing task updates (e.g. repair/retry/claim) do not acquire a new Project FK lock.
         // Lock these rows too, so they cannot start between the active check and cascading delete.
-        for (const table of activityTables) {
+        for (const table of [
+          ...activityTables,
+          ...(this.cloneEnabled() ? ['fission_clone_uploads'] : []),
+          ...(this.cloneG2Enabled() ? ['fission_clone_tasks'] : []),
+        ]) {
           await tx.$queryRaw(
             Prisma.sql`SELECT id FROM ${Prisma.raw(`"${table}"`)} WHERE "projectId" = ${projectId}::uuid FOR UPDATE`,
           );
         }
         const scope = { projectId };
-        await assertProjectInactive(tx, projectId);
+        await assertProjectInactive(tx, projectId, this.cloneEnabled(), this.cloneG2Enabled());
 
         const owned = await tx.$queryRaw<{ key: string }[]>(Prisma.sql`
         WITH refs AS (${storageReferences})
@@ -249,6 +286,13 @@ export class ProjectDeletionRepository {
         await tx.workingArtifactDependency.deleteMany({ where: scope });
         await tx.workingArtifactRevisionFile.deleteMany({ where: scope });
         await tx.workingArtifactFile.deleteMany({ where: scope });
+        if (this.cloneG2Enabled()) {
+          await tx.fissionCloneFileHold.deleteMany({ where: scope });
+          await tx.fissionCloneTaskStep.deleteMany({ where: scope });
+          await tx.fissionCloneTask.deleteMany({ where: scope });
+          await tx.fissionCloneMappingFile.deleteMany({ where: scope });
+        }
+        if (this.cloneEnabled()) await tx.fissionCloneUpload.deleteMany({ where: scope });
         await tx.effectPackagingFile.deleteMany({ where: scope });
         await tx.effectVoicePreview.deleteMany({ where: scope });
         await tx.effectFinalOutputItem.deleteMany({ where: scope });

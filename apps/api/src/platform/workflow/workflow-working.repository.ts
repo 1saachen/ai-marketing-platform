@@ -25,9 +25,18 @@ import type {
   AssetWorkflowSpace,
   WorkingArtifactKind,
   WorkingArtifactListQuery,
+  WorkflowPauseRunRequest,
   EffectTemplateMixMaterial,
 } from '@ai-marketing/contracts';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { ApiHttpException } from '../../common/api-http-exception';
+import {
+  assertClonePauseRevisions,
+  lockCloneRun,
+  validateCloneInputUploads,
+} from './fission-clone-scope';
+import { validateCloneG2DraftInTransaction } from '../../workflows/fission/clone/clone-draft-scope';
 import { Prisma, type WorkflowNodeState } from '../../generated/prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { workflowStateHash } from './workflow-state-hash';
@@ -293,7 +302,23 @@ const artifactRevisionSnapshot = (record: WorkingArtifactRecord): Prisma.InputJs
 
 @Injectable()
 export class WorkflowWorkingRepository {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Optional() @Inject(ConfigService) private readonly config?: ConfigService,
+  ) {}
+
+  private cloneEnabled() {
+    return this.config?.get<boolean>('FISSION_CLONE_ENABLED') === true;
+  }
+
+  private cloneG2Enabled() {
+    return this.cloneEnabled() && this.config?.get<boolean>('FISSION_CLONE_G2_ENABLED') === true;
+  }
+
+  private assertCloneEnabled() {
+    if (!this.cloneEnabled())
+      throw new ApiHttpException('爆款复刻真实输入尚未启用', 409, 'CONFLICT');
+  }
 
   async hasEffectConfirmedStageArtifact(
     projectId: string,
@@ -835,6 +860,17 @@ export class WorkflowWorkingRepository {
   }
 
   async activateNode(projectId: string, workflowRunId: string, nodeId: string) {
+    const existing = await this.findRun(projectId, workflowRunId);
+    if (existing?.workflowSpace === 'FISSION_CLONE' || nodeId.startsWith('CLONE_')) {
+      this.assertCloneEnabled();
+      return this.prisma.$transaction(async (tx) => {
+        await lockCloneRun(tx, projectId, workflowRunId, { writable: true, nodeId });
+        return tx.workflowRun.update({
+          where: { id: workflowRunId },
+          data: { currentNodeId: nodeId, lastActiveAt: new Date() },
+        });
+      });
+    }
     const updated = await this.prisma.workflowRun.updateMany({
       where: {
         id: workflowRunId,
@@ -862,6 +898,36 @@ export class WorkflowWorkingRepository {
         where: { id: workflowRunId, projectId, status: { in: [...openRunStatuses] } },
       });
       if (!run) throw new Error('WORKFLOW_RUN_NOT_FOUND');
+      const isClone = run.workflowSpace === 'FISSION_CLONE' || nodeId.startsWith('CLONE_');
+      if (isClone) {
+        this.assertCloneEnabled();
+        await lockCloneRun(transaction, projectId, workflowRunId, { writable: true, nodeId });
+        if (nodeId === 'CLONE_INPUT') {
+          if (schemaVersion !== 1)
+            throw new ApiHttpException('复刻输入草稿版本无效', 400, 'VALIDATION_ERROR');
+          state = await validateCloneInputUploads(transaction, projectId, workflowRunId, state);
+          contentHash = workflowStateHash(state);
+        } else if (nodeId === 'CLONE_ANALYSIS' || nodeId === 'CLONE_MAPPING') {
+          if (!this.cloneG2Enabled())
+            throw new ApiHttpException(
+              '深度拆解与元素映射尚未启用',
+              409,
+              'CLONE_CAPABILITY_UNAVAILABLE',
+            );
+          if (schemaVersion !== 1)
+            throw new ApiHttpException('复刻节点草稿版本无效', 400, 'VALIDATION_ERROR');
+          state = await validateCloneG2DraftInTransaction(
+            transaction,
+            projectId,
+            workflowRunId,
+            nodeId,
+            state,
+          );
+          contentHash = workflowStateHash(state);
+        } else {
+          throw new ApiHttpException('该复刻节点尚未开放编辑', 409, 'CLONE_CAPABILITY_UNAVAILABLE');
+        }
+      }
       if (run.workflow === 'CUSTOMIZED') {
         await lockCustomizedProject(transaction, projectId);
         const selected = await transaction.workflowRun.findFirst({
@@ -890,6 +956,9 @@ export class WorkflowWorkingRepository {
       const current = await transaction.workflowNodeState.findUnique({
         where: { projectId_workflowRunId_nodeId: { projectId, workflowRunId, nodeId } },
       });
+      // Even an identical late save must not bypass the editing fence after pause/resume.
+      if (isClone && expectedRevision !== (current?.revision ?? 0))
+        return { record: current as WorkflowNodeState, unchanged: false, conflict: true };
       const contentUnchanged = Boolean(
         current &&
         (current.contentHash === contentHash || workflowStateHash(current.state) === contentHash),
@@ -904,12 +973,13 @@ export class WorkflowWorkingRepository {
           where: { id: current.id },
           data: { executionInputHash, executionInputSchemaVersion },
         });
-        await this.markNodeDependentsStaleInTransaction(
-          transaction,
-          projectId,
-          workflowRunId,
-          nodeId,
-        );
+        if (!isClone)
+          await this.markNodeDependentsStaleInTransaction(
+            transaction,
+            projectId,
+            workflowRunId,
+            nodeId,
+          );
         return { record, unchanged: true, conflict: false };
       }
       if (current) {
@@ -945,7 +1015,7 @@ export class WorkflowWorkingRepository {
           where: { id: workflowRunId },
           data: { currentNodeId: nodeId, lastActiveAt: new Date() },
         });
-        if (current.executionInputHash !== executionInputHash)
+        if (!isClone && current.executionInputHash !== executionInputHash)
           await this.markNodeDependentsStaleInTransaction(
             transaction,
             projectId,
@@ -1484,7 +1554,21 @@ export class WorkflowWorkingRepository {
     });
   }
 
-  pauseRun(projectId: string, workflowRunId: string) {
+  async pauseRun(projectId: string, workflowRunId: string, input: WorkflowPauseRunRequest = {}) {
+    const run = await this.findRun(projectId, workflowRunId);
+    if (run?.workflowSpace === 'FISSION_CLONE')
+      return this.prisma.$transaction(async (tx) => {
+        await lockCloneRun(tx, projectId, workflowRunId);
+        const drafts = await tx.workflowNodeState.findMany({
+          where: { projectId, workflowRunId },
+          select: { nodeId: true, revision: true },
+        });
+        assertClonePauseRevisions(input, drafts);
+        return tx.workflowRun.updateMany({
+          where: { projectId, id: workflowRunId, status: { in: [...openRunStatuses] } },
+          data: { status: 'PAUSED', lastActiveAt: new Date() },
+        });
+      });
     return this.prisma.workflowRun.updateMany({
       where: { projectId, id: workflowRunId, status: { in: [...openRunStatuses] } },
       data: { status: 'PAUSED', lastActiveAt: new Date() },
@@ -1727,7 +1811,29 @@ export class WorkflowWorkingRepository {
       const packagingFiles = await transaction.effectPackagingFile.count({
         where: { projectId, fileObjectId },
       });
-      if (artifactLinks + revisionLinks + materials + uploadItems + packagingFiles === 0)
+      const cloneUploads = this.cloneEnabled()
+        ? await transaction.fissionCloneUpload.count({
+            where: { projectId, fileObjectId, status: { in: ['UPLOADING', 'AVAILABLE'] } },
+          })
+        : run.workflowSpace === 'FISSION_CLONE'
+          ? 1
+          : 0;
+      const cloneG2Holds = this.cloneG2Enabled()
+        ? (await transaction.fissionCloneFileHold.count({ where: { projectId, fileObjectId } })) +
+          (await transaction.fissionCloneMappingFile.count({ where: { projectId, fileObjectId } }))
+        : run.workflowSpace === 'FISSION_CLONE'
+          ? 1
+          : 0;
+      if (
+        artifactLinks +
+          revisionLinks +
+          materials +
+          uploadItems +
+          packagingFiles +
+          cloneUploads +
+          cloneG2Holds ===
+        0
+      )
         orphanedFileObjectIds.push(fileObjectId);
     }
     if (orphanedFileObjectIds.length)
@@ -2325,10 +2431,19 @@ export class WorkflowWorkingRepository {
             where: {
               projectId,
               id: { in: fileObjectIds },
+              artifactLinks: { none: {} },
+              materials: { none: {} },
+              uploadItems: { none: { session: { status: 'UPLOADING' } } },
               packagingFiles: { none: {} },
               revisionLinks: { none: {} },
               finalOutputItems: { none: {} },
               voicePreviews: { none: {} },
+              ...(this.cloneEnabled()
+                ? { cloneUploads: { none: { status: { in: ['UPLOADING', 'AVAILABLE'] } } } }
+                : { NOT: { nodeId: 'CLONE_INPUT' } }),
+              ...(this.cloneG2Enabled()
+                ? { cloneFileHolds: { none: {} }, cloneMappingFiles: { none: {} } }
+                : { workflowRun: { workflowSpace: { not: 'FISSION_CLONE' } } }),
             },
             data: { status: 'ORPHANED', orphanedAt: new Date() },
           });

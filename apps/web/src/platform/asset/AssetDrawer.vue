@@ -376,6 +376,7 @@ onBeforeUnmount(() => {
               :workflow="workflow"
               :space="space"
               :current-project="currentProject"
+              :current-workflow="initialWorkflow"
               @resume-node="emit('resumeNode', $event)"
             />
             <section v-else class="project-library" :aria-busy="loading">

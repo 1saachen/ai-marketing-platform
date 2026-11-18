@@ -1,0 +1,224 @@
+{
+  "capturedAt": "2026-11-11T03:45:05.172Z",
+  "database": "clone_g1_browser_20261111",
+  "queryMode": "REPEATABLE READ READ ONLY",
+  "projects": [
+    {
+      "project": {
+        "id": "9a2f267d-1c7b-4892-86f5-9399a9fbf0f1",
+        "name": "复刻G1隔离验收A"
+      },
+      "runs": [
+        {
+          "id": "c1df85e3-2e5e-46a9-baf7-2e70e8327976",
+          "status": "ACTIVE",
+          "workflow": "FISSION",
+          "workflowSpace": "FISSION_CLONE",
+          "currentNodeId": "CLONE_INPUT"
+        }
+      ],
+      "drafts": [
+        {
+          "workflowRunId": "c1df85e3-2e5e-46a9-baf7-2e70e8327976",
+          "nodeId": "CLONE_INPUT",
+          "revision": 12,
+          "productName": "验收用绿色方块包装",
+          "referenceUploadId": "4896dbbe-c3d3-4a17-aa95-6a26045894d9",
+          "productUploadIds": [
+            "60a9dbf2-7fd9-49ea-8139-e94874509cb0",
+            "63a51e70-b8bc-4fbe-ad80-ac26c0a75ea2"
+          ],
+          "sourceRightsConfirmed": "true"
+        }
+      ],
+      "artifacts": [
+        {
+          "id": "f9126a03-b713-4c7d-9fc5-1b4bc1c00888",
+          "workflowRunId": "c1df85e3-2e5e-46a9-baf7-2e70e8327976",
+          "artifactKey": "clone-input",
+          "revision": 5,
+          "freshness": "CURRENT",
+          "availability": "AVAILABLE",
+          "productName": "验收用绿色方块包装",
+          "referenceUploadId": "4896dbbe-c3d3-4a17-aa95-6a26045894d9",
+          "productUploadIds": [
+            "60a9dbf2-7fd9-49ea-8139-e94874509cb0",
+            "63a51e70-b8bc-4fbe-ad80-ac26c0a75ea2"
+          ],
+          "fileCount": 3
+        }
+      ],
+      "uploads": [
+        {
+          "id": "a3d6268d-213c-4169-b09a-af3fe2a91417",
+          "workflowRunId": "c1df85e3-2e5e-46a9-baf7-2e70e8327976",
+          "role": null,
+          "status": "FAILED",
+          "fileObjectId": null,
+          "sourceAssetId": null,
+          "sourceAssetVersion": null,
+          "fileStatus": null,
+          "fileScopeMatches": null
+        },
+        {
+          "id": "91c48afb-516a-481d-9481-e5bf27a12efa",
+          "workflowRunId": "c1df85e3-2e5e-46a9-baf7-2e70e8327976",
+          "role": "REFERENCE",
+          "status": "AVAILABLE",
+          "fileObjectId": "667b1d33-9811-492a-be4b-1e41c0ecbc74",
+          "sourceAssetId": null,
+          "sourceAssetVersion": null,
+          "fileStatus": "AVAILABLE",
+          "fileScopeMatches": true
+        },
+        {
+          "id": "60a9dbf2-7fd9-49ea-8139-e94874509cb0",
+          "workflowRunId": "c1df85e3-2e5e-46a9-baf7-2e70e8327976",
+          "role": "PRODUCT",
+          "status": "AVAILABLE",
+          "fileObjectId": "bdc087d2-d0de-460a-8440-df72e1b40d26",
+          "sourceAssetId": null,
+          "sourceAssetVersion": null,
+          "fileStatus": "AVAILABLE",
+          "fileScopeMatches": true
+        },
+        {
+          "id": "4896dbbe-c3d3-4a17-aa95-6a26045894d9",
+          "workflowRunId": "c1df85e3-2e5e-46a9-baf7-2e70e8327976",
+          "role": "REFERENCE",
+          "status": "AVAILABLE",
+          "fileObjectId": "1d0f1cb1-6f4c-4fc7-9539-2ed487b5f076",
+          "sourceAssetId": "ced30b4d-e586-4c64-976e-b9ad82057906",
+          "sourceAssetVersion": 2,
+          "fileStatus": "AVAILABLE",
+          "fileScopeMatches": true
+        },
+        {
+          "id": "63a51e70-b8bc-4fbe-ad80-ac26c0a75ea2",
+          "workflowRunId": "c1df85e3-2e5e-46a9-baf7-2e70e8327976",
+          "role": "PRODUCT",
+          "status": "AVAILABLE",
+          "fileObjectId": "54353f99-25f0-4909-949e-431e6caee4b1",
+          "sourceAssetId": "7719ac41-963c-40c5-ba2a-eba87d905ee7",
+          "sourceAssetVersion": 1,
+          "fileStatus": "AVAILABLE",
+          "fileScopeMatches": true
+        }
+      ],
+      "artifactFiles": [
+        {
+          "workingArtifactId": "f9126a03-b713-4c7d-9fc5-1b4bc1c00888",
+          "fileObjectId": "1d0f1cb1-6f4c-4fc7-9539-2ed487b5f076",
+          "role": "REFERENCE",
+          "sortOrder": 0,
+          "fileScopeMatches": true
+        },
+        {
+          "workingArtifactId": "f9126a03-b713-4c7d-9fc5-1b4bc1c00888",
+          "fileObjectId": "bdc087d2-d0de-460a-8440-df72e1b40d26",
+          "role": "PRODUCT",
+          "sortOrder": 1,
+          "fileScopeMatches": true
+        },
+        {
+          "workingArtifactId": "f9126a03-b713-4c7d-9fc5-1b4bc1c00888",
+          "fileObjectId": "54353f99-25f0-4909-949e-431e6caee4b1",
+          "role": "PRODUCT",
+          "sortOrder": 2,
+          "fileScopeMatches": true
+        }
+      ],
+      "assets": [
+        {
+          "id": "ced30b4d-e586-4c64-976e-b9ad82057906",
+          "name": "QA资产参考视频",
+          "currentVersion": 2,
+          "status": "AVAILABLE"
+        },
+        {
+          "id": "7719ac41-963c-40c5-ba2a-eba87d905ee7",
+          "name": "QA资产商品图",
+          "currentVersion": 1,
+          "status": "AVAILABLE"
+        }
+      ],
+      "taskCounts": {
+        "job_outbox": 0,
+        "effect_extraction_runs": 0,
+        "effect_prompt_runs": 0,
+        "effect_segment_render_batches": 0,
+        "effect_segment_render_tasks": 0,
+        "effect_template_mix_ai_runs": 0,
+        "effect_packaging_runs": 0,
+        "effect_final_output_runs": 0,
+        "effect_voice_previews": 0,
+        "customized_extraction_tasks": 0,
+        "customized_storyboard_tasks": 0,
+        "customized_production_tasks": 0
+      }
+    },
+    {
+      "project": {
+        "id": "bfc1e1fc-e1aa-4576-9a21-53aeb918b320",
+        "name": "复刻G1隔离验收B"
+      },
+      "runs": [
+        {
+          "id": "7ed3a9bb-a473-4476-804d-6bb40a53aefe",
+          "status": "PAUSED",
+          "workflow": "FISSION",
+          "workflowSpace": "FISSION_CLONE",
+          "currentNodeId": "CLONE_INPUT"
+        }
+      ],
+      "drafts": [
+        {
+          "workflowRunId": "7ed3a9bb-a473-4476-804d-6bb40a53aefe",
+          "nodeId": "CLONE_INPUT",
+          "revision": 1,
+          "productName": "",
+          "referenceUploadId": null,
+          "productUploadIds": [],
+          "sourceRightsConfirmed": "false"
+        }
+      ],
+      "artifacts": [],
+      "uploads": [],
+      "artifactFiles": [],
+      "assets": [],
+      "taskCounts": {
+        "job_outbox": 0,
+        "effect_extraction_runs": 0,
+        "effect_prompt_runs": 0,
+        "effect_segment_render_batches": 0,
+        "effect_segment_render_tasks": 0,
+        "effect_template_mix_ai_runs": 0,
+        "effect_packaging_runs": 0,
+        "effect_final_output_runs": 0,
+        "effect_voice_previews": 0,
+        "customized_extraction_tasks": 0,
+        "customized_storyboard_tasks": 0,
+        "customized_production_tasks": 0
+      }
+    }
+  ],
+  "allCounts": {
+    "totalAssets": 2,
+    "totalOutbox": 0
+  },
+  "globalTaskCounts": {
+    "job_outbox": 0,
+    "effect_extraction_runs": 0,
+    "effect_prompt_runs": 0,
+    "effect_segment_render_batches": 0,
+    "effect_segment_render_tasks": 0,
+    "effect_template_mix_ai_runs": 0,
+    "effect_packaging_runs": 0,
+    "effect_final_output_runs": 0,
+    "effect_voice_previews": 0,
+    "customized_extraction_tasks": 0,
+    "customized_storyboard_tasks": 0,
+    "customized_production_tasks": 0
+  },
+  "servicesKeptRunning": true
+}

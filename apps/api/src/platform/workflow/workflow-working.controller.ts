@@ -22,6 +22,7 @@ import type {
   PutWorkflowNodeStateData,
   WorkingArtifactListData,
   WorkflowNodeState,
+  WorkflowPauseRunRequest,
   WorkflowRunOverviewData,
 } from '@ai-marketing/contracts';
 import {
@@ -234,8 +235,9 @@ export class WorkflowWorkingController {
   pauseRun(
     @Param('projectId', new ParseUUIDPipe({ version: '4' })) projectId: string,
     @Param('workflowRunId', new ParseUUIDPipe({ version: '4' })) workflowRunId: string,
+    @Body() body?: WorkflowPauseRunRequest,
   ) {
-    return this.service.pauseRun(projectId, workflowRunId);
+    return this.service.pauseRun(projectId, workflowRunId, body);
   }
 
   @Get('file-objects/:fileObjectId/content')

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-clone-generation-variant-draft.schema.json",
+  "type": "object",
+  "properties": {
+    "variants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "variantId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+          },
+          "elementId": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,79}$"
+          },
+          "dimension": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1
+          },
+          "direction": {
+            "type": "string",
+            "maxLength": 240,
+            "minLength": 1
+          }
+        },
+        "required": ["variantId", "elementId", "dimension", "direction"],
+        "additionalProperties": false
+      },
+      "minItems": 3,
+      "maxItems": 20
+    }
+  },
+  "required": ["variants"],
+  "additionalProperties": false
+}
