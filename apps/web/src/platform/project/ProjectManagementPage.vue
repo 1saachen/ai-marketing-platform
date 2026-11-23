@@ -74,6 +74,7 @@ const fissionNode = ref<{
   workflowRunId: string;
   cloneDraftRevision: number | null;
   cloneDraftRevisions?: Record<string, number> | null;
+  localReplaceDraftRevision?: number | null;
 } | null>(null);
 const fissionInitialModule = ref<'clone' | 'avatar' | 'replace' | ''>('');
 const fissionModuleForSpace = (space: AssetWorkflowSpace) =>

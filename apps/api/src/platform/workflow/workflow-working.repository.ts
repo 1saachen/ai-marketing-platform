@@ -36,6 +36,7 @@ import {
   lockCloneRun,
   validateCloneInputUploads,
 } from './fission-clone-scope';
+import { LOCAL_REPLACE_DRAFT_NODE, lockLocalReplaceRun } from './fission-local-replace-scope';
 import { validateCloneG2DraftInTransaction } from '../../workflows/fission/clone/clone-draft-scope';
 import { Prisma, type WorkflowNodeState } from '../../generated/prisma/client';
 import { PrismaService } from '../../database/prisma.service';
@@ -861,6 +862,8 @@ export class WorkflowWorkingRepository {
 
   async activateNode(projectId: string, workflowRunId: string, nodeId: string) {
     const existing = await this.findRun(projectId, workflowRunId);
+    if (existing?.workflowSpace === 'FISSION_LOCAL_REPLACE' || nodeId.startsWith('LOCAL_REPLACE_'))
+      throw new ApiHttpException('请在局部替换工作台切换节点', 400, 'VALIDATION_ERROR');
     if (existing?.workflowSpace === 'FISSION_CLONE' || nodeId.startsWith('CLONE_')) {
       this.assertCloneEnabled();
       return this.prisma.$transaction(async (tx) => {
@@ -898,6 +901,8 @@ export class WorkflowWorkingRepository {
         where: { id: workflowRunId, projectId, status: { in: [...openRunStatuses] } },
       });
       if (!run) throw new Error('WORKFLOW_RUN_NOT_FOUND');
+      if (run.workflowSpace === 'FISSION_LOCAL_REPLACE' || nodeId.startsWith('LOCAL_REPLACE_'))
+        throw new ApiHttpException('请在局部替换工作台保存草稿', 400, 'VALIDATION_ERROR');
       const isClone = run.workflowSpace === 'FISSION_CLONE' || nodeId.startsWith('CLONE_');
       if (isClone) {
         this.assertCloneEnabled();
@@ -1556,6 +1561,26 @@ export class WorkflowWorkingRepository {
 
   async pauseRun(projectId: string, workflowRunId: string, input: WorkflowPauseRunRequest = {}) {
     const run = await this.findRun(projectId, workflowRunId);
+    if (run?.workflowSpace === 'FISSION_LOCAL_REPLACE')
+      return this.prisma.$transaction(async (tx) => {
+        const ids = { projectId, workflowRunId };
+        await lockLocalReplaceRun(tx, ids);
+        const draft = await tx.workflowNodeState.findUnique({
+          where: { projectId_workflowRunId_nodeId: { ...ids, nodeId: LOCAL_REPLACE_DRAFT_NODE } },
+          select: { revision: true },
+        });
+        if (!draft || input?.expectedLocalReplaceDraftRevision !== draft.revision)
+          throw new ApiHttpException('局部替换草稿已变化，请刷新后再退出', 409, 'CONFLICT');
+        return tx.workflowRun.updateMany({
+          where: {
+            projectId,
+            id: workflowRunId,
+            activeKey: 'ACTIVE',
+            status: { in: [...openRunStatuses] },
+          },
+          data: { status: 'PAUSED', lastActiveAt: new Date() },
+        });
+      });
     if (run?.workflowSpace === 'FISSION_CLONE')
       return this.prisma.$transaction(async (tx) => {
         await lockCloneRun(tx, projectId, workflowRunId);

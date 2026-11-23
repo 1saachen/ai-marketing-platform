@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { GitBranch, Replace, UserRound } from '@lucide/vue';
-import { computed, inject, nextTick, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, inject, nextTick, ref, watch } from 'vue';
 import { projectContextKey } from '../../../platform/project/project-context';
-import LocalReplaceWorkspace from '../local-replace/LocalReplaceWorkspace.vue';
+import LocalReplaceRealWorkspace from '../local-replace/LocalReplaceRealWorkspace.vue';
 import FissionCloneWorkspace from '../clone/FissionCloneWorkspace.vue';
 import AvatarWorkspace from '../avatar/AvatarWorkspace.vue';
 const props = withDefaults(
@@ -20,6 +20,10 @@ const props = withDefaults(
   },
 );
 const savedModule = localStorage.getItem('ai-marketing.fission.active-module');
+const localReplacePreview = import.meta.env.DEV && props.preview;
+const LocalReplaceMockWorkspace = localReplacePreview
+  ? defineAsyncComponent(() => import('../local-replace/LocalReplaceWorkspace.vue'))
+  : null;
 const projectContext = inject(projectContextKey, null);
 const active = ref(
   props.initialModule ||
@@ -28,7 +32,11 @@ const active = ref(
 watch(active, (value) => localStorage.setItem('ai-marketing.fission.active-module', value));
 const cloneWorkspace = ref<InstanceType<typeof FissionCloneWorkspace>>();
 const avatarWorkspace = ref<InstanceType<typeof AvatarWorkspace>>();
-const workspace = ref<InstanceType<typeof LocalReplaceWorkspace>>();
+const workspace = ref<{
+  flushPendingEdits: () => Promise<boolean> | boolean;
+  workflowRunId?: string;
+  draftRevision?: number | null;
+}>();
 const switching = ref(false);
 const switchError = ref('');
 const activeWorkspace = computed(() =>
@@ -66,13 +74,20 @@ defineExpose({
   flushPendingEdits,
   selectModule,
   workflowRunId: computed(() =>
-    active.value === 'clone' ? (cloneWorkspace.value?.workflowRunId ?? '') : '',
+    active.value === 'clone'
+      ? (cloneWorkspace.value?.workflowRunId ?? '')
+      : active.value === 'replace'
+        ? (workspace.value?.workflowRunId ?? '')
+        : '',
   ),
   cloneDraftRevision: computed(() =>
     active.value === 'clone' ? (cloneWorkspace.value?.cloneDraftRevision ?? null) : null,
   ),
   cloneDraftRevisions: computed(() =>
     active.value === 'clone' ? (cloneWorkspace.value?.cloneDraftRevisions ?? null) : null,
+  ),
+  localReplaceDraftRevision: computed(() =>
+    active.value === 'replace' ? (workspace.value?.draftRevision ?? null) : null,
   ),
   resumeWorkflowNode: async (nodeId: string) => {
     if (!nodeId.startsWith('CLONE_') || !(await selectModule('clone'))) return false;
@@ -108,7 +123,7 @@ defineExpose({
         @click="selectModule('replace')"
       >
         <i><Replace :size="21" /></i
-        ><span><b>局部元素替换</b><small>精细替换 · 一致性校验 · 快速变体</small></span
+        ><span><b>局部元素替换</b><small>选择原片与时间范围 · 替换选中对象</small></span
         ><em>›</em>
       </button>
     </nav>
@@ -118,13 +133,21 @@ defineExpose({
       ref="cloneWorkspace"
       :key="projectId || 'clone-preview'"
     />
-    <LocalReplaceWorkspace
-      v-else-if="active === 'replace'"
+    <component
+      :is="LocalReplaceMockWorkspace"
+      v-else-if="active === 'replace' && LocalReplaceMockWorkspace"
       ref="workspace"
       :key="projectId || 'preview'"
       :project-id="projectId"
       :project-name="projectName"
-      :preview="preview"
+      preview
+    />
+    <LocalReplaceRealWorkspace
+      v-else-if="active === 'replace'"
+      ref="workspace"
+      :key="projectId || 'unbound'"
+      :project-id="projectId"
+      :project-name="projectName"
     />
     <AvatarWorkspace
       v-else-if="active === 'avatar'"

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-local-replace-worker-input.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "model": {
+      "type": "string",
+      "maxLength": 160,
+      "minLength": 1
+    },
+    "sourceMimeType": {
+      "type": "string",
+      "enum": [
+        "video/mp4",
+        "video/quicktime"
+      ]
+    },
+    "targetMimeType": {
+      "type": "string",
+      "enum": [
+        "image/jpeg",
+        "image/png",
+        "image/webp"
+      ]
+    },
+    "sourceSizeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200000000
+    },
+    "targetSizeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4194304
+    },
+    "startMs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 14999
+    },
+    "endMs": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 15000
+    },
+    "objectType": {
+      "type": "string",
+      "enum": [
+        "PRODUCT",
+        "PROP"
+      ]
+    },
+    "objectDescription": {
+      "type": "string",
+      "maxLength": 500,
+      "minLength": 1
+    },
+    "instruction": {
+      "type": "string",
+      "maxLength": 1200
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "model",
+    "sourceMimeType",
+    "targetMimeType",
+    "sourceSizeBytes",
+    "targetSizeBytes",
+    "startMs",
+    "endMs",
+    "objectType",
+    "objectDescription",
+    "instruction"
+  ],
+  "additionalProperties": false
+}

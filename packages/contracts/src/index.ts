@@ -91,3 +91,4 @@ export * from './customized-update';
 export * from './fission-clone';
 export * from './fission-clone-analysis';
 export * from './fission-clone-generation';
+export * from './fission-local-replace';

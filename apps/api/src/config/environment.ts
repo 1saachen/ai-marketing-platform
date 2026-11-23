@@ -27,6 +27,10 @@ export type EnvironmentVariables = {
   FISSION_CLONE_TASK_LEASE_SECONDS: number;
   FISSION_CLONE_FFMPEG_PATH: string | undefined;
   FISSION_CLONE_FFPROBE_PATH: string | undefined;
+  FISSION_LOCAL_REPLACE_ENABLED: boolean;
+  FISSION_LOCAL_REPLACE_WORKER_TOKEN: string | undefined;
+  FISSION_LOCAL_REPLACE_MODEL: string | undefined;
+  FISSION_LOCAL_REPLACE_FFPROBE_PATH: string | undefined;
   WORKING_FILE_CLEANUP_GRACE_HOURS: number;
   DATABASE_URL: string;
   REDIS_URL: string;
@@ -210,6 +214,14 @@ export const validateEnvironment = (raw: Record<string, unknown>): EnvironmentVa
     ),
     FISSION_CLONE_FFMPEG_PATH: optionalString(raw.FISSION_CLONE_FFMPEG_PATH),
     FISSION_CLONE_FFPROBE_PATH: optionalString(raw.FISSION_CLONE_FFPROBE_PATH),
+    FISSION_LOCAL_REPLACE_ENABLED: parseBoolean(
+      raw.FISSION_LOCAL_REPLACE_ENABLED,
+      'FISSION_LOCAL_REPLACE_ENABLED',
+      false,
+    ),
+    FISSION_LOCAL_REPLACE_WORKER_TOKEN: optionalString(raw.FISSION_LOCAL_REPLACE_WORKER_TOKEN),
+    FISSION_LOCAL_REPLACE_MODEL: optionalString(raw.FISSION_LOCAL_REPLACE_MODEL),
+    FISSION_LOCAL_REPLACE_FFPROBE_PATH: optionalString(raw.FISSION_LOCAL_REPLACE_FFPROBE_PATH),
     LOCAL_STORAGE_ROOT: optionalString(raw.LOCAL_STORAGE_ROOT),
     MAX_UPLOAD_BYTES: parsePositiveInteger(
       raw.MAX_UPLOAD_BYTES,

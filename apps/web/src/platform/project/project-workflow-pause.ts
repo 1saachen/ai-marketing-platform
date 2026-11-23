@@ -5,6 +5,7 @@ export type PausableWorkflowNode = {
   workflowRunId: string;
   cloneDraftRevision?: number | null;
   cloneDraftRevisions?: Record<string, number> | null;
+  localReplaceDraftRevision?: number | null;
 };
 
 /** Read the pause precondition after every pending draft write has completed. */
@@ -15,6 +16,7 @@ export async function flushAndPauseWorkflowRun(projectId: string, node: Pausable
   if (!workflowRunId) return;
   const revision = node.cloneDraftRevision;
   const revisions = node.cloneDraftRevisions;
+  const localRevision = node.localReplaceDraftRevision;
   await pauseWorkflowRun(
     projectId,
     workflowRunId,
@@ -22,6 +24,8 @@ export async function flushAndPauseWorkflowRun(projectId: string, node: Pausable
       ? { expectedCloneDraftRevisions: { ...revisions } }
       : typeof revision === 'number'
         ? { expectedCloneDraftRevision: revision }
-        : undefined,
+        : typeof localRevision === 'number'
+          ? { expectedLocalReplaceDraftRevision: localRevision }
+          : undefined,
   );
 }

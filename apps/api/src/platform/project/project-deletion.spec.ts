@@ -42,7 +42,7 @@ const restricted = [
   'asset',
 ];
 
-function fixture(busy?: string, cloneEnabled = false) {
+function fixture(busy?: string, cloneEnabled = false, localReplaceEnabled = false) {
   const tx: Record<string, any> = {
     $queryRaw: vi.fn().mockImplementation(async (query: { sql?: string }) => {
       if (query.sql?.includes('WITH refs')) return [{ key: 'owned-file' }];
@@ -85,6 +85,7 @@ function fixture(busy?: string, cloneEnabled = false) {
     'fissionCloneTaskStep',
     'fissionCloneFileHold',
     'fissionCloneMappingFile',
+    'fissionLocalReplaceTask',
   ]))
     tx[model] = {
       count: vi.fn().mockResolvedValue(model === busy ? 1 : 0),
@@ -98,7 +99,14 @@ function fixture(busy?: string, cloneEnabled = false) {
         project: tx.project,
         projectDeletionCleanup: tx.projectDeletionCleanup,
       } as PrismaService,
-      { get: () => cloneEnabled } as unknown as ConfigService,
+      {
+        get: (key: string) => {
+          if (key === 'FISSION_LOCAL_REPLACE_ENABLED') return localReplaceEnabled;
+          return (
+            ['FISSION_CLONE_ENABLED', 'FISSION_CLONE_G2_ENABLED'].includes(key) && cloneEnabled
+          );
+        },
+      } as unknown as ConfigService,
     ),
   };
 }
@@ -168,6 +176,26 @@ describe('permanent project deletion', () => {
     });
     expect(tx.fissionCloneTask.count).toHaveBeenCalledWith({
       where: { projectId: 'project-a', status: { in: ['QUEUED', 'RUNNING'] } },
+    });
+    expect(tx.project.delete).not.toHaveBeenCalled();
+  });
+
+  it('checks local replace task activity and unknown creations only after enabling the workflow', async () => {
+    const disabled = fixture();
+    await expect(disabled.repository.remove('project-a', 'lease')).resolves.toBe(true);
+    expect(disabled.tx.fissionLocalReplaceTask.count).not.toHaveBeenCalled();
+    const { repository, tx } = fixture('fissionLocalReplaceTask', false, true);
+    await expect(repository.remove('project-a', 'lease')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROJECT_BUSY' }),
+    });
+    expect(tx.fissionLocalReplaceTask.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-a',
+        OR: [
+          { status: { in: ['QUEUED', 'RUNNING'] } },
+          { providerCreationPending: true, providerTaskId: null },
+        ],
+      },
     });
     expect(tx.project.delete).not.toHaveBeenCalled();
   });

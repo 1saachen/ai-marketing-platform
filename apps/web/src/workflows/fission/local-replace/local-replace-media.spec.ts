@@ -43,4 +43,9 @@ describe('local replacement media synchronization', () => {
     expect(writes).toBe(1);
     expect(position).toBe(4.1);
   });
+  it('seeks to the exact selected boundary when a small explicit seek is requested', () => {
+    const video = { readyState: 1, duration: 4, currentTime: 1.02 };
+    seekLocalVideo(video, 1, 0);
+    expect(video.currentTime).toBe(1);
+  });
 });

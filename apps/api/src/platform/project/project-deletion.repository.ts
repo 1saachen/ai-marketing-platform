@@ -43,6 +43,7 @@ async function assertProjectInactive(
   projectId: string,
   cloneEnabled: boolean,
   cloneG2Enabled: boolean,
+  localReplaceEnabled: boolean,
 ): Promise<void> {
   // A disabled pre-migration deployment must not query a table that may not exist.
   // If clone data already exists, retain it until the feature's cleanup is enabled again.
@@ -55,6 +56,11 @@ async function assertProjectInactive(
       409,
       'PROJECT_BUSY',
     );
+  if (
+    !localReplaceEnabled &&
+    (await tx.workflowRun.count({ where: { projectId, workflowSpace: 'FISSION_LOCAL_REPLACE' } }))
+  )
+    throw new ApiHttpException('项目包含局部替换工作区，请启用服务后再删除', 409, 'PROJECT_BUSY');
   const active = { projectId, status: { in: ['QUEUED', 'RUNNING'] } };
   const enumActive = {
     projectId,
@@ -62,6 +68,19 @@ async function assertProjectInactive(
   };
   const now = new Date();
   const counts = await Promise.all([
+    ...(localReplaceEnabled
+      ? [
+          tx.fissionLocalReplaceTask.count({
+            where: {
+              projectId,
+              OR: [
+                { status: active.status },
+                { providerCreationPending: true, providerTaskId: null },
+              ],
+            },
+          }),
+        ]
+      : []),
     ...(cloneG2Enabled ? [tx.fissionCloneTask.count({ where: active })] : []),
     ...(cloneEnabled
       ? [
@@ -130,6 +149,10 @@ export class ProjectDeletionRepository {
     return this.cloneEnabled() && this.config?.get<boolean>('FISSION_CLONE_G2_ENABLED') === true;
   }
 
+  private localReplaceEnabled() {
+    return this.config?.get<boolean>('FISSION_LOCAL_REPLACE_ENABLED') === true;
+  }
+
   async enqueue(projectId: string): Promise<DeleteProjectResult> {
     await this.prisma.$transaction(
       async (tx) => {
@@ -138,7 +161,13 @@ export class ProjectDeletionRepository {
         if (!locked.length) return;
         const queued = await tx.projectDeletionCleanup.findUnique({ where: { projectId } });
         if (queued && queued.status !== 'FAILED') return;
-        await assertProjectInactive(tx, projectId, this.cloneEnabled(), this.cloneG2Enabled());
+        await assertProjectInactive(
+          tx,
+          projectId,
+          this.cloneEnabled(),
+          this.cloneG2Enabled(),
+          this.localReplaceEnabled(),
+        );
         const project = await tx.project.findUniqueOrThrow({
           where: { id: projectId },
           include: {
@@ -254,13 +283,20 @@ export class ProjectDeletionRepository {
           ...activityTables,
           ...(this.cloneEnabled() ? ['fission_clone_uploads'] : []),
           ...(this.cloneG2Enabled() ? ['fission_clone_tasks'] : []),
+          ...(this.localReplaceEnabled() ? ['fission_local_replace_tasks'] : []),
         ]) {
           await tx.$queryRaw(
             Prisma.sql`SELECT id FROM ${Prisma.raw(`"${table}"`)} WHERE "projectId" = ${projectId}::uuid FOR UPDATE`,
           );
         }
         const scope = { projectId };
-        await assertProjectInactive(tx, projectId, this.cloneEnabled(), this.cloneG2Enabled());
+        await assertProjectInactive(
+          tx,
+          projectId,
+          this.cloneEnabled(),
+          this.cloneG2Enabled(),
+          this.localReplaceEnabled(),
+        );
 
         const owned = await tx.$queryRaw<{ key: string }[]>(Prisma.sql`
         WITH refs AS (${storageReferences})

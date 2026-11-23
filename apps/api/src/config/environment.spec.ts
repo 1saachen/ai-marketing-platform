@@ -43,6 +43,24 @@ describe('validateEnvironment', () => {
       validateEnvironment({ ...validEnvironment, FISSION_CLONE_ENABLED: 'yes' }),
     ).toThrow('FISSION_CLONE_ENABLED');
   });
+  it('supports explicit local replacement opt-in and independent model configuration', () => {
+    expect(validateEnvironment(validEnvironment).FISSION_LOCAL_REPLACE_ENABLED).toBe(false);
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        FISSION_LOCAL_REPLACE_ENABLED: 'true',
+        FISSION_LOCAL_REPLACE_WORKER_TOKEN: 'local-replace-test-token',
+        FISSION_LOCAL_REPLACE_MODEL: 'local-replace-test-model',
+      }),
+    ).toMatchObject({
+      FISSION_LOCAL_REPLACE_ENABLED: true,
+      FISSION_LOCAL_REPLACE_WORKER_TOKEN: 'local-replace-test-token',
+      FISSION_LOCAL_REPLACE_MODEL: 'local-replace-test-model',
+    });
+    expect(() =>
+      validateEnvironment({ ...validEnvironment, FISSION_LOCAL_REPLACE_ENABLED: 'yes' }),
+    ).toThrow('FISSION_LOCAL_REPLACE_ENABLED');
+  });
   it('keeps the asset worker credential independent', () => {
     expect(
       validateEnvironment({

@@ -391,6 +391,28 @@ services:
     cpus: '1.0'
     mem_limit: 1400m
 
+  fission-local-replace-worker:
+    profiles: ['fission-local-replace']
+    build:
+      context: .
+      dockerfile: workers/fission-local-replace/Dockerfile
+    environment:
+      INTERNAL_API_BASE_URL: http://host.docker.internal:${API_PORT:-3000}/api
+      FISSION_LOCAL_REPLACE_WORKER_TOKEN: ${FISSION_LOCAL_REPLACE_WORKER_TOKEN:-}
+      FISSION_LOCAL_REPLACE_TIMEOUT_SECONDS: ${FISSION_LOCAL_REPLACE_TIMEOUT_SECONDS:-900}
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=800m,mode=1777
+    cpus: '1.0'
+    mem_limit: 1400m
+
 volumes:
   postgres-data:
   redis-data:

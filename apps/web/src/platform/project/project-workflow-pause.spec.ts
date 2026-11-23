@@ -73,6 +73,26 @@ describe('project workflow pause precondition', () => {
     expect((fetchMock.mock.calls[0]?.[1] as RequestInit).body).toBeUndefined();
   });
 
+  it('sends the local replacement draft revision only after it is saved', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(ok());
+    vi.stubGlobal('fetch', fetchMock);
+    let revision = 0;
+    await flushAndPauseWorkflowRun('project-a', {
+      flushPendingEdits: async () => {
+        revision = 1;
+        return true;
+      },
+      workflowRunId: 'run-replace',
+      get localReplaceDraftRevision() {
+        return revision;
+      },
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toContain('/workflow-runs/run-replace/pause');
+    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)).toEqual({
+      expectedLocalReplaceDraftRevision: 1,
+    });
+  });
+
   it('does not send pause before a failed flush or without a real Run', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);

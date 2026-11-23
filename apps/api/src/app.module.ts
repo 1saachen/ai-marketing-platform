@@ -20,6 +20,7 @@ import { EffectSourceImportModule } from './workflows/effect/source-import/effec
 import { EffectTemplateMixModule } from './workflows/effect/template-mix/effect-template-mix.module';
 import { CustomizedSourceImportModule } from './workflows/customized/source-import/customized-source-import.module';
 import { CloneModule } from './workflows/fission/clone/clone.module';
+import { LocalReplaceModule } from './workflows/fission/local-replace/local-replace.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { CloneModule } from './workflows/fission/clone/clone.module';
     AssetModule,
     WorkflowModule,
     CloneModule,
+    LocalReplaceModule,
     EffectSourceImportModule,
     CustomizedSourceImportModule,
     CustomizedExtractionModule,

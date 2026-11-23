@@ -1,13 +1,41 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import zlib
 from dataclasses import dataclass
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 import httpx
 
 ProgressCallback = Callable[[int, str | None], Awaitable[None]]
+
+def image_reference(mime_type: str, content: bytes) -> dict[str, Any]:
+    return {
+        "type": "image_url",
+        "role": "reference_image",
+        "image_url": {
+            "url": f"data:{mime_type};base64,{base64.b64encode(content).decode('ascii')}"
+        },
+    }
+
+
+def video_reference(url: str) -> dict[str, Any]:
+    source = urlsplit(url)
+    if (
+        source.scheme != "https"
+        or not source.hostname
+        or source.username is not None
+        or source.password is not None
+    ):
+        raise ValueError("invalid provider source address")
+    return {
+        "type": "video_url",
+        "role": "reference_video",
+        "video_url": {"url": url},
+    }
+
 
 class _EvenRateLimiter:
     def __init__(self, rate_per_second: float) -> None:

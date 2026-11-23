@@ -14,6 +14,8 @@ export type WorkflowPauseRunRequest = {
   expectedCloneDraftRevision?: number;
   /** G2: all existing Clone node editing revisions, read after pending edits have flushed. */
   expectedCloneDraftRevisions?: Record<string, number>;
+  /** Latest saved local replacement draft editing revision. */
+  expectedLocalReplaceDraftRevision?: number;
 };
 
 export const WORKING_ARTIFACT_KINDS = ['FILE', 'STRUCTURED'] as const;

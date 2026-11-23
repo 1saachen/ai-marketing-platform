@@ -568,6 +568,36 @@ services:
         max-size: 10m
         max-file: '3'
 
+  fission-local-replace-worker:
+    profiles: ['fission-local-replace']
+    image: richi-marketing-fission-local-replace-worker:${FISSION_LOCAL_REPLACE_RELEASE_TAG:-${RELEASE_TAG:-current}}
+    build:
+      context: .
+      dockerfile: workers/fission-local-replace/Dockerfile
+    environment:
+      INTERNAL_API_BASE_URL: http://api:3000/api
+      FISSION_LOCAL_REPLACE_WORKER_TOKEN: ${FISSION_LOCAL_REPLACE_WORKER_TOKEN:-}
+      FISSION_LOCAL_REPLACE_TIMEOUT_SECONDS: ${FISSION_LOCAL_REPLACE_TIMEOUT_SECONDS:-900}
+      RABBITMQ_URL: ${RABBITMQ_URL:?required}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=800m,mode=1777
+    cpus: '1.0'
+    mem_limit: 1400m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
 volumes:
   postgres-data: null
   redis-data: null

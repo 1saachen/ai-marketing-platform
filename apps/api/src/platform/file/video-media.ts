@@ -53,6 +53,7 @@ export type ImportVideoMetadata = {
   height: number;
   frameRate: number | null;
   mimeType: string;
+  hasAudio?: boolean;
 };
 
 export function parseImportVideoMetadata(
@@ -114,6 +115,7 @@ export function parseImportVideoMetadata(
     width: video.width!,
     height: video.height!,
     frameRate: parseAverageFrameRate(video.avg_frame_rate),
+    hasAudio: probe.streams?.some((stream) => stream.codec_type === 'audio') ?? false,
     mimeType:
       extension === '.webm' ? 'video/webm' : extension === '.mov' ? 'video/quicktime' : 'video/mp4',
   };
@@ -131,13 +133,14 @@ export async function inspectImportVideo(
   path: string,
   fileName: string,
   limits = { minSeconds: 4, maxSeconds: 30 },
+  ffprobe = 'ffprobe',
 ): Promise<ImportVideoMetadata> {
   if (extname(fileName).toLowerCase() === '.webm' && !(await isWebM(path)))
     throw new Error('视频实际格式与扩展名不符，仅支持 MP4、MOV、WebM');
   let stdout: string;
   try {
     ({ stdout } = await execute(
-      'ffprobe',
+      ffprobe,
       [
         '-v',
         'error',

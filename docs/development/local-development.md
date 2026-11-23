@@ -151,6 +151,16 @@ docker compose --profile fission-clone-generation build fission-clone-generation
 
 该 profile 的消费者接收真实付费任务。启动前核对调用授权、模型部署和活动任务。[成片生成 Worker](../../workers/fission-clone-generation/README.md)
 
+## 局部元素替换 Worker
+
+API 先应用局部元素替换迁移，再启用 `FISSION_LOCAL_REPLACE_ENABLED`。设置 `FISSION_LOCAL_REPLACE_MODEL`，API 和 Worker 使用同一个独立 `FISSION_LOCAL_REPLACE_WORKER_TOKEN`。真实供应商读取原片使用私有 TOS 短期地址。Worker 使用独立 `fission-local-replace` profile、RabbitMQ 及 Ark 配置。
+
+```powershell
+docker compose --profile fission-local-replace build fission-local-replace-worker
+```
+
+隔离验证与 Worker 运行环境见[局部元素替换 Worker](../../workers/fission-local-replace/README.md)。启动真实消费者前确认环境和已有队列状态。
+
 ## 服务器部署
 
 独立生产 Compose、运营测试入口、备份及更新方式见[服务器部署说明](server-deployment.md)。本地开发继续使用本指南的开发服务和原有 Compose profile。
