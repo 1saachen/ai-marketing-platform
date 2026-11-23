@@ -141,7 +141,7 @@ docker compose --profile fission-clone-analysis up -d --no-deps fission-clone-an
 
 ## 爆款复刻成片生成 Worker
 
-`FISSION_CLONE_G3_ENABLED` 默认关闭。启用前按 G1/G2 顺序应用迁移，再应用 `20261116100000_fission_clone_generation_operation` 和 `20261116110000_fission_clone_generation_batch`。API 配置 `FISSION_CLONE_GENERATION_MODEL` 和 `FISSION_CLONE_REVIEW_MODEL`；API 和 Worker 使用相同的独立 `FISSION_CLONE_GENERATION_WORKER_TOKEN`。Worker 使用 Ark 与 RabbitMQ，并通过内部 API 处理文件和回调。
+`FISSION_CLONE_G3_ENABLED` 默认关闭。启用前按 G1/G2 顺序应用迁移，再应用 `20261116100000_fission_clone_generation_operation` 和 `20261116110000_fission_clone_generation_batch`。API 配置 `FISSION_CLONE_GENERATION_MODEL` 和 `FISSION_CLONE_REVIEW_MODEL`，并使用可签发私有读取地址的 TOS 存储。API 和 Worker 使用相同的独立 `FISSION_CLONE_GENERATION_WORKER_TOKEN`。Worker 使用 Ark 与 RabbitMQ，并通过内部 API 上传和签取当前镜头的参考片段。
 
 三至二十条成片需要额外应用 `20261117120000_fission_clone_generation_slots`，部署包含批次规划契约的生成 Worker，再为 API 设置可用的 `FISSION_CLONE_PLANNING_MODEL`。该模型需支持 Responses 结构化输出。配置空缺时仍可执行 G3 一至两条。停止接收新批次时先关闭规划模型配置，等待已经冻结模型的排队及运行任务结束，再替换旧镜像或处理迁移。
 

@@ -1,11 +1,18 @@
 import asyncio
 import copy
+import json
 from datetime import UTC, datetime
 
 import pytest
 from ai_runtime.http import InternalApiError
 from ai_runtime.responses import ProviderError
-from fission_clone_analysis.media import Frame, MediaLimits, Sample
+from fission_clone_analysis.media import (
+    Frame,
+    MediaLimits,
+    Sample,
+    frame_times,
+    sample_video as probe_and_sample,
+)
 from fission_clone_analysis.pipeline import (
     CHECKPOINT_KEY,
     Pipeline,
@@ -68,7 +75,8 @@ class FakeProvider:
 
 @pytest.fixture(autouse=True)
 def synthetic_media(monkeypatch):
-    async def sample_video(source, directory, limits):
+    async def sample_video(source, directory, limits, *, frozen_media):
+        assert frozen_media["durationMs"] == 3000
         return Sample(3000, 360, 640, True, (Frame(0, b"jpeg"), Frame(1500, b"jpeg")))
 
     monkeypatch.setattr("fission_clone_analysis.pipeline.sample_video", sample_video)
@@ -89,6 +97,64 @@ async def test_complete_follows_checkpoint_and_temp_cleanup(claim, report, mappi
     assert "fail" not in paths
 
 
+@pytest.mark.parametrize("version", [2, 3, 4])
+async def test_motion_task_uses_dense_sampling_without_changing_frozen_frame_budget(
+    claim, motion_report, mapping, monkeypatch, version
+):
+    async def sample_video(source, directory, limits, *, frozen_media):
+        assert frozen_media == {"durationMs": 3000, "width": 360, "height": 640, "frameRate": 24}
+        assert limits.interval_ms == 500 and limits.max_frames == 12
+        assert frame_times(4000, limits) == list(range(0, 3801, 475))
+        return Sample(
+            3000, 360, 640, True, (Frame(0, b"jpeg"), Frame(500, b"jpeg"), Frame(1500, b"jpeg"))
+        )
+
+    monkeypatch.setattr("fission_clone_analysis.pipeline.sample_video", sample_video)
+    claim["snapshot"]["analysisInstructionVersion"] = version
+    api, provider = FakeApi(claim), FakeProvider(motion_report, mapping)
+    await process_task(api, provider, MediaLimits(max_frames=12))
+    assert api.calls[-1][1] == "complete"
+    assert provider.calls == ["analyze"]
+
+
+@pytest.mark.parametrize(
+    "media_update, message",
+    [
+        ({"durationMs": 4043}, "参考视频时长与已确认来源不一致"),
+        ({"durationMs": 4000, "width": 361}, "参考视频尺寸与已确认来源不一致"),
+        ({"durationMs": None}, "已确认的参考视频媒体信息无效"),
+    ],
+)
+async def test_frozen_media_mismatch_fails_before_sampling_or_provider(
+    claim, report, mapping, monkeypatch, media_update, message
+):
+    reference = claim["snapshot"]["input"]["files"][0]
+    reference["media"].update(media_update)
+
+    async def probe(args, timeout):
+        assert args[0] == "ffprobe"
+        return json.dumps(
+            {
+                "streams": [
+                    {"codec_type": "video", "width": 360, "height": 640, "duration": "4"}
+                ],
+                "format": {"duration": "4.042"},
+            }
+        ).encode()
+
+    monkeypatch.setattr("fission_clone_analysis.pipeline.sample_video", probe_and_sample)
+    monkeypatch.setattr("fission_clone_analysis.media.run_process", probe)
+    api, provider = FakeApi(claim), FakeProvider(report, mapping)
+    await process_task(api, provider, MediaLimits())
+    assert api.downloads and not provider.calls
+    assert not {"checkpoints", "complete"}.intersection(path for _, path, _ in api.calls)
+    assert api.calls[-1] == (
+        "POST",
+        "fail",
+        {"code": "CLONE_RESULT_INVALID", "message": message, "retryable": False},
+    )
+
+
 async def test_valid_checkpoint_skips_model_and_media_calls(claim, report, mapping):
     claim["checkpoints"] = [
         {
@@ -101,6 +167,77 @@ async def test_valid_checkpoint_skips_model_and_media_calls(claim, report, mappi
     await process_task(api, provider, MediaLimits())
     assert not provider.calls and not api.downloads
     assert api.calls[-1][1] == "complete"
+
+
+@pytest.mark.parametrize(
+    "path,status,resumed",
+    [("checkpoints", 409, False), ("complete", 400, False), ("complete", 409, True)],
+)
+async def test_rejected_analysis_result_marks_live_attempt_failed(
+    claim, report, mapping, path, status, resumed
+):
+    class RejectResult(FakeApi):
+        async def call(self, method, route, value=None):
+            result = await super().call(method, route, value)
+            if route == path:
+                raise InternalApiError("invalid report", retryable=False, status_code=status)
+            if route == "fail":
+                assert self.token == claim["attemptToken"]
+            return result
+
+    if resumed:
+        claim["checkpoints"] = [
+            {
+                "key": CHECKPOINT_KEY,
+                "inputHash": claim["inputHash"],
+                "output": {"operation": "ANALYZE", "report": report},
+            }
+        ]
+    api, provider = RejectResult(claim), FakeProvider(report, mapping)
+    await process_task(api, provider, MediaLimits())
+    assert [route for _, route, _ in api.calls][-2:] == [path, "fail"]
+    assert api.calls[-1][2]["code"] == "CLONE_RESULT_INVALID"
+    assert api.calls[-1][2]["retryable"] is False
+    assert provider.calls == ([] if resumed else ["analyze"])
+
+
+@pytest.mark.parametrize("failure_status", [404, 409])
+async def test_result_conflict_cannot_fail_an_expired_or_cancelled_attempt(
+    claim, report, mapping, failure_status
+):
+    class LostLease(FakeApi):
+        async def call(self, method, path, value=None):
+            result = await super().call(method, path, value)
+            if path == "checkpoints":
+                raise InternalApiError("lost lease", retryable=False, status_code=409)
+            if path == "fail":
+                assert self.token == claim["attemptToken"]
+                raise InternalApiError(
+                    "inactive attempt", retryable=False, status_code=failure_status
+                )
+            return result
+
+    api = LostLease(claim)
+    await process_task(api, FakeProvider(report, mapping), MediaLimits())
+    assert [path for _, path, _ in api.calls][-2:] == ["checkpoints", "fail"]
+    assert "complete" not in [path for _, path, _ in api.calls]
+
+
+@pytest.mark.parametrize("version", [2, 3, 4])
+async def test_new_task_cannot_restore_checkpoint_without_motion(claim, report, mapping, version):
+    claim["snapshot"]["analysisInstructionVersion"] = version
+    claim["checkpoints"] = [
+        {
+            "key": CHECKPOINT_KEY,
+            "inputHash": claim["inputHash"],
+            "output": {"operation": "ANALYZE", "report": report},
+        }
+    ]
+    api, provider = FakeApi(claim), FakeProvider(report, mapping)
+    await process_task(api, provider, MediaLimits())
+    assert not provider.calls and not api.downloads
+    assert "complete" not in [path for _, path, _ in api.calls]
+    assert api.calls[-1][1] == "fail"
 
 
 async def test_checkpoint_from_other_input_is_not_reused(claim, report, mapping):
@@ -178,13 +315,18 @@ async def test_lease_loss_cancels_active_provider_without_failure_write(
     assert not api.downloads[0][1].parent.exists()
 
 
+@pytest.mark.parametrize("offline_path", ["claim", "checkpoints"])
 async def test_transient_internal_api_failure_is_not_turned_into_model_failure(
-    claim, report, mapping
+    claim, report, mapping, offline_path
 ):
     class Offline(FakeApi):
         async def call(self, method, path, value=None):
-            raise InternalApiError("offline", retryable=True, status_code=503)
+            result = await super().call(method, path, value)
+            if path == offline_path:
+                raise InternalApiError("offline", retryable=True, status_code=503)
+            return result
 
     api = Offline(claim)
     with pytest.raises(InternalApiError):
         await process_task(api, FakeProvider(report, mapping), MediaLimits())
+    assert "fail" not in [path for _, path, _ in api.calls]

@@ -3,8 +3,10 @@ import { Inject, Injectable } from '@nestjs/common';
 import {
   CLONE_MAPPING_ARTIFACT_KEY,
   CLONE_GENERATION_LIMITS,
+  CLONE_SHOT_REFERENCE_MODE,
   cloneBatchArtifactKey,
   cloneVideoArtifactKey,
+  parseCloneGenerationReview,
   parseCloneGenerationVariantDraft,
   parseCloneGenerationVariantReview,
   type CloneArtifactRef,
@@ -16,6 +18,7 @@ import {
   type CloneGenerationReceipt,
   type CloneGenerationRenderCheckpoint,
   type CloneGenerationReview,
+  type CloneGenerationReviewIssue,
   type CloneGenerationSnapshot,
   type CloneGenerationTask,
   type CloneGenerationCheckpoint,
@@ -35,7 +38,8 @@ import {
 } from '../../../platform/workflow/workflow-working.repository';
 import { CloneTaskRepository } from './clone-task.repository';
 import { loadCloneGenerationPlan } from './clone-generation-source';
-import { summarizeCloneGenerationPlan } from './clone-generation-plan';
+import { cloneReferenceSlotIndex, summarizeCloneGenerationPlan } from './clone-generation-plan';
+import { assertCloneShotReferenceStorage } from './clone-generation-config';
 import { freezeCloneBatchExport } from './clone-generation-export';
 import { assertNoActiveCloneTasks, cloneArtifactRef, cloneConflict } from './clone-task-scope';
 import {
@@ -58,6 +62,7 @@ import {
 const json = (value: unknown) => value as Prisma.InputJsonValue;
 const PLAN_DRAFT = 'VARIANT_PLAN_V1';
 const PLAN_REVIEW = 'VARIANT_REVIEW_V1';
+const REVIEW_STEP = 'REVIEW_V1';
 export const cloneArchiveOperationKey = (artifact: { id: string; revision: number }) =>
   `clone-final:${artifact.id}:${artifact.revision}`;
 const taskWhere = (task: FissionCloneTask) => ({
@@ -83,6 +88,65 @@ const STAGES: Record<string, string> = {
   FAILED: '处理失败',
   CANCELLED: '任务已取消',
 };
+const renderSlots = (plan: CloneGenerationPlan) =>
+  plan.mode === 'SEEDANCE_2_0_SOURCE_EDIT' ? [0] : Array.from(plan.shots.keys());
+
+function matchesAcceptedGeneration(plan: CloneGenerationPlan, input: CloneGenerationCreateRequest) {
+  const totals = summarizeCloneGenerationPlan(plan, input.count);
+  return (
+    totals.totalRenderSeconds === input.acceptedRenderSeconds &&
+    totals.totalReferenceFrames === input.acceptedReferenceFrames
+  );
+}
+
+function reviewCoversFrozenShots(plan: CloneGenerationPlan, review: CloneGenerationReview) {
+  const { shots, fpsNumerator, fpsDenominator } = plan.timeline;
+  const timeUnits = 1000 * fpsDenominator;
+  return (
+    review.checks.length === shots.length &&
+    review.checks.every((check, index) => {
+      const shot = shots[index]!;
+      const frames = new Set([
+        shot.startFrame,
+        Math.floor((shot.startFrame + shot.endFrame - 1) / 2),
+        shot.endFrame - 1,
+      ]);
+      for (const event of plan.shots[index]?.motion?.events ?? []) {
+        const time = event.evidenceFramesMs[Math.floor((event.evidenceFramesMs.length - 1) / 2)]!;
+        const offset = Math.floor((2 * time * fpsNumerator + timeUnits) / (2 * timeUnits));
+        frames.add(Math.min(shot.endFrame - 1, shot.startFrame + offset));
+      }
+      return (
+        check.shotId === shot.shotId &&
+        new Set(check.evidenceFrames).size === check.evidenceFrames.length &&
+        check.evidenceFrames.every((frame) => frames.has(frame))
+      );
+    })
+  );
+}
+
+function projectReviewIssues(
+  plan: CloneGenerationPlan,
+  inputHash: string,
+  checkpoint?: { inputHash: string; outputHash: string; output: unknown },
+): CloneGenerationReviewIssue[] {
+  if (
+    !checkpoint ||
+    checkpoint.inputHash !== inputHash ||
+    workflowStateHash(checkpoint.output) !== checkpoint.outputHash
+  )
+    return [];
+  try {
+    const review = parseCloneGenerationReview(checkpoint.output);
+    if (!reviewCoversFrozenShots(plan, review)) return [];
+    return review.checks.flatMap(({ verdict, reason, evidenceFrames }, index) =>
+      verdict === 'PASSED' ? [] : [{ shotNumber: index + 1, verdict, reason, evidenceFrames }],
+    );
+  } catch (error) {
+    if (error instanceof TypeError) return [];
+    throw error;
+  }
+}
 
 @Injectable()
 export class CloneGenerationRepository {
@@ -96,7 +160,10 @@ export class CloneGenerationRepository {
     projectId: string,
     workflowRunId: string,
     input: CloneGenerationCreateRequest,
-    models: Pick<CloneGenerationSnapshot, 'model' | 'reviewModel'> & { planningModel?: string },
+    models: Pick<CloneGenerationSnapshot, 'model' | 'reviewModel'> & {
+      planningModel?: string;
+      sourceVideoSigningAvailable: boolean;
+    },
   ): Promise<CloneGenerationReceipt> {
     return this.db.$transaction(async (tx) => {
       await lockCloneRun(tx, projectId, workflowRunId, { writable: true });
@@ -116,8 +183,7 @@ export class CloneGenerationRepository {
         if (
           count !== input.count ||
           workflowStateHash(plan.sources.mapping) !== workflowStateHash(input.sourceMapping) ||
-          summarizeCloneGenerationPlan(plan, input.count).totalRenderSeconds !==
-            input.acceptedRenderSeconds
+          !matchesAcceptedGeneration(plan, input)
         )
           cloneConflict('同一请求编号对应不同的生成条件');
         if (batch?.planningModel) return { taskId: existing.id, batchId: existing.id };
@@ -144,12 +210,10 @@ export class CloneGenerationRepository {
       });
       if (unknown) cloneConflict('此工作流有供应商创建结果待核查，暂不能再次生成');
       const plan = await loadCloneGenerationPlan(tx, projectId, workflowRunId, input.sourceMapping);
+      assertCloneShotReferenceStorage(models.sourceVideoSigningAvailable);
       requireClonePlanningCapability(plan, input.count, models.planningModel);
-      if (
-        summarizeCloneGenerationPlan(plan, input.count).totalRenderSeconds !==
-        input.acceptedRenderSeconds
-      )
-        cloneConflict('生成条件已变化，请重新检查并确认');
+      if (!matchesAcceptedGeneration(plan, input))
+        cloneConflict('生成条件已变化，请重新预检并确认视频参考和输出计量');
       const frozen = { plan, model: models.model, reviewModel: models.reviewModel };
       const planning = input.count > CLONE_GENERATION_LIMITS.maxUnplannedCount;
       const batchSnapshot = {
@@ -158,6 +222,7 @@ export class CloneGenerationRepository {
         ...(planning && {
           planningModel: models.planningModel!,
           planningVersion: 2,
+          sampleFirst: true,
           variantIds: Array.from({ length: input.count }, () => randomUUID()),
         }),
       };
@@ -178,7 +243,7 @@ export class CloneGenerationRepository {
             })
           : null;
       if (planning && parent) {
-        await this.holdImages(tx, parent, plan);
+        await this.holdInputs(tx, parent, plan);
         await this.tasks.enqueue(tx, parent);
         return { taskId: parent.id, batchId: parent.id };
       }
@@ -197,13 +262,13 @@ export class CloneGenerationRepository {
     });
   }
 
-  private holdImages(
+  private holdInputs(
     tx: Prisma.TransactionClient,
     task: FissionCloneTask,
     plan: CloneGenerationPlan,
   ) {
     return tx.fissionCloneFileHold.createMany({
-      data: plan.images.map((file) => ({
+      data: [...plan.images, ...(plan.sourceVideo ? [plan.sourceVideo] : [])].map((file) => ({
         ...taskWhere(task),
         fileObjectId: file.fileObjectId,
         sha256: file.sha256,
@@ -229,7 +294,7 @@ export class CloneGenerationRepository {
         inputHash: workflowStateHash(snapshot),
       },
     });
-    await this.holdImages(tx, task, plan);
+    await this.holdInputs(tx, task, plan);
     await this.tasks.enqueue(tx, task);
     return task;
   }
@@ -258,6 +323,16 @@ export class CloneGenerationRepository {
       const rows = heads.flatMap((head) =>
         head.operation === 'GENERATE_BATCH' ? head.generationChildren : [head],
       );
+      const failedIds = rows
+        .filter((row) => row.operation === 'GENERATE' && row.status === 'FAILED')
+        .map((row) => row.id);
+      const reviewSteps = failedIds.length
+        ? await tx.fissionCloneTaskStep.findMany({
+            where: { projectId, workflowRunId, taskId: { in: failedIds }, stepKey: REVIEW_STEP },
+            select: { taskId: true, inputHash: true, outputHash: true, output: true },
+          })
+        : [];
+      const reviewByTask = new Map(reviewSteps.map((step) => [step.taskId, step]));
       const manifests = await tx.workingArtifact.findMany({
         where: {
           projectId,
@@ -277,7 +352,7 @@ export class CloneGenerationRepository {
         const planning = items.length === 0 ? generationBatchSnapshot(head) : null;
         const manifest = byManifestKey.get(cloneBatchArtifactKey(head.id));
         let status = head.status as CloneGenerationBatch['status'];
-        if (head.currentStage === 'PLANNED') {
+        if (['SAMPLE', 'PLANNED'].includes(head.currentStage)) {
           if (items.some((item) => item.status === 'RUNNING')) status = 'RUNNING';
           else if (items.some((item) => item.status === 'QUEUED')) status = 'QUEUED';
           else status = items.some((item) => item.status === 'SUCCEEDED') ? 'PARTIAL' : 'FAILED';
@@ -285,10 +360,14 @@ export class CloneGenerationRepository {
         return {
           id: head.id,
           taskIds: items.map((item) => item.id),
+          count: head.operation === 'GENERATE_BATCH' ? generationBatchSnapshot(head).count : 1,
           status,
           canCancel:
-            head.currentStage === 'PLANNED' ||
+            ['SAMPLE', 'PLANNED'].includes(head.currentStage) ||
             (planning !== null && ['QUEUED', 'RUNNING', 'FAILED'].includes(head.status)),
+          ...(head.currentStage === 'SAMPLE' && {
+            sample: { totalCount: generationBatchSnapshot(head).count },
+          }),
           ...(manifest && {
             downloadUrl:
               `/api/projects/${projectId}/workflow-runs/${workflowRunId}/fission-clone/generation` +
@@ -330,13 +409,18 @@ export class CloneGenerationRepository {
       const items = rows.map((task): CloneGenerationTask => {
         const { variantId, plan } = generationSnapshot(task);
         const artifact = byKey.get(cloneVideoArtifactKey(variantId));
+        const reviewIssues = projectReviewIssues(plan, task.inputHash, reviewByTask.get(task.id));
         return {
           id: task.id,
           variantId,
           status: task.status as CloneGenerationTask['status'],
           progress: task.progress,
-          message: STAGES[task.currentStage] ?? '处理中',
+          message:
+            task.currentStage === 'RENDER' && plan.mode === 'SEEDANCE_2_0_SOURCE_EDIT'
+              ? '编辑原片'
+              : (STAGES[task.currentStage] ?? '处理中'),
           error: task.errorMessage,
+          ...(reviewIssues.length > 0 && { reviewIssues }),
           canRetry: task.status === 'FAILED' && task.errorCode !== 'PERMANENT_FAILURE',
           createdAt: task.createdAt.toISOString(),
           artifact: artifact
@@ -505,33 +589,52 @@ export class CloneGenerationRepository {
         frozen.variantIds,
         parseCloneGenerationVariantReview(audited.output),
       );
-      for (const [index, variant] of draft.variants.entries()) {
-        const slot = index + 1;
-        await this.dispatchItem(
-          tx,
-          {
-            plan: compileCloneVariant(frozen.plan, variant),
-            variantId: variant.variantId,
-            model: frozen.model,
-            reviewModel: frozen.reviewModel,
-          },
-          `batch:${task.id}:${slot}`,
-          { id: task.id, slot },
-        );
-      }
+      await this.dispatchPlannedItems(
+        tx,
+        task,
+        frozen,
+        draft,
+        0,
+        frozen.sampleFirst ? 1 : frozen.count,
+      );
       await tx.fissionCloneTask.update({
         where: { id: task.id },
         data: {
           status: 'SUCCEEDED',
-          currentStage: 'PLANNED',
+          currentStage: frozen.sampleFirst ? 'SAMPLE' : 'PLANNED',
           progress: 100,
           leaseExpiresAt: null,
           completedAt: new Date(),
         },
       });
-      await releaseCloneTaskFiles(tx, task);
+      if (!frozen.sampleFirst) await releaseCloneTaskFiles(tx, task);
       return { accepted: true };
     });
+  }
+
+  private async dispatchPlannedItems(
+    tx: Prisma.TransactionClient,
+    parent: FissionCloneTask,
+    batch: ReturnType<typeof generationBatchSnapshot>,
+    draft: CloneGenerationVariantDraft,
+    start: number,
+    end: number,
+  ) {
+    for (let index = start; index < end; index++) {
+      const variant = draft.variants[index]!;
+      const slot = index + 1;
+      await this.dispatchItem(
+        tx,
+        {
+          plan: compileCloneVariant(batch.plan, variant),
+          variantId: variant.variantId,
+          model: batch.model,
+          reviewModel: batch.reviewModel,
+        },
+        `batch:${parent.id}:${slot}`,
+        { id: parent.id, slot },
+      );
+    }
   }
 
   private async block(tx: Prisma.TransactionClient, task: FissionCloneTask, message: string) {
@@ -588,11 +691,13 @@ export class CloneGenerationRepository {
   ) {
     return this.db.$transaction(async (tx) => {
       const task = await this.tasks.lease(tx, projectId, taskId, token, true);
-      if (!generationSnapshot(task).plan.shots[index]) cloneConflict('镜头不属于当前任务');
+      const { plan } = generationSnapshot(task);
+      if (!renderSlots(plan).includes(index)) cloneConflict('生成区间不属于当前任务');
       const key = `RENDER:${index}`;
       const previous = await this.step(tx, task, key);
       if (value.state === 'CREATE_PENDING') {
         if (previous) cloneConflict('镜头创建意图已登记，请核查原执行状态');
+        if (plan.mode === CLONE_SHOT_REFERENCE_MODE) await this.readShotReference(tx, task, index);
         await this.createStep(tx, task, token, key, value);
       } else {
         if (previous?.outputHash === workflowStateHash(value)) return { accepted: true };
@@ -606,6 +711,14 @@ export class CloneGenerationRepository {
           where: { id: previous.id },
           data: { output: json(value), outputHash: workflowStateHash(value) },
         });
+        if (value.state === 'CREATE_REJECTED')
+          await this.block(
+            tx,
+            task,
+            plan.mode === 'SEEDANCE_2_0_SOURCE_EDIT'
+              ? '供应商拒绝创建原片编辑任务，请核对参考视频和服务配置后重新生成'
+              : `供应商拒绝创建第 ${index + 1} 个镜头，请核对目标素材和服务配置后重新生成`,
+          );
       }
       return { accepted: true };
     });
@@ -613,14 +726,17 @@ export class CloneGenerationRepository {
 
   private async fileInput(tx: Prisma.TransactionClient, task: FissionCloneTask, slot: string) {
     const snapshot = generationSnapshot(task);
+    const referenceIndex = cloneReferenceSlotIndex(slot);
     if (slot === 'final') {
-      for (const index of snapshot.plan.shots.keys()) {
-        if (!(await this.step(tx, task, `FILE:${index}`))) cloneConflict('尚有镜头文件未保存');
+      for (const index of renderSlots(snapshot.plan)) {
+        if (!(await this.step(tx, task, `FILE:${index}`))) cloneConflict('尚有生成文件未保存');
       }
+    } else if (referenceIndex !== null) {
+      await this.assertShotReferenceAdmission(tx, task, referenceIndex);
     } else {
       const index = Number(slot);
-      if (!/^[0-3]$/.test(slot) || !snapshot.plan.shots[index])
-        cloneConflict('镜头文件不属于当前任务');
+      if (!/^[0-3]$/.test(slot) || !renderSlots(snapshot.plan).includes(index))
+        cloneConflict('生成文件不属于当前任务');
       const render = await this.step(tx, task, `RENDER:${index}`);
       if ((render?.output as { state?: string } | undefined)?.state !== 'CREATED')
         cloneConflict('镜头尚未记录供应商任务');
@@ -629,10 +745,83 @@ export class CloneGenerationRepository {
     return { snapshot, existing: existing?.output as CloneGenerationFile | undefined };
   }
 
+  private async assertShotReferenceAdmission(
+    tx: Prisma.TransactionClient,
+    task: FissionCloneTask,
+    index: number,
+  ) {
+    const { plan } = generationSnapshot(task);
+    if (
+      plan.mode !== CLONE_SHOT_REFERENCE_MODE ||
+      !Number.isSafeInteger(index) ||
+      !plan.shots[index]
+    )
+      cloneConflict('参考片段不属于当前任务');
+    if (await this.step(tx, task, `RENDER:${index}`))
+      cloneConflict('镜头创建意图已登记，请继续恢复已有任务');
+  }
+
+  private async readShotReference(
+    tx: Prisma.TransactionClient,
+    task: FissionCloneTask,
+    index: number,
+  ) {
+    const reference = (await this.step(tx, task, `FILE:reference-${index}`))?.output as
+      CloneGenerationFile | undefined;
+    if (!reference) cloneConflict('请先准备当前镜头的参考片段');
+    const hold = await tx.fissionCloneFileHold.findFirst({
+      where: { ...taskWhere(task), fileObjectId: reference.fileObjectId, sha256: reference.sha256 },
+      include: { fileObject: true },
+    });
+    const file = hold?.fileObject;
+    if (
+      !file ||
+      file.projectId !== task.projectId ||
+      file.workflowRunId !== task.workflowRunId ||
+      file.nodeId !== 'CLONE_GENERATION' ||
+      file.mimeType !== 'video/mp4' ||
+      file.status !== 'AVAILABLE' ||
+      file.sha256 !== reference.sha256 ||
+      file.sizeBytes !== reference.sizeBytes
+    )
+      cloneConflict('镜头参考片段的执行文件不可用');
+    return file;
+  }
+
+  shotReferenceForSigning(projectId: string, taskId: string, token: string, index: number) {
+    return this.db.$transaction(async (tx) => {
+      const task = await this.tasks.lease(tx, projectId, taskId, token, true);
+      await this.assertShotReferenceAdmission(tx, task, index);
+      const { storageKey, sizeBytes } = await this.readShotReference(tx, task, index);
+      return { storageKey, sizeBytes };
+    });
+  }
+
   fileAdmission(projectId: string, taskId: string, token: string, slot: string) {
     return this.db.$transaction(async (tx) => {
       const task = await this.tasks.lease(tx, projectId, taskId, token, true);
       return this.fileInput(tx, task, slot);
+    });
+  }
+
+  sourceVideoForSigning(projectId: string, taskId: string, token: string) {
+    return this.db.$transaction(async (tx) => {
+      const task = await this.tasks.lease(tx, projectId, taskId, token, true);
+      const { plan } = generationSnapshot(task);
+      if (plan.mode !== 'SEEDANCE_2_0_SOURCE_EDIT' || !plan.sourceVideo)
+        cloneConflict('当前任务不需要原片编辑签名');
+      if (await this.step(tx, task, 'RENDER:0'))
+        cloneConflict('原片编辑已登记创建，请继续恢复已有任务');
+      const file = await tx.fileObject.findFirst({
+        where: {
+          id: plan.sourceVideo.fileObjectId,
+          projectId,
+          workflowRunId: task.workflowRunId,
+        },
+        select: { storageKey: true, sizeBytes: true },
+      });
+      if (!file) cloneConflict('成片任务冻结原片不可用');
+      return file;
     });
   }
 
@@ -664,28 +853,12 @@ export class CloneGenerationRepository {
     return this.db.$transaction(async (tx) => {
       const task = await this.tasks.lease(tx, projectId, taskId, token, true);
       if (!(await this.step(tx, task, 'FILE:final'))) cloneConflict('成片尚未保存');
-      const shots = generationSnapshot(task).plan.timeline.shots;
-      if (
-        review.checks.length !== shots.length ||
-        review.checks.some((check, index) => {
-          const shot = shots[index]!;
-          const frames = new Set([
-            shot.startFrame,
-            Math.floor((shot.startFrame + shot.endFrame - 1) / 2),
-            shot.endFrame - 1,
-          ]);
-          return (
-            check.shotId !== shot.shotId ||
-            new Set(check.evidenceFrames).size !== check.evidenceFrames.length ||
-            check.evidenceFrames.some((frame) => !frames.has(frame))
-          );
-        })
-      )
+      if (!reviewCoversFrozenShots(generationSnapshot(task).plan, review))
         cloneConflict('审片证据未覆盖冻结镜头或引用了未抽样帧');
-      const previous = await this.step(tx, task, 'REVIEW_V1');
+      const previous = await this.step(tx, task, REVIEW_STEP);
       if (previous && previous.outputHash !== workflowStateHash(review))
         cloneConflict('审片检查点已保存');
-      if (!previous) await this.createStep(tx, task, token, 'REVIEW_V1', review);
+      if (!previous) await this.createStep(tx, task, token, REVIEW_STEP, review);
       return { accepted: true };
     });
   }
@@ -694,7 +867,7 @@ export class CloneGenerationRepository {
     const { plan, variantId } = generationSnapshot(task);
     const file = (await this.step(tx, task, 'FILE:final'))?.output as
       CloneGenerationFile | undefined;
-    const review = (await this.step(tx, task, 'REVIEW_V1'))?.output as
+    const review = (await this.step(tx, task, REVIEW_STEP))?.output as
       CloneGenerationReview | undefined;
     if (
       !file ||
@@ -736,7 +909,10 @@ export class CloneGenerationRepository {
       ratio: plan.ratio,
       review,
     };
-    const name = `${Array.from(plan.productName).slice(0, 92).join('')} · 复刻成片${task.generationSlot ? ` ${task.generationSlot}` : ''}`;
+    const label = plan.productName
+      ? `${Array.from(plan.productName).slice(0, 92).join('')} · `
+      : '';
+    const name = `${label}复刻成片${task.generationSlot ? ` ${task.generationSlot}` : ''}`;
     const input = {
       kind: 'FILE',
       name,
@@ -766,7 +942,10 @@ export class CloneGenerationRepository {
     const parent = await pendingGenerationBatch(tx, task.projectId, task.workflowRunId);
     if (!parent || parent.id !== task.generationParentId) cloneConflict('成片批次已结束');
     const batch = generationBatchSnapshot(parent);
-    const children = await requireGenerationChildren(tx, parent, batch.count);
+    const sample = parent.currentStage === 'SAMPLE';
+    if (sample && (!batch.sampleFirst || task.generationSlot !== 1))
+      cloneConflict('首条验证的派发范围无效');
+    const children = await requireGenerationChildren(tx, parent, sample ? 1 : batch.count);
     if (children.some((item) => item.status !== 'SUCCEEDED')) return;
 
     const planned = batch.planningModel ? await this.step(tx, parent, PLAN_DRAFT) : null;
@@ -775,6 +954,26 @@ export class CloneGenerationRepository {
     const draft = planned ? parseCloneGenerationVariantDraft(planned.output) : null;
     if (draft)
       validateCloneVariantDraft(batch.plan, batch.variantIds!, draft, batch.planningVersion);
+    if (sample) {
+      if (!draft) cloneConflict('首条验证缺少批次规划');
+      await verifyGenerationBatchSources(tx, parent);
+      const variant = draft.variants[0]!;
+      const expected: CloneGenerationSnapshot = {
+        plan: compileCloneVariant(batch.plan, variant),
+        variantId: variant.variantId,
+        model: batch.model,
+        reviewModel: batch.reviewModel,
+      };
+      if (workflowStateHash(expected) !== task.inputHash)
+        cloneConflict('首条验证的执行快照与批次规划不一致');
+      await this.dispatchPlannedItems(tx, parent, batch, draft, 1, batch.count);
+      await tx.fissionCloneTask.update({
+        where: { id: parent.id },
+        data: { currentStage: 'PLANNED' },
+      });
+      await releaseCloneTaskFiles(tx, parent);
+      return;
+    }
     const videos = [];
     for (const [index, item] of children.entries()) {
       const { plan, model, reviewModel } = await verifyGenerationSources(tx, item);

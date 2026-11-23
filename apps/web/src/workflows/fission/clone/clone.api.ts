@@ -91,7 +91,7 @@ export const confirmCloneInput = (
     method: 'POST',
     body,
     signal,
-    operation: '确认参考视频与商品资料',
+    operation: '确认参考视频',
   });
 
 export const createCloneTask = (

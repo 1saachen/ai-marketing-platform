@@ -3,6 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   CLONE_ANALYSIS_ARTIFACT_KEY,
+  CLONE_ANALYSIS_INSTRUCTION_VERSION,
   CLONE_INPUT_ARTIFACT_KEY,
   CLONE_MAPPING_ARTIFACT_KEY,
   CLONE_GENERATION_QUEUE,
@@ -23,6 +24,7 @@ import {
   type CloneKeepTextEvidence,
   type CloneMappingCandidate,
   type CloneMappingConfirmRequest,
+  type CloneMappingDraft,
   type CloneTask,
   type CloneTaskCheckpointRequest,
   type CloneTaskClaim,
@@ -77,6 +79,26 @@ const validateContract = (check: () => void) => {
       400,
       'VALIDATION_ERROR',
     );
+  }
+};
+const validatePropSuggestions = (mapping: CloneMappingDraft, snapshot: CloneTaskSnapshot) => {
+  const selected = new Map(
+    snapshot.mapping?.bindings
+      .filter((binding) => binding.type === 'prop')
+      .map((binding) => [binding.elementId, binding]),
+  );
+  const suggested = new Map(mapping.bindings.map((binding) => [binding.elementId, binding]));
+  for (const element of snapshot.analysis?.report.elements ?? []) {
+    if (element.type !== 'prop') continue;
+    const binding = suggested.get(element.elementId);
+    const original = selected.get(element.elementId);
+    if (
+      !binding ||
+      (original
+        ? workflowStateHash(binding) !== workflowStateHash(original)
+        : binding.action !== 'KEEP' || binding.target !== null)
+    )
+      cloneConflict('道具请按用户选择保留或替换，智能匹配不能擅自修改');
   }
 };
 const safeStages: Record<string, string> = {
@@ -454,14 +476,50 @@ export class CloneTaskRepository {
         });
         if (!row || candidate.file) cloneConflict('候选资产已发生变化，请重新匹配');
       }
+      const frozenCandidates = [...candidates];
+      if (request.purpose === 'SMART_MATCH') {
+        for (const binding of mapping?.bindings ?? []) {
+          const asset = binding.target?.asset;
+          if (
+            binding.type !== 'prop' ||
+            !asset ||
+            frozenCandidates.some(
+              (item) => item.assetId === asset.assetId && item.version === asset.version,
+            )
+          )
+            continue;
+          const version = await tx.assetVersion.findFirst({
+            where: {
+              projectId,
+              assetId: asset.assetId,
+              version: asset.version,
+              status: 'AVAILABLE',
+              asset: { archivedAt: null, status: 'AVAILABLE', hasFile: true },
+            },
+            include: { asset: true },
+          });
+          if (!version) cloneConflict('已选道具图片版本不可用，请重新选择');
+          frozenCandidates.push({
+            ...asset,
+            sourceVersionId: version.id,
+            name: version.asset.name,
+            type: version.asset.type,
+            mimeType: version.mimeType,
+            file: null,
+          });
+        }
+      }
       const snapshot: CloneTaskSnapshot = {
         schemaVersion: 1,
+        ...(operation === 'ANALYZE'
+          ? { analysisInstructionVersion: CLONE_ANALYSIS_INSTRUCTION_VERSION }
+          : {}),
         operation,
         purpose: request.purpose,
         input,
         analysis,
         mapping,
-        candidates,
+        candidates: frozenCandidates,
         expectedDraftRevision: request.expectedDraftRevision,
         expectedArtifactRevision: request.expectedArtifactRevision,
         model,
@@ -765,6 +823,7 @@ export class CloneTaskRepository {
       validateContract(() =>
         validateCloneMappingForReport(result.mapping, snapshot.analysis!.report),
       );
+      validatePropSuggestions(result.mapping, snapshot);
       if (
         completing &&
         !(await tx.fissionCloneTaskStep.findFirst({
@@ -811,6 +870,16 @@ export class CloneTaskRepository {
         result.report.frameHeight !== reference.media.height
       )
         cloneConflict('分析结果与冻结参考片规格不一致');
+      if (
+        snapshot.analysisInstructionVersion !== undefined &&
+        result.report.shots.some((shot) => !shot.motion)
+      )
+        cloneConflict('分析结果缺少镜头动作观察');
+      if (
+        (snapshot.analysisInstructionVersion ?? 0) < 4 &&
+        result.report.elements.some((element) => element.type === 'prop')
+      )
+        cloneConflict('分析结果的道具与冻结拆解版本不一致');
     } else if (result.purpose === 'SMART_MATCH') {
       if (
         !snapshot.analysis ||
@@ -822,6 +891,7 @@ export class CloneTaskRepository {
       validateContract(() =>
         validateCloneMappingForReport(result.mapping, snapshot.analysis!.report),
       );
+      validatePropSuggestions(result.mapping, snapshot);
       for (const binding of result.mapping.bindings)
         if (
           binding.target?.asset &&
@@ -1065,7 +1135,7 @@ export class CloneTaskRepository {
       if (task.status === 'CANCELLED') return;
       if (
         task.generationParentId ||
-        (task.operation === 'GENERATE_BATCH' && task.currentStage === 'PLANNED')
+        (task.operation === 'GENERATE_BATCH' && ['SAMPLE', 'PLANNED'].includes(task.currentStage))
       ) {
         const parent = await tx.fissionCloneTask.findFirst({
           where: {
@@ -1075,7 +1145,7 @@ export class CloneTaskRepository {
             operation: 'GENERATE_BATCH',
           },
         });
-        if (!parent || parent.currentStage !== 'PLANNED')
+        if (!parent || !['SAMPLE', 'PLANNED'].includes(parent.currentStage))
           cloneConflict('只有未交付的成片批次可以取消');
         const children = await generationChildren(tx, parent);
         await tx.fissionCloneTask.updateMany({
@@ -1095,6 +1165,7 @@ export class CloneTaskRepository {
           },
         });
         for (const item of children) await releaseCloneTaskFiles(tx, item);
+        await releaseCloneTaskFiles(tx, parent);
         return;
       }
       if (!['QUEUED', 'RUNNING', 'FAILED'].includes(task.status))

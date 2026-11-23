@@ -4,9 +4,14 @@ import { createReadStream } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import type { ConfigService } from '@nestjs/config';
-import { CLONE_GENERATION_MAX_FILE_BYTES, type CloneGenerationPlan } from '@ai-marketing/contracts';
+import {
+  CLONE_GENERATION_MAX_FILE_BYTES,
+  CLONE_SHOT_REFERENCE_MODE,
+  type CloneGenerationPlan,
+} from '@ai-marketing/contracts';
 import type { UploadedAssetFile } from '../../../platform/asset/asset.service';
 import { ApiHttpException } from '../../../common/api-http-exception';
+import { cloneReferenceSlotIndex } from './clone-generation-plan';
 
 const execute = promisify(execFile);
 const mov = ['-protocol_whitelist', 'file,pipe', '-f', 'mov', '-enable_drefs', '0'];
@@ -76,17 +81,27 @@ export async function inspectGenerationFile(
     const { fpsNumerator, fpsDenominator, frameCount } = plan.timeline;
     const duration = (stream.duration_ts * timeNumerator!) / timeDenominator!;
     if (!Number.isFinite(duration) || duration <= 0 || duration > 15.1) throw new Error('DURATION');
-    if (slot === 'final') {
+    const referenceIndex = cloneReferenceSlotIndex(slot);
+    const referenceFrames =
+      referenceIndex !== null && plan.mode === CLONE_SHOT_REFERENCE_MODE
+        ? plan.shots[referenceIndex]?.referenceFrames
+        : undefined;
+    if (referenceIndex !== null && referenceFrames === undefined) throw new Error('REFERENCE_SLOT');
+    const exactFrameCount = slot === 'final' ? frameCount : referenceFrames;
+    if (exactFrameCount !== undefined) {
       const [num, den] = stream.avg_frame_rate.split('/').map(Number);
       if (
         stream.codec_name !== 'h264' ||
         streams.length !== 1 ||
-        Number(stream.nb_frames) !== frameCount ||
+        Number(stream.nb_frames) !== exactFrameCount ||
         num! * fpsDenominator !== fpsNumerator * den! ||
         stream.duration_ts * timeNumerator! * fpsNumerator !==
-          frameCount * fpsDenominator * timeDenominator!
+          exactFrameCount * fpsDenominator * timeDenominator!
       )
         throw new Error('TIMELINE');
+    } else if (plan.mode === 'SEEDANCE_2_0_SOURCE_EDIT') {
+      if (slot !== '0' || duration < (frameCount * fpsDenominator) / fpsNumerator)
+        throw new Error('SHORT_EDIT');
     } else {
       const shot = plan.timeline.shots[Number(slot)]!;
       if (duration < ((shot.endFrame - shot.startFrame) * fpsDenominator) / fpsNumerator)
@@ -124,7 +139,8 @@ export async function inspectGenerationFile(
       result.stderr.trim() ||
       !Number.isSafeInteger(frames) ||
       frames < 1 ||
-      (slot === 'final' && frames !== frameCount)
+      (exactFrameCount !== undefined && frames !== exactFrameCount) ||
+      (slot === '0' && plan.mode === 'SEEDANCE_2_0_SOURCE_EDIT' && frames < frameCount)
     )
       throw new Error('DECODE');
     const hash = createHash('sha256');

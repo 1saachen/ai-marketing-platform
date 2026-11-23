@@ -65,6 +65,11 @@ const mappingCurrent = computed(
     g2.value?.mapping?.freshness === 'CURRENT' &&
     sameCloneContent(g2.value.mapping.mapping, state.mappingDraft),
 );
+const hasOldPropReplacement = computed(() =>
+  state.mappingDraft.bindings.some(
+    (binding) => binding.type === 'prop' && binding.action === 'REPLACE',
+  ),
+);
 const displayedReport = computed(() =>
   state.analysisEditing ? state.analysisDraft.report : g2.value?.analysis?.report,
 );
@@ -101,17 +106,17 @@ const sourceBar = computed(() =>
           empty: '尚未确认映射',
         }
       : {
-          title: '参考视频与商品原料',
+          title: '参考视频',
           revision: state.workspace?.input?.ref.revision,
           stale: false,
           empty: '尚未确认输入',
         },
 );
 const nodeDefinitions = [
-  ['上传素材', '上传爆款参考视频与商品原料'],
-  ['深度拆解', '结构、创意、产品、镜头、音频、视觉六维解析'],
-  ['元素映射', '替换核心元素，锁定原视频结构与节奏'],
-  ['成片生成', '生成复刻成片并管理交付结果'],
+  ['上传素材', '选择参考视频并确认使用权'],
+  ['深度拆解', '六维拆解，逐镜头记录景别、构图、运镜与动作'],
+  ['元素映射', '绑定目标商品，沿用原片镜头顺序与节奏'],
+  ['成片生成', '逐镜头复刻，按原片切点合成'],
 ];
 const nodes = computed(() =>
   nodeDefinitions.map(([title, description], index) => ({
@@ -151,8 +156,6 @@ const canConfirm = computed(
     !busy.value &&
     !taskActive.value &&
     !!state.draft.referenceUploadId &&
-    !!state.draft.productName.trim() &&
-    !!state.draft.productFacts.trim() &&
     state.draft.sourceRightsConfirmed &&
     !state.conflict,
 );
@@ -162,7 +165,11 @@ const canNext = computed(() =>
     : state.step === 1
       ? analysisCurrent.value && !state.analysisEditing && !state.conflict && !busy.value
       : state.step === 2
-        ? mappingSourceCurrent.value && !state.conflict && !busy.value && !taskActive.value
+        ? mappingSourceCurrent.value &&
+          !hasOldPropReplacement.value &&
+          !state.conflict &&
+          !busy.value &&
+          !taskActive.value
         : false,
 );
 const draftStatus = computed(() =>
@@ -199,7 +206,8 @@ async function reload() {
 async function next() {
   if (state.step === 0 && (await workspace.confirm())) await workspace.go(1);
   else if (state.step === 1 && analysisCurrent.value) await workspace.go(2);
-  else if (state.step === 2 && (await workspace.confirmMapping())) await workspace.go(3);
+  else if (state.step === 2 && canNext.value && (await workspace.confirmMapping()))
+    await workspace.go(3);
 }
 async function resetMapping() {
   if (
@@ -241,7 +249,7 @@ defineExpose({
     <div v-if="!currentProject" class="clone-empty">
       <Boxes :size="32" />
       <h3>请先绑定项目</h3>
-      <p>从“项目与资产”进入项目，或新建项目后上传参考视频与商品资料。</p>
+      <p>从“项目与资产”进入项目，或新建项目后上传参考视频。</p>
     </div>
     <div v-else-if="state.loading" class="clone-empty">
       <LoaderCircle class="clone-spin" :size="30" />
@@ -299,12 +307,12 @@ defineExpose({
           <span class="frg-step">{{ String(state.step + 1).padStart(2, '0') }}</span>
           <div class="frg-title">
             <h2>
-              {{ state.step === 0 ? '上传参考视频与商品原料' : nodeDefinitions[state.step]?.[0] }}
+              {{ state.step === 0 ? '上传参考视频' : nodeDefinitions[state.step]?.[0] }}
             </h2>
             <p>
               {{
                 state.step === 0
-                  ? '上传 1 条参考视频，补充目标商品事实与多角度素材'
+                  ? '确认参考视频使用权后即可开始拆解。目标图片在元素映射时选择。'
                   : nodeDefinitions[state.step]?.[1]
               }}
             </p>
@@ -438,12 +446,10 @@ defineExpose({
           <div v-else class="frg-analysis-intro">
             <span class="clone-g2-intro-icon"><ScanLine :size="34" /></span>
             <h3>
-              {{
-                state.workspace.input ? '已就绪，开始六维深度拆解' : '请先确认参考视频与商品资料'
-              }}
+              {{ state.workspace.input ? '已就绪，开始六维深度拆解' : '请先确认参考视频' }}
             </h3>
             <p>
-              按已确认参考视频抽帧分析结构、创意、产品、镜头和视觉，并明确记录音频尚未识别的内容。完整任务成功后自动保存报告。
+              对参考视频抽帧，拆解结构、创意、产品、镜头和视觉。报告会逐镜头记录切点、景别、构图、运镜、动作与证据帧，并标明音频分析状态。拆解完成后自动保存。
             </p>
             <button
               v-if="state.workspace.input"
@@ -483,6 +489,15 @@ defineExpose({
               >映射使用的输入或报告已更新。请先取得最新报告，再按当前报告重置映射；旧确认内容会继续保留。</span
             >
           </div>
+          <div
+            v-if="mappingSourceCurrent && hasOldPropReplacement"
+            class="clone-g2-banner warn"
+            role="status"
+          >
+            <AlertTriangle :size="18" /><span
+              >此映射含旧道具替换。请选择对应道具并设为「保留为镜头参考」，再确认映射。</span
+            >
+          </div>
           <div v-if="!analysisCurrent" class="clone-empty">
             <ScanLine :size="30" />
             <h3>请先完成最新来源的深度拆解</h3>
@@ -492,7 +507,7 @@ defineExpose({
           <div v-else-if="!state.mappingDraft.sourceAnalysis" class="clone-empty">
             <Boxes :size="30" />
             <h3>准备映射已识别元素</h3>
-            <p>按照当前报告初始化元素列表与锁定结构，再逐项选择目标素材或填写描述。</p>
+            <p>从拆解报告锁定镜头顺序与切点，再为每个必换商品绑定目标图片。</p>
             <button
               class="frg-btn primary"
               :disabled="busy || state.conflict"

@@ -43,6 +43,22 @@ const mapping = parseCloneMappingDraft(
   ),
 );
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+const withProp = () => {
+  const value = clone(report);
+  value.elements.unshift({
+    ...value.elements[0]!,
+    elementId: 'orange_box',
+    type: 'prop',
+    label: '橙色盒子',
+    description: '小瓶右上方的长方形橙色盒',
+    required: false,
+    evidence: [
+      { startMs: 0, endMs: 200, kind: 'VISUAL', confidence: 0.9, description: '小瓶右侧可见' },
+    ],
+  });
+  value.shots[0]!.elementIds.push('orange_box');
+  return value;
+};
 const reverseKeys = <T>(value: T): T => {
   if (Array.isArray(value)) return value.map(reverseKeys) as T;
   if (value && typeof value === 'object')
@@ -198,6 +214,20 @@ afterEach(() => {
 });
 
 describe('clone G2 workspace editing and tasks', () => {
+  it('defaults recognized props to KEEP when initializing the mapping draft', async () => {
+    const { workspace, api } = create();
+    const server = fixture();
+    server.g2!.analysis!.report = withProp();
+    api.initialize.mockResolvedValueOnce(response(server));
+    await workspace.open(projectA);
+    expect(workspace.resetMapping()).toBe(true);
+    expect(
+      workspace.state.mappingDraft.bindings.find((item) => item.elementId === 'orange_box'),
+    ).toMatchObject({ type: 'prop', action: 'KEEP', target: null, shotIds: ['shot_a'] });
+    expect(
+      workspace.state.mappingDraft.bindings.find((item) => item.type === 'product')?.action,
+    ).toBe('REPLACE');
+  });
   it('keeps JSONB-reordered references current after preparing an asset without inventing draft changes', async () => {
     const { workspace, api } = create();
     await workspace.open(projectA);
@@ -457,7 +487,7 @@ describe('clone G2 real presentation', () => {
   it('renders report evidence and measured duration without prototype audio facts', async () => {
     const html = await renderToString(
       createSSRApp(CloneRealReport, {
-        report,
+        report: withProp(),
         productName: '目标包装',
         referenceName: 'reference.mp4',
         referenceUrl: '',
@@ -468,6 +498,10 @@ describe('clone G2 real presentation', () => {
     expect(html).toContain('360 × 640');
     expect(html).toContain('尚未分析');
     expect(html).toContain('画面观察');
+    expect(html).toContain('运镜');
+    expect(html).toContain('构图');
+    expect(html).toContain('镜头参考');
+    expect(html).toContain('查看画面证据');
     expect(html).not.toContain('112 BPM');
     expect(html).not.toContain('广式腊肠');
   });
@@ -480,6 +514,7 @@ describe('clone G2 real presentation', () => {
       label: '第二个产品实例',
     });
     const value = clone(mapping);
+    value.bindings[1]!.target!.asset = { assetId: projectA, version: 1 };
     value.bindings.push({
       ...clone(value.bindings[0]!),
       elementId: 'product_second',
@@ -498,7 +533,8 @@ describe('clone G2 real presentation', () => {
       }),
     );
     expect(html).toContain('第二个产品实例');
-    expect(html).toContain('2/3');
+    expect(html).toContain('1/3');
+    expect(html).toContain('JPEG、PNG 或 WebP');
     expect(html).toContain('产品');
     expect(html).not.toContain('112 BPM');
   });
@@ -566,5 +602,39 @@ describe('clone G2 real presentation', () => {
     );
     expect(html).toContain('100%');
     expect(html).toContain('已配置');
+  });
+  it('keeps historical props as shot references and prompts before changing old replacements', async () => {
+    const value = clone(mapping);
+    for (const item of value.bindings) item.target!.asset = { assetId: projectA, version: 1 };
+    value.bindings.unshift({
+      ...value.bindings[0]!,
+      elementId: 'orange_box',
+      type: 'prop',
+      action: 'KEEP',
+      target: null,
+    });
+    const props = {
+      projectId: projectA,
+      draft: value,
+      report: withProp(),
+      productName: '目标包装',
+      capabilities: fixture().capabilities,
+      disabled: false,
+      error: '',
+      prepareAsset: async () => true,
+    };
+    const keep = await renderToString(createSSRApp(CloneRealMapping, props));
+    expect(keep).toContain('已保留为镜头参考');
+    expect(keep).toContain('小瓶右上方的长方形橙色盒');
+    expect(keep).toContain('100%');
+    value.bindings[0]!.action = 'REPLACE';
+    value.bindings[0]!.target = { ...value.bindings[1]!.target!, text: '换蓝盒' };
+    const pending = await renderToString(createSSRApp(CloneRealMapping, props));
+    expect(pending).toContain('此道具仍使用旧替换配置');
+    expect(pending).toContain('保留为镜头参考');
+    expect(pending).not.toContain('选择项目资产');
+    expect(pending).not.toContain('>替换</button>');
+    expect(pending).toContain('67%');
+    expect(value.bindings[0]).toMatchObject({ action: 'REPLACE', target: { text: '换蓝盒' } });
   });
 });

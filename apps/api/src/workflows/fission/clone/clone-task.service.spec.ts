@@ -59,6 +59,24 @@ describe('clone G2 service boundaries', () => {
     expect(f.repository.generationPlan).not.toHaveBeenCalled();
     expect(f.repository.create).not.toHaveBeenCalled();
   });
+  it('requires private reference signing before loading generation sources', async () => {
+    const f = fixture({
+      FISSION_CLONE_G3_ENABLED: true,
+      FISSION_CLONE_GENERATION_WORKER_TOKEN: 'isolated-generation-worker-token',
+      FISSION_CLONE_GENERATION_MODEL: 'isolated-generation-model',
+      FISSION_CLONE_REVIEW_MODEL: 'isolated-review-model',
+      STORAGE_DRIVER: 'local',
+    });
+    await expect(
+      f.service.preflightGeneration('project', 'run', {
+        sourceMapping: f.request.sourceInput,
+        count: 1,
+        audioMode: 'SILENT',
+        transitionMode: 'CUT',
+      }),
+    ).rejects.toThrow('私有 TOS');
+    expect(f.repository.generationPlan).not.toHaveBeenCalled();
+  });
   it('does not query new tables or recover tasks with G2 disabled', async () => {
     const f = fixture({ FISSION_CLONE_G2_ENABLED: false });
     f.service.onModuleInit();

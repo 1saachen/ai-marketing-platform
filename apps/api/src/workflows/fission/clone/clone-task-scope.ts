@@ -1,6 +1,7 @@
 import {
   CLONE_ANALYSIS_ARTIFACT_KEY,
   CLONE_INPUT_ARTIFACT_KEY,
+  CLONE_PROP_IMAGE_MIME_TYPES,
   validateCloneMappingForReport,
   parseCloneAnalysisDraft,
   parseCloneMappingDraft,
@@ -11,6 +12,7 @@ import {
 } from '@ai-marketing/contracts';
 import type { Prisma } from '../../../generated/prisma/client';
 import { ApiHttpException } from '../../../common/api-http-exception';
+import { assertNoClonePropReplacement } from './clone-generation-plan';
 
 export function cloneConflict(message: string): never {
   throw new ApiHttpException(message, 409, 'CONFLICT');
@@ -112,6 +114,7 @@ export async function validateCloneMappingAssets(
     const audio = ['bgm', 'voiceover'].includes(binding.type);
     if (
       (visual && !/^(image|video)\//.test(mime)) ||
+      (binding.type === 'prop' && !CLONE_PROP_IMAGE_MIME_TYPES.includes(mime)) ||
       (audio && !mime.startsWith('audio/')) ||
       (binding.type === 'subtitle' &&
         !['text/plain', 'text/vtt', 'application/x-subrip'].includes(mime))
@@ -183,6 +186,7 @@ export function validateCloneMappingConfirmation(
   report: CloneAnalysisReport,
 ) {
   try {
+    assertNoClonePropReplacement(mapping);
     validateCloneMappingForReport(mapping, report, true);
   } catch (error) {
     throw new ApiHttpException(

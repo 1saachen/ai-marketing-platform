@@ -1,5 +1,7 @@
 import {
   CLONE_GENERATION_LIMITS,
+  CLONE_SHOT_REFERENCE_MODE,
+  cloneShotReferenceFrames,
   compileCloneFrameTimeline,
   parseCloneGenerationPlan,
   validateCloneMappingForReport,
@@ -22,7 +24,21 @@ type ConfirmedGenerationSources = Pick<
   report: CloneAnalysisReport;
   mapping: CloneMappingDraft;
   images: CloneGenerationImage[];
+  sourceVideo: Extract<
+    CloneGenerationPlan,
+    { mode: typeof CLONE_SHOT_REFERENCE_MODE }
+  >['sourceVideo'];
 };
+
+export function cloneReferenceSlotIndex(slot: string): number | null {
+  const match = /^reference-([0-3])$/u.exec(slot);
+  return match ? Number(match[1]) : null;
+}
+
+export function assertNoClonePropReplacement(mapping: CloneMappingDraft): void {
+  if (mapping.bindings.some(({ type, action }) => type === 'prop' && action === 'REPLACE'))
+    throw new TypeError('请在元素映射中将道具设为保留并重新确认。单独更换道具请使用局部元素替换');
+}
 
 export function compileCloneGenerationPlan({
   projectId,
@@ -32,12 +48,13 @@ export function compileCloneGenerationPlan({
   report,
   mapping,
   images,
+  sourceVideo,
 }: ConfirmedGenerationSources): CloneGenerationPlan {
   const limits = CLONE_GENERATION_LIMITS;
   validateCloneVisualOnlyReport(report);
+  assertNoClonePropReplacement(mapping);
   validateCloneMappingForReport(mapping, report, true);
-  if (!input.sourceRightsConfirmed || !input.productName || !input.productFacts)
-    throw new TypeError('请先确认目标商品事实与素材使用权');
+  if (!input.sourceRightsConfirmed) throw new TypeError('请先确认参考视频使用权限');
   if (report.durationMs > limits.maxDurationMs || report.shots.length > limits.maxShots)
     throw new TypeError('当前生成路径最多支持 15 秒、4 个镜头');
   if (report.visual.stickers.length || report.visual.subtitles.length)
@@ -57,20 +74,28 @@ export function compileCloneGenerationPlan({
   const byVersion = new Map(images.map((image) => [imageKey(image), image]));
   const used = new Map<string, CloneGenerationImage>();
   const targets = new Map<string, CloneGenerationShot['targets'][number]>();
+  const sourceElements = new Map(report.elements.map((element) => [element.elementId, element]));
   for (const binding of mapping.bindings) {
     const { elementId, type, action, target } = binding;
-    if ((type !== 'product' && type !== 'scene') || action !== 'REPLACE' || !target)
-      throw new TypeError('当前生成路径仅支持替换商品或场景元素');
+    if (action === 'KEEP') continue;
+    if (action !== 'REPLACE' || !target || (type !== 'product' && type !== 'scene'))
+      throw new TypeError('逐镜头复刻支持替换商品与场景，请将其他元素设为保留');
     if (type === 'product' && !target.asset)
-      throw new TypeError('每个商品元素都需绑定已确认的目标商品图片版本');
+      throw new TypeError('每个目标商品都需绑定已确认的图片版本');
     const image = target.asset ? byVersion.get(imageKey(target.asset)) : undefined;
     if (target.asset && (!image || !validImage(image)))
       throw new TypeError('目标图片版本不可用或超出尺寸、画幅及 4 MiB 限制');
     if (image) used.set(image.fileObjectId, image);
+    const sourceElement = sourceElements.get(elementId)!;
+    const sourceDescription = [sourceElement.label.trim(), sourceElement.description.trim()]
+      .filter(Boolean)
+      .join('。');
+    if (!sourceDescription) throw new TypeError('拆解报告缺少待复刻元素的原片描述');
     targets.set(elementId, {
       elementId,
       type,
       imageFileObjectId: image?.fileObjectId ?? null,
+      sourceDescription,
       description: target.text,
       style: target.style,
       lockedAttributes: target.lockedAttributes,
@@ -79,7 +104,10 @@ export function compileCloneGenerationPlan({
   }
   const shots = timeline.shots.map((shot, index): CloneGenerationShot => {
     const detail = report.shots[index]!;
-    const shotTargets = detail.elementIds.map((id) => targets.get(id)!);
+    const shotTargets = detail.elementIds.flatMap((id) => {
+      const target = targets.get(id);
+      return target ? [target] : [];
+    });
     const imageCount = new Set(
       shotTargets.flatMap((target) => (target.imageFileObjectId ? [target.imageFileObjectId] : [])),
     ).size;
@@ -90,21 +118,36 @@ export function compileCloneGenerationPlan({
         ((shot.endFrame - shot.startFrame) * timeline.fpsDenominator) / timeline.fpsNumerator,
       ),
     );
+    const motion = detail.motion
+      ? {
+          ...detail.motion,
+          events: detail.motion.events.map((event) => ({
+            ...event,
+            startMs: event.startMs - detail.startMs,
+            endMs: event.endMs - detail.startMs,
+            evidenceFramesMs: event.evidenceFramesMs.map((time) => time - detail.startMs),
+          })),
+        }
+      : undefined;
     return {
       shotId: shot.shotId,
       renderSeconds,
+      referenceFrames: cloneShotReferenceFrames(shot),
       framing: detail.framing,
       cameraMovement: detail.cameraMovement,
       composition: detail.composition,
+      ...(motion ? { motion } : {}),
       targets: shotTargets,
     };
   });
   return parseCloneGenerationPlan({
     schemaVersion: 1,
+    renderInstructionVersion: 2,
     projectId,
     workflowRunId,
     sources,
-    mode: 'SEEDANCE_2_0_SILENT_CUT',
+    mode: CLONE_SHOT_REFERENCE_MODE,
+    sourceVideo,
     ratio: portrait ? '9:16' : '16:9',
     width: portrait ? 720 : 1280,
     height: portrait ? 1280 : 720,
@@ -140,7 +183,15 @@ export function summarizeCloneGenerationPlan(
   count: CloneGenerationCount = 1,
 ): CloneGenerationPreflight {
   const { mode, ratio, width, height, timeline, sourceHasAudio } = plan;
-  const shots = plan.shots.map(({ shotId, renderSeconds }) => ({ shotId, renderSeconds }));
+  const shots = plan.shots.map(({ shotId, renderSeconds, referenceFrames }) => ({
+    shotId,
+    renderSeconds,
+    ...(referenceFrames !== undefined && { referenceFrames }),
+  }));
+  const renderSeconds =
+    plan.mode === 'SEEDANCE_2_0_SOURCE_EDIT'
+      ? plan.sourceVideo.renderSeconds
+      : shots.reduce((sum, shot) => sum + shot.renderSeconds, 0);
   return {
     mode,
     ratio,
@@ -151,6 +202,9 @@ export function summarizeCloneGenerationPlan(
     shots,
     sourceMapping: plan.sources.mapping,
     count,
-    totalRenderSeconds: count * shots.reduce((sum, shot) => sum + shot.renderSeconds, 0),
+    totalRenderSeconds: count * renderSeconds,
+    ...(mode === CLONE_SHOT_REFERENCE_MODE && {
+      totalReferenceFrames: count * shots.reduce((sum, shot) => sum + shot.referenceFrames!, 0),
+    }),
   };
 }

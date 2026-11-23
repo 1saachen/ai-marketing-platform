@@ -40,7 +40,11 @@ import { CloneService } from './clone.service';
 import { CloneMediaService } from './clone-media.service';
 import { CloneTaskRepository } from './clone-task.repository';
 import { summarizeCloneGenerationPlan } from './clone-generation-plan';
-import { cloneGenerationConfigured } from './clone-generation-config';
+import {
+  assertCloneShotReferenceStorage,
+  canSignCloneSourceVideo,
+  cloneGenerationConfigured,
+} from './clone-generation-config';
 import { requireClonePlanningCapability } from './clone-generation-planning';
 
 const execute = promisify(execFile);
@@ -111,13 +115,17 @@ export class CloneTaskService implements OnModuleInit, OnModuleDestroy {
   async preflightGeneration(projectId: string, runId: string, body: unknown) {
     await this.access(projectId);
     const { sourceMapping, count } = parse(parseCloneGenerationPreflightRequest, body);
+    const models = cloneGenerationConfigured(this.config);
+    if (!models)
+      throw new ApiHttpException(
+        '成片生成服务尚未启用或配置不完整',
+        503,
+        'CLONE_CAPABILITY_UNAVAILABLE',
+      );
+    assertCloneShotReferenceStorage(canSignCloneSourceVideo(this.config, this.storage));
     try {
       const plan = await this.repository.generationPlan(projectId, runId, sourceMapping);
-      requireClonePlanningCapability(
-        plan,
-        count,
-        cloneGenerationConfigured(this.config)?.planningModel,
-      );
+      requireClonePlanningCapability(plan, count, models.planningModel);
       return summarizeCloneGenerationPlan(plan, count);
     } catch (error) {
       if (error instanceof TypeError)

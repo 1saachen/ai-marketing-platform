@@ -268,17 +268,8 @@ export class CloneRepository {
       if (!draft || draft.revision !== request.expectedDraftRevision)
         conflict('草稿已发生变化，请刷新后确认');
       const state = await validateCloneInputUploads(tx, projectId, runId, draft.state);
-      if (
-        !state.referenceUploadId ||
-        !state.productName ||
-        !state.productFacts ||
-        !state.sourceRightsConfirmed
-      )
-        throw new ApiHttpException(
-          '请提供参考视频、商品名称与事实依据，并确认来源使用权限',
-          400,
-          'VALIDATION_ERROR',
-        );
+      if (!state.referenceUploadId || !state.sourceRightsConfirmed)
+        throw new ApiHttpException('请选择参考视频并确认来源使用权限', 400, 'VALIDATION_ERROR');
       const ids = [state.referenceUploadId, ...state.productUploadIds];
       const uploads = await tx.fissionCloneUpload.findMany({
         where: { ...scope(projectId, runId), id: { in: ids }, status: 'AVAILABLE' },
@@ -321,7 +312,9 @@ export class CloneRepository {
             artifactKey: CLONE_INPUT_ARTIFACT_KEY,
             input: {
               kind: 'STRUCTURED',
-              name: `${Array.from(state.productName).slice(0, 113).join('')} · 复刻输入`,
+              name: state.productName
+                ? `${Array.from(state.productName).slice(0, 113).join('')} · 复刻输入`
+                : '复刻输入',
               directory: 'SOURCE_MATERIALS',
               type: 'SOURCE_MATERIAL',
               payload,

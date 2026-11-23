@@ -1,5 +1,8 @@
 import {
+  CLONE_SHOT_MOTION_SCHEMA,
   parseCloneArtifactRef,
+  validateCloneShotMotion,
+  type CloneShotMotion,
   type CloneStructureLock,
   type CloneTaskStatus,
   type CloneTimeRange,
@@ -7,6 +10,7 @@ import {
 import {
   array,
   enumeration,
+  fail,
   integer,
   nullable,
   object,
@@ -23,14 +27,18 @@ export const CLONE_GENERATION_LIMITS = {
   maxCount: 20,
   maxUnplannedCount: 2,
   maxImagesPerShot: 4,
+  maxSourceEditImages: 9,
+  maxSourceVideoBytes: 200_000_000,
   maxImageBytes: 4 * 1024 * 1024,
   minImageSide: 300,
   maxImageSide: 6000,
   minRenderSeconds: 4,
   maxRenderSeconds: 15,
+  minShotReferenceFrames: 48,
   fpsNumerator: 24,
   fpsDenominator: 1,
 } as const;
+export const CLONE_SHOT_REFERENCE_MODE = 'SEEDANCE_2_0_SHOT_REFERENCE';
 
 export type CloneGenerationCount = number;
 export type CloneGenerationPreflightRequest = {
@@ -42,6 +50,7 @@ export type CloneGenerationPreflightRequest = {
 export type CloneGenerationCreateRequest = CloneGenerationPreflightRequest & {
   idempotencyKey: string;
   acceptedRenderSeconds: number;
+  acceptedReferenceFrames?: number;
 };
 export type CloneGenerationReceipt = { taskId: string; batchId?: string };
 export type CloneGenerationSnapshot = {
@@ -59,7 +68,9 @@ export type CloneGenerationReview = {
   }[];
 };
 export type CloneGenerationRenderCheckpoint =
-  { state: 'CREATE_PENDING' } | { state: 'CREATED'; providerTaskId: string };
+  | { state: 'CREATE_PENDING' }
+  | { state: 'CREATE_REJECTED' }
+  | { state: 'CREATED'; providerTaskId: string };
 export type CloneGenerationFile = {
   fileObjectId: string;
   sizeBytes: number;
@@ -104,6 +115,14 @@ export type CloneGenerationVariant = CloneGenerationVariantDraft['variants'][num
 export type CloneGenerationVariantReview = {
   checks: { variantId: string; verdict: 'PASSED' | 'FAILED'; reason: string }[];
 };
+export type CloneGenerationReviewIssue = {
+  /** One-based shot position in the frozen output timeline. */
+  shotNumber: number;
+  verdict: 'WARNING' | 'FAILED';
+  reason: string;
+  /** Zero-based output frame numbers. */
+  evidenceFrames: number[];
+};
 export type CloneGenerationTask = {
   id: string;
   variantId: string;
@@ -111,6 +130,7 @@ export type CloneGenerationTask = {
   progress: number;
   message: string;
   error: string | null;
+  reviewIssues?: CloneGenerationReviewIssue[];
   canRetry: boolean;
   createdAt: string;
   artifact:
@@ -126,9 +146,11 @@ export type CloneGenerationTask = {
 export type CloneGenerationBatch = {
   id: string;
   taskIds: string[];
+  count?: number;
   status: CloneTaskStatus | 'PARTIAL';
   canCancel: boolean;
   planning?: { count: number; error: string | null; canRetry: boolean };
+  sample?: { totalCount: number };
   downloadUrl?: string;
 };
 export type CloneGenerationList = {
@@ -145,6 +167,8 @@ export const cloneVideoArtifactKey = (variantId: string) => `clone-video:${varia
 export const cloneBatchArtifactKey = (taskId: string) => `clone-batch:${taskId}`;
 
 export type CloneFrameRange = CloneTimeRange & { startFrame: number; endFrame: number };
+export const cloneShotReferenceFrames = (shot: Pick<CloneFrameRange, 'startFrame' | 'endFrame'>) =>
+  Math.max(CLONE_GENERATION_LIMITS.minShotReferenceFrames, shot.endFrame - shot.startFrame);
 export type CloneFrameRate = { fpsNumerator: number; fpsDenominator: number };
 export type CloneFrameTimeline = CloneFrameRate & {
   durationMs: number;
@@ -166,16 +190,29 @@ export type CloneGenerationImage = {
   width: number;
   height: number;
 };
+export type CloneGenerationSourceFile = {
+  fileObjectId: string;
+  sha256: string;
+  sizeBytes: number;
+  mimeType: 'video/mp4' | 'video/quicktime';
+};
+export type CloneGenerationSourceVideo = CloneGenerationSourceFile & { renderSeconds: number };
 export type CloneGenerationShot = {
   shotId: string;
   renderSeconds: number;
   framing: string;
   cameraMovement: string;
   composition: string;
+  /** Number of input frames sent to the provider, including any repeated tail frames. */
+  referenceFrames?: number;
+  /** The compiled motion timestamps are relative to this shot's start. */
+  motion?: CloneShotMotion;
   targets: {
     elementId: string;
-    type: 'product' | 'scene';
+    type: 'product' | 'scene' | 'prop';
     imageFileObjectId: string | null;
+    /** Identifies the object in the source video, separately from the intended replacement. */
+    sourceDescription?: string;
     description: string;
     style: string;
     lockedAttributes: string[];
@@ -185,10 +222,11 @@ export type CloneGenerationShot = {
 };
 export type CloneGenerationPlan = {
   schemaVersion: 1;
+  /** The render prompt is frozen with the plan. Omitted on historical plans. */
+  renderInstructionVersion?: 2;
   projectId: string;
   workflowRunId: string;
   sources: { input: CloneArtifactRef; analysis: CloneArtifactRef; mapping: CloneArtifactRef };
-  mode: 'SEEDANCE_2_0_SILENT_CUT';
   ratio: '9:16' | '16:9';
   width: number;
   height: number;
@@ -198,7 +236,11 @@ export type CloneGenerationPlan = {
   timeline: CloneFrameTimeline;
   images: CloneGenerationImage[];
   shots: CloneGenerationShot[];
-};
+} & (
+  | { mode: 'SEEDANCE_2_0_SILENT_CUT'; sourceVideo?: never }
+  | { mode: 'SEEDANCE_2_0_SOURCE_EDIT'; sourceVideo: CloneGenerationSourceVideo }
+  | { mode: typeof CLONE_SHOT_REFERENCE_MODE; sourceVideo: CloneGenerationSourceFile }
+);
 
 export type CloneGenerationPreflight = Pick<
   CloneGenerationPlan,
@@ -206,8 +248,9 @@ export type CloneGenerationPreflight = Pick<
 > & {
   sourceMapping: CloneArtifactRef;
   count: CloneGenerationCount;
-  shots: Pick<CloneGenerationShot, 'shotId' | 'renderSeconds'>[];
+  shots: Pick<CloneGenerationShot, 'shotId' | 'renderSeconds' | 'referenceFrames'>[];
   totalRenderSeconds: number;
+  totalReferenceFrames?: number;
 };
 
 const uuid: Schema = { type: 'string', pattern: CLONE_UUID_PATTERN };
@@ -300,17 +343,27 @@ export const FISSION_CLONE_GENERATION_REVIEW_SCHEMA = published(
 );
 
 export function parseCloneGenerationCreateRequest(value: unknown): CloneGenerationCreateRequest {
+  const fields = {
+    ...request.properties,
+    idempotencyKey: uuid,
+    acceptedRenderSeconds: integer(
+      CLONE_GENERATION_LIMITS.minRenderSeconds,
+      CLONE_GENERATION_LIMITS.maxCount *
+        CLONE_GENERATION_LIMITS.maxShots *
+        CLONE_GENERATION_LIMITS.maxRenderSeconds,
+    ),
+  };
   return parse(
-    object({
-      ...request.properties,
-      idempotencyKey: uuid,
-      acceptedRenderSeconds: integer(
-        CLONE_GENERATION_LIMITS.minRenderSeconds,
-        CLONE_GENERATION_LIMITS.maxCount *
-          CLONE_GENERATION_LIMITS.maxShots *
-          CLONE_GENERATION_LIMITS.maxRenderSeconds,
-      ),
-    }),
+    {
+      ...object(fields),
+      properties: {
+        ...fields,
+        acceptedReferenceFrames: integer(
+          CLONE_GENERATION_LIMITS.minShotReferenceFrames,
+          CLONE_GENERATION_LIMITS.maxCount * CLONE_GENERATION_LIMITS.maxShots * 360,
+        ),
+      },
+    },
     value,
   );
 }
@@ -320,7 +373,7 @@ export function parseCloneGenerationRenderCheckpoint(
   return parse(
     {
       oneOf: [
-        object({ state: enumeration('CREATE_PENDING') }),
+        object({ state: enumeration('CREATE_PENDING', 'CREATE_REJECTED') }),
         object({
           state: enumeration('CREATED'),
           providerTaskId: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,160}$' },
@@ -341,7 +394,7 @@ const frameRange = {
 };
 const generationTargetFields = {
   elementId: id,
-  type: enumeration('product', 'scene'),
+  type: enumeration('product', 'scene', 'prop'),
   imageFileObjectId: nullable(uuid),
   description: text(20_000),
   style: text(),
@@ -352,76 +405,109 @@ const generationTarget: Schema = {
   ...object(generationTargetFields),
   properties: {
     ...generationTargetFields,
+    sourceDescription: text(5_000),
     variation: {
       ...object(sceneDirection),
       properties: { ...sceneDirection, scope: enumeration('SHOT') },
     },
   },
 };
+const generationShotFields = {
+  shotId: id,
+  renderSeconds: integer(
+    CLONE_GENERATION_LIMITS.minRenderSeconds,
+    CLONE_GENERATION_LIMITS.maxRenderSeconds,
+  ),
+  framing: text(),
+  cameraMovement: text(),
+  composition: text(),
+  targets: array(generationTarget),
+};
+const generationShot: Schema = {
+  ...object(generationShotFields),
+  properties: {
+    ...generationShotFields,
+    motion: CLONE_SHOT_MOTION_SCHEMA,
+    referenceFrames: integer(CLONE_GENERATION_LIMITS.minShotReferenceFrames, 360),
+  },
+};
 
-export const FISSION_CLONE_GENERATION_PLAN_SCHEMA = published(
-  'fission-clone-generation-plan.schema.json',
-  object({
-    schemaVersion: { const: 1 },
-    projectId: uuid,
-    workflowRunId: uuid,
-    sources: object({ input: ref, analysis: ref, mapping: ref }),
-    mode: enumeration('SEEDANCE_2_0_SILENT_CUT'),
-    ratio: enumeration('9:16', '16:9'),
-    width: { type: 'integer', enum: [720, 1280] },
-    height: { type: 'integer', enum: [720, 1280] },
-    sourceHasAudio: { type: 'boolean' },
-    productName: text(200),
-    productFacts: text(20_000),
-    timeline: object({
-      durationMs: integer(1000, CLONE_GENERATION_LIMITS.maxDurationMs),
-      fpsNumerator: { const: CLONE_GENERATION_LIMITS.fpsNumerator },
-      fpsDenominator: { const: CLONE_GENERATION_LIMITS.fpsDenominator },
-      frameCount: integer(1, 360),
-      stages: array(
-        object({ stageId: id, role: text(200), ...frameRange }),
-        CLONE_GENERATION_LIMITS.maxShots,
-        1,
-      ),
-      shots: array(
-        object({ shotId: id, stageId: id, ...frameRange }),
-        CLONE_GENERATION_LIMITS.maxShots,
-        1,
-      ),
-      hookRanges: array(object(frameRange)),
-      conversionRanges: array(object(frameRange)),
-    }),
-    images: array(
-      object({
-        assetId: uuid,
-        version: integer(1),
-        sourceVersionId: uuid,
-        fileObjectId: uuid,
-        sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
-        sizeBytes: integer(1, CLONE_GENERATION_LIMITS.maxImageBytes),
-        mimeType: enumeration('image/jpeg', 'image/png', 'image/webp'),
-        width: integer(CLONE_GENERATION_LIMITS.minImageSide, CLONE_GENERATION_LIMITS.maxImageSide),
-        height: integer(CLONE_GENERATION_LIMITS.minImageSide, CLONE_GENERATION_LIMITS.maxImageSide),
-      }),
-      CLONE_GENERATION_LIMITS.maxImagesPerShot * CLONE_GENERATION_LIMITS.maxShots,
-      1,
-    ),
-    shots: array(
-      object({
-        shotId: id,
-        renderSeconds: integer(
-          CLONE_GENERATION_LIMITS.minRenderSeconds,
-          CLONE_GENERATION_LIMITS.maxRenderSeconds,
-        ),
-        framing: text(),
-        cameraMovement: text(),
-        composition: text(),
-        targets: array(generationTarget),
-      }),
+const generationPlan = object({
+  schemaVersion: { const: 1 },
+  projectId: uuid,
+  workflowRunId: uuid,
+  sources: object({ input: ref, analysis: ref, mapping: ref }),
+  mode: enumeration(
+    'SEEDANCE_2_0_SILENT_CUT',
+    'SEEDANCE_2_0_SOURCE_EDIT',
+    CLONE_SHOT_REFERENCE_MODE,
+  ),
+  ratio: enumeration('9:16', '16:9'),
+  width: { type: 'integer', enum: [720, 1280] },
+  height: { type: 'integer', enum: [720, 1280] },
+  sourceHasAudio: { type: 'boolean' },
+  productName: text(200),
+  productFacts: text(20_000),
+  timeline: object({
+    durationMs: integer(1000, CLONE_GENERATION_LIMITS.maxDurationMs),
+    fpsNumerator: { const: CLONE_GENERATION_LIMITS.fpsNumerator },
+    fpsDenominator: { const: CLONE_GENERATION_LIMITS.fpsDenominator },
+    frameCount: integer(1, 360),
+    stages: array(
+      object({ stageId: id, role: text(200), ...frameRange }),
       CLONE_GENERATION_LIMITS.maxShots,
       1,
     ),
+    shots: array(
+      object({ shotId: id, stageId: id, ...frameRange }),
+      CLONE_GENERATION_LIMITS.maxShots,
+      1,
+    ),
+    hookRanges: array(object(frameRange)),
+    conversionRanges: array(object(frameRange)),
   }),
+  images: array(
+    object({
+      assetId: uuid,
+      version: integer(1),
+      sourceVersionId: uuid,
+      fileObjectId: uuid,
+      sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      sizeBytes: integer(1, CLONE_GENERATION_LIMITS.maxImageBytes),
+      mimeType: enumeration('image/jpeg', 'image/png', 'image/webp'),
+      width: integer(CLONE_GENERATION_LIMITS.minImageSide, CLONE_GENERATION_LIMITS.maxImageSide),
+      height: integer(CLONE_GENERATION_LIMITS.minImageSide, CLONE_GENERATION_LIMITS.maxImageSide),
+    }),
+    CLONE_GENERATION_LIMITS.maxImagesPerShot * CLONE_GENERATION_LIMITS.maxShots,
+    1,
+  ),
+  shots: array(generationShot, CLONE_GENERATION_LIMITS.maxShots, 1),
+});
+const sourceVideoFields = {
+  fileObjectId: uuid,
+  sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  sizeBytes: integer(1, CLONE_GENERATION_LIMITS.maxSourceVideoBytes),
+  mimeType: enumeration('video/mp4', 'video/quicktime'),
+} satisfies Record<string, Schema>;
+export const FISSION_CLONE_GENERATION_PLAN_SCHEMA = published(
+  'fission-clone-generation-plan.schema.json',
+  {
+    ...generationPlan,
+    properties: {
+      ...generationPlan.properties,
+      renderInstructionVersion: { const: 2 },
+      sourceVideo: {
+        ...object(sourceVideoFields),
+        properties: {
+          ...sourceVideoFields,
+          renderSeconds: integer(
+            CLONE_GENERATION_LIMITS.minRenderSeconds,
+            CLONE_GENERATION_LIMITS.maxRenderSeconds,
+          ),
+        },
+      },
+    },
+  },
 );
 
 export function parseCloneGenerationPreflightRequest(
@@ -432,7 +518,79 @@ export function parseCloneGenerationPreflightRequest(
 }
 
 export function parseCloneGenerationPlan(value: unknown): CloneGenerationPlan {
-  return parse(FISSION_CLONE_GENERATION_PLAN_SCHEMA, value);
+  const plan = parse<CloneGenerationPlan>(FISSION_CLONE_GENERATION_PLAN_SCHEMA, value);
+  const sourceEdit = plan.mode === 'SEEDANCE_2_0_SOURCE_EDIT';
+  const shotReference = plan.mode === CLONE_SHOT_REFERENCE_MODE;
+  const targets = plan.shots.flatMap((shot) => shot.targets);
+  if (sourceEdit) {
+    const durationMs = plan.timeline.durationMs;
+    const minimumMs = CLONE_GENERATION_LIMITS.minRenderSeconds * 1000;
+    if (
+      !plan.sourceVideo ||
+      plan.renderInstructionVersion !== 2 ||
+      durationMs < minimumMs ||
+      plan.sourceVideo.renderSeconds !== Math.ceil(durationMs / 1000)
+    )
+      fail('原片编辑', '缺少对应时长的冻结原视频或指令版本');
+    if (plan.images.some((image) => image.fileObjectId === plan.sourceVideo.fileObjectId))
+      fail('原片编辑', '原视频不能同时作为目标图片');
+    if (
+      !targets.some((target) => target.type === 'product') ||
+      targets.some(
+        (target) =>
+          !target.sourceDescription?.trim() ||
+          ((target.type === 'product' || target.type === 'prop') && !target.imageFileObjectId),
+      )
+    )
+      fail('原片编辑', '缺少源物件描述或目标图片');
+    if (plan.images.length > CLONE_GENERATION_LIMITS.maxSourceEditImages)
+      fail('原片编辑', '目标参考图数量超出整段编辑上限');
+  } else if (shotReference) {
+    const source = plan.sourceVideo;
+    if (
+      !source ||
+      'renderSeconds' in source ||
+      plan.renderInstructionVersion !== 2 ||
+      plan.images.some((image) => image.fileObjectId === source.fileObjectId)
+    )
+      fail('逐镜头参考', '缺少冻结原片或指令版本');
+    if (
+      !targets.some((target) => target.type === 'product') ||
+      targets.some(
+        (target) =>
+          target.type === 'prop' ||
+          !target.sourceDescription?.trim() ||
+          (target.type === 'product' && !target.imageFileObjectId),
+      )
+    )
+      fail('逐镜头参考', '缺少原元素描述或目标商品图片');
+  } else if (
+    plan.sourceVideo !== undefined ||
+    targets.some((target) => target.type === 'prop' || target.sourceDescription !== undefined)
+  ) {
+    fail('成片模式', '原片编辑字段只能用于编辑任务');
+  }
+  for (const [index, shot] of plan.shots.entries()) {
+    const range = plan.timeline.shots[index];
+    if (shotReference) {
+      if (range?.shotId !== shot.shotId || shot.referenceFrames !== cloneShotReferenceFrames(range))
+        fail('逐镜头参考', '参考帧数与锁定镜头不一致');
+    } else if (shot.referenceFrames !== undefined) {
+      fail('成片模式', '参考帧数只能用于逐镜头参考');
+    }
+    if (shot.motion) {
+      if (plan.renderInstructionVersion !== 2) fail('镜头动作', '缺少支持动作的渲染指令版本');
+      const observed = plan.timeline.shots.find((item) => item.shotId === shot.shotId);
+      if (!observed) fail('镜头动作', '找不到匹配的成片镜头');
+      validateCloneShotMotion(shot.motion, {
+        startMs: 0,
+        endMs: observed.endMs - observed.startMs,
+      });
+    }
+  }
+  if (shotReference && plan.shots.length !== plan.timeline.shots.length)
+    fail('逐镜头参考', '成片镜头未覆盖锁定时间线');
+  return plan;
 }
 
 /** Round absolute boundaries once, using integer arithmetic for common fractional frame rates. */

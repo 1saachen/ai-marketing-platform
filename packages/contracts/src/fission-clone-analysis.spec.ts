@@ -18,11 +18,57 @@ import {
   validateCloneVisualOnlyReport,
   type CloneAnalysisReport,
   type CloneMappingDraft,
+  type CloneShotMotion,
 } from './fission-clone-analysis';
 
 const read = (path: string) => JSON.parse(readFileSync(resolve(__dirname, '..', path), 'utf8'));
 const report = () => read('fixtures/fission-clone-analysis.json') as CloneAnalysisReport;
 const mapping = () => read('fixtures/fission-clone-mapping.json') as CloneMappingDraft;
+const reportWithProp = () => {
+  const value = report();
+  value.elements.push({
+    ...value.elements[0]!,
+    elementId: 'orange_box',
+    type: 'prop',
+    required: false,
+    label: '橙色盒',
+    description: '主商品右上方的橙色长方形盒子，靠在圆形粉盒左侧',
+    evidence: [
+      {
+        startMs: 0,
+        endMs: 200,
+        kind: 'VISUAL',
+        description: '开场可见盒子边缘',
+        confidence: 0.95,
+      },
+    ],
+  });
+  value.shots[0]!.elementIds.push('orange_box');
+  return value;
+};
+const withObservedMotion = () => {
+  const value = report();
+  const shot = value.shots[1]!;
+  shot.evidenceFramesMs = [1600, 2200, 2700];
+  const event = {
+    startMs: 1600,
+    endMs: 2200,
+    subjectAction: '手将商品从桌面提起',
+    cameraAction: '机位固定',
+    contact: '手指捏住包装上缘',
+    productPose: '保持直立，正面仍朝向镜头',
+    evidenceFramesMs: [1600, 2200],
+  };
+  const motion: CloneShotMotion = {
+    status: 'OBSERVED',
+    openingState: '商品在桌面',
+    closingState: '商品悬空',
+    reason: '',
+    events: [event, { ...event, startMs: 2200, endMs: 2800, evidenceFramesMs: [2200, 2700] }],
+  };
+  shot.motion = motion;
+  return { value, motion };
+};
 
 describe('Clone G2 contracts', () => {
   it('publishes exactly the schemas consumed by the Worker, and accepts both shared fixtures', () => {
@@ -39,6 +85,67 @@ describe('Clone G2 contracts', () => {
     expect(parseCloneAnalysisDraft(emptyCloneAnalysisDraft())).toEqual(emptyCloneAnalysisDraft());
     expect(parseCloneMappingDraft(emptyCloneMappingDraft())).toEqual(emptyCloneMappingDraft());
     expect(() => validateCloneVisualOnlyReport(report())).not.toThrow();
+  });
+  it('preserves supported in-shot observations while accepting reports saved before motion existed', () => {
+    const { value } = withObservedMotion();
+    value.shots[0]!.motion = {
+      status: 'INSUFFICIENT_EVIDENCE',
+      openingState: '',
+      closingState: '',
+      reason: '镜头只有一个采样点',
+      events: [],
+    };
+    expect(parseCloneAnalysisReport(value)).toEqual(value);
+    expect(parseCloneTaskResult({ operation: 'ANALYZE', report: value })).toEqual({
+      operation: 'ANALYZE',
+      report: value,
+    });
+    expect(parseCloneAnalysisReport(report()).shots[0]).not.toHaveProperty('motion');
+  });
+  it('requires two distinct shot samples before reporting no visible motion', () => {
+    const value = report();
+    const shot = value.shots[0]!;
+    shot.motion = {
+      status: 'NO_VISIBLE_MOTION',
+      openingState: '商品在桌面',
+      closingState: '商品在桌面',
+      reason: '两个样本中的位置和姿态一致',
+      events: [],
+    };
+    shot.evidenceFramesMs = [0, 1200];
+    expect(parseCloneAnalysisReport(value)).toEqual(value);
+    shot.evidenceFramesMs = [0, 0];
+    expect(() => parseCloneAnalysisReport(value)).toThrow('两个不同');
+  });
+  it.each<[string, (motion: CloneShotMotion) => void]>([
+    ['unknown status', (motion) => (motion.status = 'READY' as never)],
+    ['observed with no events', (motion) => (motion.events = [])],
+    [
+      'blank event observations',
+      (motion) =>
+        Object.assign(motion.events[0]!, {
+          subjectAction: ' ',
+          cameraAction: '',
+          contact: '',
+          productPose: '',
+        }),
+    ],
+    ['no visible motion with events', (motion) => (motion.status = 'NO_VISIBLE_MOTION')],
+    [
+      'insufficient evidence without a reason',
+      (motion) =>
+        Object.assign(motion, { status: 'INSUFFICIENT_EVIDENCE', events: [], reason: ' ' }),
+    ],
+    ['interval outside the shot', (motion) => (motion.events[0]!.startMs = 1499)],
+    ['overlapping events', (motion) => (motion.events[1]!.startMs = 2199)],
+    ['empty event evidence', (motion) => (motion.events[0]!.evidenceFramesMs = [])],
+    ['unlisted evidence frame', (motion) => (motion.events[0]!.evidenceFramesMs = [1600, 1900])],
+    ['evidence outside the event', (motion) => (motion.events[0]!.evidenceFramesMs = [2700])],
+    ['repeated evidence frame', (motion) => (motion.events[0]!.evidenceFramesMs = [1600, 1600])],
+  ])('rejects %s in a motion report', (_label, mutate) => {
+    const { value, motion } = withObservedMotion();
+    mutate(motion);
+    expect(() => parseCloneAnalysisReport(value)).toThrow();
   });
   it.each([
     [
@@ -133,6 +240,40 @@ describe('Clone G2 contracts', () => {
     value.audio.bgm.status = 'UNASSESSED';
     value.audio.beatsMs = [10];
     expect(() => validateCloneVisualOnlyReport(value)).toThrow();
+  });
+  it('accepts a separate optional prop only when its appearance has matching visual evidence', () => {
+    const value = reportWithProp();
+    expect(parseCloneAnalysisReport(value)).toEqual(value);
+    const prop = value.elements.at(-1)!;
+    prop.required = true;
+    expect(() => parseCloneAnalysisReport(value)).toThrow('可选视觉元素');
+    prop.required = false;
+    prop.evidence.push({ ...prop.evidence[0]!, startMs: 500, endMs: 550 });
+    expect(() => parseCloneAnalysisReport(value)).toThrow('画面证据');
+    prop.evidence.pop();
+    value.shots[0]!.evidenceFramesMs = [1000];
+    expect(() => parseCloneAnalysisReport(value)).toThrow('画面证据');
+  });
+  it('keeps optional props without target assets and requires an image reference to confirm replacement', () => {
+    const value = mapping();
+    const replacement = value.bindings[0]!.target!;
+    const prop: CloneMappingDraft['bindings'][number] = {
+      elementId: 'orange_box',
+      type: 'prop',
+      action: 'KEEP',
+      shotIds: ['shot_a'],
+      target: null,
+    };
+    value.bindings.push(prop);
+    expect(parseCloneMappingDraft(value)).toEqual(value);
+    const source = reportWithProp();
+    expect(() => validateCloneMappingForReport(value, source, true)).not.toThrow();
+    prop.action = 'REPLACE';
+    prop.target = { ...replacement, asset: null, text: '另一个圆盒' };
+    expect(() => validateCloneMappingForReport(value, source)).not.toThrow();
+    expect(() => validateCloneMappingForReport(value, source, true)).toThrow('目标道具图片');
+    prop.target.asset = { assetId: '33333333-3333-4333-8333-333333333333', version: 2 };
+    expect(() => validateCloneMappingForReport(value, source, true)).not.toThrow();
   });
   it('validates every product instance, and permits incomplete drafts without confirming them', () => {
     const value = mapping();

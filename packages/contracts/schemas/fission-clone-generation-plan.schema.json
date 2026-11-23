@@ -34,11 +34,7 @@
               "pattern": "^[a-f0-9]{64}$"
             }
           },
-          "required": [
-            "artifactId",
-            "revision",
-            "contentHash"
-          ],
+          "required": ["artifactId", "revision", "contentHash"],
           "additionalProperties": false
         },
         "analysis": {
@@ -58,11 +54,7 @@
               "pattern": "^[a-f0-9]{64}$"
             }
           },
-          "required": [
-            "artifactId",
-            "revision",
-            "contentHash"
-          ],
+          "required": ["artifactId", "revision", "contentHash"],
           "additionalProperties": false
         },
         "mapping": {
@@ -82,47 +74,28 @@
               "pattern": "^[a-f0-9]{64}$"
             }
           },
-          "required": [
-            "artifactId",
-            "revision",
-            "contentHash"
-          ],
+          "required": ["artifactId", "revision", "contentHash"],
           "additionalProperties": false
         }
       },
-      "required": [
-        "input",
-        "analysis",
-        "mapping"
-      ],
+      "required": ["input", "analysis", "mapping"],
       "additionalProperties": false
     },
     "mode": {
       "type": "string",
-      "enum": [
-        "SEEDANCE_2_0_SILENT_CUT"
-      ]
+      "enum": ["SEEDANCE_2_0_SILENT_CUT", "SEEDANCE_2_0_SOURCE_EDIT", "SEEDANCE_2_0_SHOT_REFERENCE"]
     },
     "ratio": {
       "type": "string",
-      "enum": [
-        "9:16",
-        "16:9"
-      ]
+      "enum": ["9:16", "16:9"]
     },
     "width": {
       "type": "integer",
-      "enum": [
-        720,
-        1280
-      ]
+      "enum": [720, 1280]
     },
     "height": {
       "type": "integer",
-      "enum": [
-        720,
-        1280
-      ]
+      "enum": [720, 1280]
     },
     "sourceHasAudio": {
       "type": "boolean"
@@ -188,14 +161,7 @@
                 "maximum": 360
               }
             },
-            "required": [
-              "stageId",
-              "role",
-              "startMs",
-              "endMs",
-              "startFrame",
-              "endFrame"
-            ],
+            "required": ["stageId", "role", "startMs", "endMs", "startFrame", "endFrame"],
             "additionalProperties": false
           },
           "minItems": 1,
@@ -235,14 +201,7 @@
                 "maximum": 360
               }
             },
-            "required": [
-              "shotId",
-              "stageId",
-              "startMs",
-              "endMs",
-              "startFrame",
-              "endFrame"
-            ],
+            "required": ["shotId", "stageId", "startMs", "endMs", "startFrame", "endFrame"],
             "additionalProperties": false
           },
           "minItems": 1,
@@ -274,12 +233,7 @@
                 "maximum": 360
               }
             },
-            "required": [
-              "startMs",
-              "endMs",
-              "startFrame",
-              "endFrame"
-            ],
+            "required": ["startMs", "endMs", "startFrame", "endFrame"],
             "additionalProperties": false
           },
           "minItems": 0,
@@ -311,12 +265,7 @@
                 "maximum": 360
               }
             },
-            "required": [
-              "startMs",
-              "endMs",
-              "startFrame",
-              "endFrame"
-            ],
+            "required": ["startMs", "endMs", "startFrame", "endFrame"],
             "additionalProperties": false
           },
           "minItems": 0,
@@ -368,11 +317,7 @@
           },
           "mimeType": {
             "type": "string",
-            "enum": [
-              "image/jpeg",
-              "image/png",
-              "image/webp"
-            ]
+            "enum": ["image/jpeg", "image/png", "image/webp"]
           },
           "width": {
             "type": "integer",
@@ -438,10 +383,7 @@
                 },
                 "type": {
                   "type": "string",
-                  "enum": [
-                    "product",
-                    "scene"
-                  ]
+                  "enum": ["product", "scene", "prop"]
                 },
                 "imageFileObjectId": {
                   "anyOf": [
@@ -480,6 +422,10 @@
                   "minItems": 0,
                   "maxItems": 30
                 },
+                "sourceDescription": {
+                  "type": "string",
+                  "maxLength": 5000
+                },
                 "variation": {
                   "type": "object",
                   "properties": {
@@ -495,15 +441,10 @@
                     },
                     "scope": {
                       "type": "string",
-                      "enum": [
-                        "SHOT"
-                      ]
+                      "enum": ["SHOT"]
                     }
                   },
-                  "required": [
-                    "dimension",
-                    "direction"
-                  ],
+                  "required": ["dimension", "direction"],
                   "additionalProperties": false
                 }
               },
@@ -520,6 +461,90 @@
             },
             "minItems": 0,
             "maxItems": 200
+          },
+          "motion": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["OBSERVED", "NO_VISIBLE_MOTION", "INSUFFICIENT_EVIDENCE"]
+              },
+              "openingState": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "closingState": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "events": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "startMs": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 120000
+                    },
+                    "endMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 120000
+                    },
+                    "subjectAction": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "cameraAction": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "contact": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "productPose": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "evidenceFramesMs": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 120000
+                      },
+                      "minItems": 1,
+                      "maxItems": 12
+                    }
+                  },
+                  "required": [
+                    "startMs",
+                    "endMs",
+                    "subjectAction",
+                    "cameraAction",
+                    "contact",
+                    "productPose",
+                    "evidenceFramesMs"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 0,
+                "maxItems": 12
+              }
+            },
+            "required": ["status", "openingState", "closingState", "reason", "events"],
+            "additionalProperties": false
+          },
+          "referenceFrames": {
+            "type": "integer",
+            "minimum": 48,
+            "maximum": 360
           }
         },
         "required": [
@@ -534,6 +559,38 @@
       },
       "minItems": 1,
       "maxItems": 4
+    },
+    "renderInstructionVersion": {
+      "const": 2
+    },
+    "sourceVideo": {
+      "type": "object",
+      "properties": {
+        "fileObjectId": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200000000
+        },
+        "mimeType": {
+          "type": "string",
+          "enum": ["video/mp4", "video/quicktime"]
+        },
+        "renderSeconds": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 15
+        }
+      },
+      "required": ["fileObjectId", "sha256", "sizeBytes", "mimeType"],
+      "additionalProperties": false
     }
   },
   "required": [

@@ -4,9 +4,11 @@ import { Archive, Download, Film, Play, RotateCcw, Sparkles } from '@lucide/vue'
 import { WorkflowRunProgress } from '@ai-marketing/ui';
 import {
   CLONE_GENERATION_LIMITS,
+  CLONE_SHOT_REFERENCE_MODE,
   type CloneArtifactRef,
   type CloneGenerationCount,
   type CloneGenerationList,
+  type CloneGenerationPreflight,
   type CloneGenerationTask,
 } from '@ai-marketing/contracts';
 import { safeApiErrorMessage } from '../../../api/http-client';
@@ -60,7 +62,15 @@ const alive = new AbortController();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let read = 0;
 let pending:
-  { ref: CloneArtifactRef; count: CloneGenerationCount; seconds: number; id: string } | undefined;
+  | {
+      ref: CloneArtifactRef;
+      count: CloneGenerationCount;
+      mode: CloneGenerationPreflight['mode'];
+      seconds: number;
+      referenceFrames: number | undefined;
+      id: string;
+    }
+  | undefined;
 const statusLabel = {
   QUEUED: '排队中',
   RUNNING: '处理中',
@@ -123,9 +133,30 @@ function generate() {
       alive.signal,
     );
     if (alive.signal.aborted) return;
+    const referenceFrames = plan.totalReferenceFrames;
+    if (plan.mode === CLONE_SHOT_REFERENCE_MODE && !referenceFrames)
+      throw new Error('预检未返回参考片段用量，请重新检查');
+    const method =
+      plan.mode === CLONE_SHOT_REFERENCE_MODE
+        ? '每个镜头以对应原片片段为视频参考，按锁定切点合成，并对照同一时间点的原片和成片审片。'
+        : plan.mode === 'SEEDANCE_2_0_SOURCE_EDIT'
+          ? '按原片时间线编辑所选元素。'
+          : '按确认报告的景别、构图、运镜与动作逐镜头生成，沿锁定切点合成。';
+    const referenceUsage = referenceFrames
+      ? `本批输入参考片段共 ${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 }).format(
+          (referenceFrames * plan.timeline.fpsDenominator) / plan.timeline.fpsNumerator,
+        )} 秒。`
+      : '';
+    const batch =
+      plan.count > CLONE_GENERATION_LIMITS.maxUnplannedCount
+        ? '本批将规划并审核差异方案。首条通过审片后开始其余条目。'
+        : '';
     const confirmed = await requestActionConfirmation({
       title: `生成 ${plan.count} 条复刻成片？`,
-      description: `输出为 ${plan.ratio}、720p 的静音硬切成片。每条 ${plan.shots.length} 个镜头，请求渲染时长合计 ${plan.totalRenderSeconds} 秒，并执行画面审核。${plan.count > CLONE_GENERATION_LIMITS.maxUnplannedCount ? '本批还将调用模型规划可见差异并逐条审核方案。' : ''}`,
+      description:
+        `每条 ${plan.shots.length} 个镜头，输出 ${plan.ratio}、720p 静音成片。${method}` +
+        referenceUsage +
+        `本批请求渲染合计 ${plan.totalRenderSeconds} 秒。${batch}`,
       confirmLabel: '确认生成',
     });
     if (!confirmed || alive.signal.aborted || !sameCloneContent(props.mappingRef, sourceMapping))
@@ -133,13 +164,17 @@ function generate() {
     if (
       !pending ||
       pending.count !== request.count ||
+      pending.mode !== plan.mode ||
       pending.seconds !== plan.totalRenderSeconds ||
+      pending.referenceFrames !== referenceFrames ||
       !sameCloneContent(pending.ref, sourceMapping)
     )
       pending = {
         ref: sourceMapping,
         count: request.count,
+        mode: plan.mode,
         seconds: plan.totalRenderSeconds,
+        referenceFrames,
         id: crypto.randomUUID(),
       };
     await createCloneGeneration(
@@ -149,6 +184,9 @@ function generate() {
         ...request,
         idempotencyKey: pending.id,
         acceptedRenderSeconds: pending.seconds,
+        ...(pending.referenceFrames !== undefined && {
+          acceptedReferenceFrames: pending.referenceFrames,
+        }),
       },
       alive.signal,
     );
@@ -250,13 +288,18 @@ onBeforeUnmount(() => {
         <section
           v-for="batch in batches"
           :key="batch.id"
-          :aria-label="`成片批次 ${batch.planning?.count ?? batch.items.length} 条`"
+          :aria-label="`成片批次 ${batch.count ?? batch.planning?.count ?? batch.items.length} 条`"
         >
           <div
-            v-if="batch.planning || batch.items.length > 1 || batch.downloadUrl"
+            v-if="
+              batch.planning ||
+              batch.sample ||
+              (batch.count ?? batch.items.length) > 1 ||
+              batch.downloadUrl
+            "
             class="fco-toolbar clone-generation-batch"
           >
-            <b>同批 {{ batch.planning?.count ?? batch.items.length }} 条</b>
+            <b>同批 {{ batch.count ?? batch.planning?.count ?? batch.items.length }} 条</b>
             <span class="count">{{ statusLabel[batch.status] }}</span>
             <span class="grow"></span>
             <a v-if="batch.downloadUrl" class="fco-btn" :href="batch.downloadUrl">
@@ -288,6 +331,18 @@ onBeforeUnmount(() => {
             role="status"
           >
             正在规划并审核批次差异，审核通过后开始生成镜头。
+          </p>
+          <p
+            v-if="batch.sample"
+            class="frg-note"
+            :class="{ warn: batch.status === 'FAILED' }"
+            role="status"
+          >
+            {{
+              batch.status === 'FAILED'
+                ? `首条验证未通过，其余 ${batch.sample.totalCount - 1} 条尚未开始。`
+                : `正在生成并审核首条，通过后自动开始其余 ${batch.sample.totalCount - 1} 条。`
+            }}
           </p>
           <div class="fco-list">
             <article v-for="(item, index) in batch.items" :key="item.id" class="fco-card">
@@ -338,10 +393,26 @@ onBeforeUnmount(() => {
                   :summary="item.message"
                   action-label=""
                 />
-                <p v-if="item.error" class="clone-generation-error">{{ item.error }}</p>
+                <details v-if="item.reviewIssues?.length" class="clone-generation-review">
+                  <summary>
+                    审片未通过 · 镜头
+                    {{ item.reviewIssues.map((issue) => issue.shotNumber).join('、') }}
+                  </summary>
+                  <ul>
+                    <li v-for="issue in item.reviewIssues" :key="issue.shotNumber">
+                      <strong>
+                        镜头 {{ issue.shotNumber }} ·
+                        {{ issue.verdict === 'WARNING' ? '证据不足' : '未通过' }}
+                      </strong>
+                      <p>{{ issue.reason }}</p>
+                      <small>成片帧号 {{ issue.evidenceFrames.join('、') }}</small>
+                    </li>
+                  </ul>
+                </details>
+                <p v-else-if="item.error" class="clone-generation-error">{{ item.error }}</p>
                 <div class="fco-actions">
                   <button
-                    v-if="batch.items.length === 1 && active(item)"
+                    v-if="batch.items.length === 1 && !batch.sample && active(item)"
                     :disabled="mutating"
                     @click="change(item.id, 'cancel')"
                   >
@@ -353,7 +424,7 @@ onBeforeUnmount(() => {
                       mutating ||
                       state.active ||
                       !enabled ||
-                      (state.pendingBatch && batch.items.length === 1)
+                      (state.pendingBatch && batch.items.length === 1 && !batch.sample)
                     "
                     @click="change(item.id, 'retry')"
                   >
@@ -408,6 +479,31 @@ onBeforeUnmount(() => {
   color: #9f2a3a;
   margin: 8px 0;
   font-size: 12px;
+}
+.clone-generation-review {
+  margin-top: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.clone-generation-review summary {
+  width: fit-content;
+  padding: 4px 2px;
+  color: #9f2a3a;
+  cursor: pointer;
+}
+.clone-generation-review ul {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0 8px;
+  padding: 0;
+  list-style: none;
+}
+.clone-generation-review p {
+  margin: 2px 0;
+  line-height: 1.5;
+}
+.clone-generation-review small {
+  color: var(--text-muted, #64748b);
 }
 .clone-generation-preview {
   display: block;

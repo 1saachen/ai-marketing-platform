@@ -15,6 +15,67 @@ def report():
 
 
 @pytest.fixture
+def motion_report(report):
+    first, second = report["shots"]
+    first["evidenceFramesMs"] = [0, 500]
+    first["motion"] = {
+        "status": "OBSERVED",
+        "openingState": "商品立在桌面",
+        "closingState": "商品标签朝向右侧",
+        "reason": "",
+        "events": [
+            {
+                "startMs": 0,
+                "endMs": 600,
+                "subjectAction": "手从底部托起商品",
+                "cameraAction": "机位固定",
+                "contact": "手掌接触盒底",
+                "productPose": "商品提起后向右倾斜",
+                "evidenceFramesMs": [0, 500],
+            }
+        ],
+    }
+    second["motion"] = {
+        "status": "INSUFFICIENT_EVIDENCE",
+        "openingState": "",
+        "closingState": "",
+        "reason": "遮挡使商品姿态无法辨认",
+        "events": [],
+    }
+    return report
+
+
+@pytest.fixture
+def prop_report(motion_report):
+    opening = motion_report["shots"][0]
+    opening["elementIds"].append("orange_box")
+    motion_report["elements"].append(
+        {
+            "elementId": "orange_box",
+            "type": "prop",
+            "label": "橙色盒子",
+            "description": "瓶子右上角、黑色粉盒左侧的橙色长方盒",
+            "shotIds": [opening["shotId"]],
+            "ranges": [{"startMs": 500, "endMs": 1500}],
+            "evidence": [
+                {
+                    "kind": "VISUAL",
+                    "startMs": 1000,
+                    "endMs": 1100,
+                    "description": "可辨盒子的颜色和直角轮廓",
+                    "confidence": 0.9,
+                }
+            ],
+            "required": False,
+            "sourceTrack": "VISUAL",
+            "transcriptText": "",
+            "confidence": 0.9,
+        }
+    )
+    return motion_report
+
+
+@pytest.fixture
 def mapping():
     return json.loads(
         (contracts_directory() / "fixtures/fission-clone-mapping.json").read_text(

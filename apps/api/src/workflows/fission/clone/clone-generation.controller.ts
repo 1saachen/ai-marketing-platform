@@ -6,6 +6,7 @@ import {
   Controller,
   DefaultValuePipe,
   Get,
+  Header,
   Headers,
   Inject,
   Injectable,
@@ -236,5 +237,26 @@ export class CloneGenerationWorkerController {
     response.setHeader('Content-Length', content.contentLength);
     response.setHeader('Cache-Control', 'no-store');
     await pipeline(content.stream, response);
+  }
+
+  @Get(':taskId/source-video-url')
+  @Header('Cache-Control', 'no-store')
+  sourceVideoUrl(
+    @Param('taskId', uuid()) task: string,
+    @Query('projectId', uuid()) p: string,
+    @Headers('x-attempt-token') token: string,
+  ) {
+    return this.service.sourceVideoUrl(p, task, token);
+  }
+
+  @Get(':taskId/shot-reference/:index/url')
+  @Header('Cache-Control', 'no-store')
+  shotReferenceUrl(
+    @Param('taskId', uuid()) task: string,
+    @Param('index', ParseIntPipe) index: number,
+    @Query('projectId', uuid()) p: string,
+    @Headers('x-attempt-token') token: string,
+  ) {
+    return this.service.shotReferenceUrl(p, task, token, index);
   }
 }

@@ -20,7 +20,12 @@ import { WorkflowWorkingRepository } from '../../../platform/workflow/workflow-w
 import { CloneGenerationRepository, cloneArchiveOperationKey } from './clone-generation.repository';
 import { CloneTaskRepository } from './clone-task.repository';
 import { CloneService } from './clone.service';
-import { cloneGenerationConfigured } from './clone-generation-config';
+import {
+  assertCloneShotReferenceStorage,
+  canSignCloneSourceVideo,
+  cloneGenerationConfigured,
+} from './clone-generation-config';
+import { cloneReferenceSlotIndex } from './clone-generation-plan';
 import { cloneConflict } from './clone-task-scope';
 import { inspectGenerationFile } from './clone-generation-media';
 import { streamCloneBatch } from './clone-generation-export';
@@ -67,12 +72,10 @@ export class CloneGenerationService {
     await this.access(p);
     const models = this.configured();
     try {
-      return await this.repository.create(
-        p,
-        r,
-        parse(parseCloneGenerationCreateRequest, body),
-        models,
-      );
+      return await this.repository.create(p, r, parse(parseCloneGenerationCreateRequest, body), {
+        ...models,
+        sourceVideoSigningAvailable: canSignCloneSourceVideo(this.config, this.storage),
+      });
     } catch (error) {
       if (error instanceof TypeError)
         throw new ApiHttpException(error.message, 400, 'VALIDATION_ERROR');
@@ -198,6 +201,27 @@ export class CloneGenerationService {
     return this.storage.open(file.storageKey);
   }
 
+  async sourceVideoUrl(p: string, task: string, token: string) {
+    const file = await this.repository.sourceVideoForSigning(p, task, token);
+    if (!canSignCloneSourceVideo(this.config, this.storage))
+      throw new ApiHttpException(
+        '原片编辑需要已配置的私有 TOS 存储',
+        503,
+        'CLONE_CAPABILITY_UNAVAILABLE',
+      );
+    const url = await this.storage.signedReadUrl?.(file.storageKey, 1800, file.sizeBytes);
+    if (!url) cloneConflict('原片编辑参考视频无法签发访问地址');
+    return { url };
+  }
+
+  async shotReferenceUrl(p: string, task: string, token: string, index: number) {
+    assertCloneShotReferenceStorage(canSignCloneSourceVideo(this.config, this.storage));
+    const file = await this.repository.shotReferenceForSigning(p, task, token, index);
+    const url = await this.storage.signedReadUrl?.(file.storageKey, 1800, file.sizeBytes);
+    if (!url) cloneConflict('镜头参考片段无法签发访问地址');
+    return { url };
+  }
+
   async upload(p: string, task: string, token: string, slot: string, file?: UploadedAssetFile) {
     if (!file) throw new ApiHttpException('缺少镜头或成片文件', 400, 'FILE_REQUIRED');
     const { existing, snapshot } = await this.repository.fileAdmission(p, task, token, slot);
@@ -208,7 +232,15 @@ export class CloneGenerationService {
       return existing;
     }
     const project = await this.projects.get(p);
-    const originalFileName = slot === 'final' ? '复刻成片.mp4' : `镜头-${Number(slot) + 1}.mp4`;
+    const referenceIndex = cloneReferenceSlotIndex(slot);
+    const originalFileName =
+      referenceIndex !== null
+        ? `镜头参考-${referenceIndex + 1}.mp4`
+        : slot === 'final'
+          ? '复刻成片.mp4'
+          : snapshot.plan.mode === 'SEEDANCE_2_0_SOURCE_EDIT'
+            ? '原片编辑结果.mp4'
+            : `镜头-${Number(slot) + 1}.mp4`;
     const stored = await this.storage.put({
       projectId: p,
       stream: createReadStream(file.path),

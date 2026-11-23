@@ -89,7 +89,11 @@ export class CloneMediaService {
         width * height > limits.maxPixels
       )
         throw new Error('DIMENSIONS');
-      const seconds = Number(probe.format?.duration ?? stream?.duration);
+      const videoSeconds = Number(stream?.duration);
+      const seconds =
+        Number.isFinite(videoSeconds) && videoSeconds > 0
+          ? videoSeconds
+          : Number(probe.format?.duration);
       if (
         !image &&
         (!Number.isFinite(seconds) ||

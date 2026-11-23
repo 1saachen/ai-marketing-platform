@@ -8,7 +8,7 @@ from ai_runtime.responses import StructuredResponsesMixin
 from jsonschema import ValidationError
 from pydantic import RootModel, model_validator
 
-from .plan import validator
+from .plan import prompt_product_fields, validator
 
 
 class PlanningPort(Protocol):
@@ -54,8 +54,7 @@ def planning_input(context: dict[str, Any]) -> dict[str, Any]:
     plan = context["plan"]
     brief = {
         "variantIds": context["variantIds"],
-        "product": plan["productName"],
-        "facts": plan["productFacts"],
+        **prompt_product_fields(plan),
     }
     if context.get("version") == 2:
         return {

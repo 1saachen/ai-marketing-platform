@@ -149,6 +149,28 @@ describe.skipIf(!enabled)('clone G1 database transaction boundaries', () => {
     expect(await db.jobOutbox.count({ where: { projectId } })).toBe(0);
   }, 30_000);
 
+  it('confirms the selected reference without product text only after rights are confirmed', async () => {
+    const { projectId, runId } = await scope();
+    const reference = await upload(projectId, runId);
+    const state = { ...emptyCloneInputDraft(), referenceUploadId: reference.id };
+    const first = await save(projectId, runId, state);
+    await expect(
+      repository.confirm(projectId, runId, {
+        expectedDraftRevision: first.record.revision,
+        expectedInputRevision: 0,
+      }),
+    ).rejects.toThrow('请选择参考视频并确认来源使用权限');
+
+    const accepted = { ...state, sourceRightsConfirmed: true };
+    const second = await save(projectId, runId, accepted);
+    await repository.confirm(projectId, runId, {
+      expectedDraftRevision: second.record.revision,
+      expectedInputRevision: 0,
+    });
+    const workspace = await repository.workspace(projectId, runId);
+    expect(workspace.input).toMatchObject({ revision: 1, payload: { input: accepted } });
+  }, 30_000);
+
   it('allows exactly one concurrent changed draft at the same expected revision', async () => {
     const { projectId, runId } = await scope();
     const original = (await repository.workspace(projectId, runId)).draft!;

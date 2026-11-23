@@ -1,6 +1,9 @@
 FROM ghcr.io/astral-sh/uv:0.11.16-python3.12-trixie-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 UV_LINK_MODE=copy FISSION_CLONE_CONTRACTS_DIR=/app/contracts
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/fission-clone-analysis
 COPY workers/shared/ai-runtime /app/shared/ai-runtime
 COPY workers/fission-clone-analysis/pyproject.toml workers/fission-clone-analysis/uv.lock ./
