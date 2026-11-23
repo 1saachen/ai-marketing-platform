@@ -19,8 +19,10 @@ import {
 
 export const CLONE_ANALYSIS_ARTIFACT_KEY = 'clone-analysis';
 export const CLONE_MAPPING_ARTIFACT_KEY = 'clone-mapping';
+export const CLONE_ANALYSIS_INSTRUCTION_VERSION = 3;
 export const CLONE_ELEMENT_TYPES = [
   'product',
+  'prop',
   'person',
   'scene',
   'subtitle',
@@ -28,6 +30,11 @@ export const CLONE_ELEMENT_TYPES = [
   'voiceover',
 ] as const;
 export type CloneElementType = (typeof CLONE_ELEMENT_TYPES)[number];
+export const CLONE_PROP_IMAGE_MIME_TYPES: readonly string[] = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+];
 export const CLONE_TASK_STATUSES = [
   'QUEUED',
   'RUNNING',
@@ -58,6 +65,19 @@ export type CloneStage = CloneTimeRange & {
   /** Fraction of the entire reference duration, 0–1. */
   proportion: number;
 };
+export type CloneShotMotion = {
+  status: 'OBSERVED' | 'NO_VISIBLE_MOTION' | 'INSUFFICIENT_EVIDENCE';
+  openingState: string;
+  closingState: string;
+  reason: string;
+  events: (CloneTimeRange & {
+    subjectAction: string;
+    cameraAction: string;
+    contact: string;
+    productPose: string;
+    evidenceFramesMs: number[];
+  })[];
+};
 export type CloneShot = CloneTimeRange & {
   shotId: string;
   stageId: string;
@@ -67,6 +87,8 @@ export type CloneShot = CloneTimeRange & {
   composition: string;
   elementIds: string[];
   evidenceFramesMs: number[];
+  /** Motion timestamps use the reference video's timeline. */
+  motion?: CloneShotMotion;
 };
 export type CloneElement = {
   elementId: string;
@@ -266,6 +288,7 @@ export type CloneMappingCandidate = {
 };
 export type CloneTaskSnapshot = {
   schemaVersion: 1;
+  analysisInstructionVersion?: 2 | 3 | 4;
   operation: CloneTaskOperation;
   purpose: CloneMappingPurpose | null;
   input: { ref: CloneArtifactRef; input: CloneInputDraft; files: CloneTaskFile[] };
@@ -354,7 +377,24 @@ const stage = object({
   summary: text(),
   proportion: ratio,
 });
-const shot = object({
+export const CLONE_SHOT_MOTION_SCHEMA = object({
+  status: enumeration('OBSERVED', 'NO_VISIBLE_MOTION', 'INSUFFICIENT_EVIDENCE'),
+  openingState: text(1000),
+  closingState: text(1000),
+  reason: text(1000),
+  events: array(
+    object({
+      ...range.properties,
+      subjectAction: text(1000),
+      cameraAction: text(1000),
+      contact: text(1000),
+      productPose: text(1000),
+      evidenceFramesMs: array(integer(0, 120000), 12, 1),
+    }),
+    12,
+  ),
+});
+const shotFields = {
   shotId: id,
   stageId: id,
   ...range.properties,
@@ -364,7 +404,11 @@ const shot = object({
   composition: text(),
   elementIds: array(id),
   evidenceFramesMs: array(integer(0, 120000), 100),
-});
+};
+const shot: Schema = {
+  ...object(shotFields),
+  properties: { ...shotFields, motion: CLONE_SHOT_MOTION_SCHEMA },
+};
 const element = object({
   elementId: id,
   type: enumeration(...CLONE_ELEMENT_TYPES),
@@ -541,6 +585,40 @@ function coverage(rows: CloneTimeRange[], durationMs: number, label: string) {
   )
     fail(label, '必须有序、连续覆盖完整参考时长');
 }
+export function validateCloneShotMotion(
+  motion: CloneShotMotion,
+  { startMs, endMs }: CloneTimeRange,
+  evidenceFramesMs?: readonly number[],
+): void {
+  if (motion.status === 'OBSERVED') {
+    if (!motion.events.length) fail('镜头动作', '已观察到动作时须提供动作区间');
+  } else if (motion.events.length || !motion.reason.trim()) {
+    fail('镜头动作', '未确认动作时须提供理由，且动作区间应为空');
+  }
+  let previousEnd = startMs;
+  for (const event of motion.events) {
+    if (
+      ![event.subjectAction, event.cameraAction, event.contact, event.productPose].some((text) =>
+        text.trim(),
+      )
+    )
+      fail('镜头动作', '动作区间须提供可见观察');
+    if (event.startMs < previousEnd || event.startMs >= event.endMs || event.endMs > endMs)
+      fail('动作区间', '必须按时间排序且完整位于所属镜头内');
+    if (
+      event.evidenceFramesMs.some(
+        (time, index) =>
+          time < event.startMs ||
+          time > event.endMs ||
+          time >= endMs ||
+          (index > 0 && time <= event.evidenceFramesMs[index - 1]!) ||
+          (evidenceFramesMs && !evidenceFramesMs.includes(time)),
+      )
+    )
+      fail('动作证据帧', '必须有序且可在动作区间内核对');
+    previousEnd = event.endMs;
+  }
+}
 export function parseCloneAnalysisReport(value: unknown): CloneAnalysisReport {
   const report = parse<CloneAnalysisReport>(FISSION_CLONE_ANALYSIS_REPORT_SCHEMA, value);
   validateRanges(report, report.durationMs);
@@ -576,6 +654,9 @@ export function parseCloneAnalysisReport(value: unknown): CloneAnalysisReport {
       fail('镜头元素', '双向引用不一致');
     if (item.evidenceFramesMs.some((time) => time < item.startMs || time >= item.endMs))
       fail('证据帧', '不在所属镜头内');
+    if (item.motion?.status === 'NO_VISIBLE_MOTION' && new Set(item.evidenceFramesMs).size < 2)
+      fail('镜头动作', '未见动作需要至少两个不同的镜头证据时点');
+    if (item.motion) validateCloneShotMotion(item.motion, item, item.evidenceFramesMs);
   }
   for (const item of report.elements) {
     unique(item.shotIds, '元素镜头');
@@ -596,6 +677,28 @@ export function parseCloneAnalysisReport(value: unknown): CloneAnalysisReport {
     )
       fail('元素区间', '未与引用镜头相交');
     if (item.type === 'product' && !item.required) fail('产品元素', '产品必须逐项替换');
+    if (item.type === 'prop') {
+      if (
+        item.required ||
+        item.sourceTrack !== 'VISUAL' ||
+        !item.label.trim() ||
+        !item.description.trim()
+      )
+        fail('道具元素', '需提供名称和画面位置说明，并标记为可选视觉元素');
+      const visualEvidence = item.evidence.filter((row) => row.kind === 'VISUAL');
+      if (
+        !visualEvidence.length ||
+        visualEvidence.some(
+          (row) =>
+            !row.description.trim() ||
+            !item.ranges.some(
+              (range) => range.startMs <= row.startMs && row.startMs < range.endMs,
+            ) ||
+            !item.shotIds.some((key) => shots.get(key)!.evidenceFramesMs.includes(row.startMs)),
+        )
+      )
+        fail('道具元素', '须提供出现区间内可核对的画面证据');
+    }
   }
   for (const subtitle of report.visual.subtitles)
     if (elements.get(subtitle.elementId)?.type !== 'subtitle')
@@ -775,6 +878,8 @@ export function validateCloneMappingForReport(
       fail('映射元素', '类型或镜头引用与确认报告不一致');
     if (binding.type === 'product' && binding.action !== 'REPLACE')
       fail('产品映射', '所有产品元素都必须替换');
+    if (binding.type === 'prop' && binding.action === 'KEEP' && binding.target)
+      fail('道具映射', '保留时无需提供替换目标');
     if (!requireComplete) continue;
     if (binding.action === 'KEEP' && ['subtitle', 'bgm', 'voiceover'].includes(binding.type))
       fail('保留能力', '当前未提供可执行的原音轨或烧录字幕保留方案，请选择替换');
@@ -792,6 +897,8 @@ export function validateCloneMappingForReport(
     if (binding.target?.voice.trim()) fail('音色能力', '当前未启用指定音色或声音克隆');
     if (binding.type === 'product' && !binding.target?.asset && !binding.target?.text.trim())
       fail('产品映射', '产品替换不能只指定风格');
+    if (binding.type === 'prop' && binding.action === 'REPLACE' && !binding.target?.asset)
+      fail('道具映射', '请选择当前项目中的目标道具图片');
     if (
       binding.target?.contentStrategy === 'KEEP' &&
       (!['subtitle', 'voiceover'].includes(binding.type) || !source.transcriptText.trim())

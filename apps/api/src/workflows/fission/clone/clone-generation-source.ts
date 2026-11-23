@@ -1,5 +1,6 @@
 import {
   CLONE_ANALYSIS_ARTIFACT_KEY,
+  CLONE_GENERATION_LIMITS,
   CLONE_INPUT_ARTIFACT_KEY,
   CLONE_MAPPING_ARTIFACT_KEY,
   normalizeCloneInputDraft,
@@ -7,12 +8,13 @@ import {
   parseCloneMappingDraft,
   type CloneArtifactRef,
   type CloneGenerationImage,
+  type CloneGenerationSourceFile,
   type CloneUpload,
 } from '@ai-marketing/contracts';
 import type { Prisma } from '../../../generated/prisma/client';
 import { lockCloneRun } from '../../../platform/workflow/fission-clone-scope';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
-import { compileCloneGenerationPlan } from './clone-generation-plan';
+import { assertNoClonePropReplacement, compileCloneGenerationPlan } from './clone-generation-plan';
 import { cloneConflict, requireCloneSource, validateCloneMappingAssets } from './clone-task-scope';
 
 /** Called within the same lock as future task creation, so preflight can be repeated at enqueue. */
@@ -31,6 +33,7 @@ export async function loadCloneGenerationPlan(
     sourceMapping,
   );
   const mapping = parseCloneMappingDraft(confirmedMapping.payload);
+  assertNoClonePropReplacement(mapping);
   const analysis = await requireCloneSource(
     tx,
     projectId,
@@ -58,7 +61,13 @@ export async function loadCloneGenerationPlan(
   const referenceMedia = inputPayload?.files?.find(
     (file) => file.fileObjectId === reference?.id,
   )?.media;
-  if (!reference || reference.status !== 'AVAILABLE' || reference.workflowRunId !== workflowRunId)
+  if (
+    !reference ||
+    reference.status !== 'AVAILABLE' ||
+    reference.projectId !== projectId ||
+    reference.workflowRunId !== workflowRunId ||
+    reference.nodeId !== 'CLONE_INPUT'
+  )
     cloneConflict('确认输入的参考视频文件不可用');
   if (
     referenceMedia?.durationMs !== report.durationMs ||
@@ -66,7 +75,18 @@ export async function loadCloneGenerationPlan(
     referenceMedia.height !== report.frameHeight
   )
     cloneConflict('确认报告与参考视频时长或尺寸不一致');
-
+  if (
+    (reference.mimeType !== 'video/mp4' && reference.mimeType !== 'video/quicktime') ||
+    reference.sizeBytes < 1 ||
+    reference.sizeBytes > CLONE_GENERATION_LIMITS.maxSourceVideoBytes
+  )
+    throw new TypeError('逐镜头参考仅支持不超过 200 MB 的 MP4 或 MOV 原片');
+  const sourceVideo: CloneGenerationSourceFile = {
+    fileObjectId: reference.id,
+    sha256: reference.sha256,
+    sizeBytes: reference.sizeBytes,
+    mimeType: reference.mimeType,
+  };
   const scopedFiles = await validateCloneMappingAssets(tx, projectId, workflowRunId, mapping);
   const featureAssets = mapping.bindings.flatMap((binding) =>
     binding.target?.asset ? [binding.target.asset] : [],
@@ -121,5 +141,6 @@ export async function loadCloneGenerationPlan(
     report,
     mapping,
     images,
+    sourceVideo,
   });
 }

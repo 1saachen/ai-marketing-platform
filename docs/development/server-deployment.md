@@ -34,6 +34,28 @@ docker compose --env-file .env.production -f compose.production.yaml build api
 
 Worker 代码或配置变化时，在无活动任务时重建相应镜像，再运行 `docker compose --env-file .env.production -f compose.production.yaml up -d --no-build <服务名>`。不要清理其他项目的镜像、数据卷或容器。
 
+### 爆款复刻生产启用
+
+爆款复刻开关默认关闭，两个消费者通过独立 Compose profile 启动。通用 `start-workers.sh` 不启动这两个消费者。完成备份后，根据启用范围应用 G1、G2、G3 及批次条目迁移，准备 Web 静态产物和对应发布标识的 API、Worker 镜像。配置键、迁移顺序和各阶段能力见[爆款复刻业务指南](../workflows/fission/clone/agent-guide.md)及[本地运行指南](local-development.md#爆款复刻成片生成-worker)。
+
+```sh
+dc() { docker compose --env-file .env.production -f compose.production.yaml --profile fission-clone-analysis --profile fission-clone-generation "$@"; }
+dc config --quiet
+dc build api fission-clone-analysis-worker fission-clone-generation-worker
+```
+
+迁移、API 和 Web 生效后，确认目标队列及 Outbox 中没有未经授权的待执行任务，再显式启动需要的消费者。仅启用拆解时只指定 `fission-clone-analysis-worker`。两者都启用时执行以下命令。
+
+```sh
+dc up -d --no-build --no-deps fission-clone-analysis-worker fission-clone-generation-worker
+dc ps api web fission-clone-analysis-worker fission-clone-generation-worker
+dc exec -T rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers
+```
+
+记录实际镜像和迁移结果，分别核对 Worker 健康状态、相应队列的消费者数量与积压，以及正式页面能否读取复刻工作区。`/api/health` 只检查 API 存活。无付费演练使用独立项目、空数据库、独立队列和无效供应商凭据，检查容器及路由时不创建真实模型任务。
+
+回退前先暂停接收新的复刻生成请求，用当前版本等待或取消尚在首条验证阶段的批次，再确认执行中任务、待投递 Outbox 和队列积压均已处理。回退到不识别首条验证阶段的版本时同步恢复对应的 API、Web 静态产物和生成 Worker。保留备份、旧镜像及数据卷，数据恢复另行演练和确认。
+
 ## 备份与访问
 
 备份脚本先检查 `pg_dump` 成功，再压缩并校验，文件保存在权限为 `0700` 的 `backups/`。服务器已配置 `/etc/cron.d/richi-marketing-backup`，每天服务器本地时间 03:30 生成数据库备份。备份位于同一台服务器；需要异地灾备时应另行配置受控备份存储。

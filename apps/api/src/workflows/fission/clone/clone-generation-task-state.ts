@@ -18,6 +18,7 @@ type GenerationBatchSnapshot = Pick<CloneGenerationSnapshot, 'plan' | 'model' | 
   count: number;
   planningModel?: string;
   planningVersion?: 2;
+  sampleFirst?: true;
   variantIds?: string[];
 };
 const variantIdPattern = new RegExp(CLONE_UUID_PATTERN);
@@ -34,6 +35,8 @@ export function generationBatchSnapshot(parent: FissionCloneTask): GenerationBat
     snapshot.count > CLONE_GENERATION_LIMITS.maxCount ||
     (snapshot.planningVersion !== undefined &&
       (snapshot.planningVersion !== 2 || !snapshot.planningModel)) ||
+    (snapshot.sampleFirst !== undefined &&
+      (snapshot.sampleFirst !== true || snapshot.planningVersion !== 2)) ||
     (snapshot.planningModel !== undefined || snapshot.variantIds !== undefined
       ? typeof snapshot.planningModel !== 'string' ||
         !snapshot.planningModel.trim() ||
@@ -79,7 +82,12 @@ export const pendingGenerationBatch = (
   workflowRunId: string,
 ) =>
   tx.fissionCloneTask.findFirst({
-    where: { projectId, workflowRunId, operation: 'GENERATE_BATCH', currentStage: 'PLANNED' },
+    where: {
+      projectId,
+      workflowRunId,
+      operation: 'GENERATE_BATCH',
+      currentStage: { in: ['SAMPLE', 'PLANNED'] },
+    },
   });
 
 export async function verifyGenerationSources(
@@ -112,12 +120,34 @@ async function verifyGenerationPlanSources(
   if (plan.projectId !== p || plan.workflowRunId !== r) cloneConflict('成片任务快照无效');
   await requireCloneSource(tx, p, r, CLONE_MAPPING_ARTIFACT_KEY, plan.sources.mapping);
   await requireCloneSource(tx, p, r, CLONE_ANALYSIS_ARTIFACT_KEY, plan.sources.analysis);
-  await requireCloneSource(tx, p, r, CLONE_INPUT_ARTIFACT_KEY, plan.sources.input);
+  const input = await requireCloneSource(tx, p, r, CLONE_INPUT_ARTIFACT_KEY, plan.sources.input);
   const holds = await tx.fissionCloneFileHold.findMany({
     where: { projectId: p, workflowRunId: r, taskId: task.id },
     include: { fileObject: true },
   });
   const byId = new Map(holds.map((hold) => [hold.fileObjectId, hold]));
+  if (plan.mode !== 'SEEDANCE_2_0_SILENT_CUT') {
+    const source = plan.sourceVideo;
+    const hold = source && byId.get(source.fileObjectId);
+    const file = hold?.fileObject;
+    if (
+      !source ||
+      !hold ||
+      !file ||
+      !input.files.some(
+        (entry) => entry.role === 'REFERENCE' && entry.fileObject.id === source.fileObjectId,
+      ) ||
+      hold.sha256 !== source.sha256 ||
+      file.sha256 !== source.sha256 ||
+      file.sizeBytes !== source.sizeBytes ||
+      file.mimeType !== source.mimeType ||
+      file.status !== 'AVAILABLE' ||
+      file.projectId !== p ||
+      file.workflowRunId !== r ||
+      file.nodeId !== 'CLONE_INPUT'
+    )
+      cloneConflict('成片任务冻结原片不可用');
+  }
   for (const item of plan.images) {
     const hold = byId.get(item.fileObjectId);
     if (

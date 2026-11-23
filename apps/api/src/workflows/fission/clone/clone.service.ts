@@ -49,6 +49,7 @@ export class CloneService {
       g2 &&
       Boolean(this.config.get<string>('FISSION_CLONE_ANALYSIS_MODEL')) &&
       Boolean(this.config.get<string>('FISSION_CLONE_ANALYSIS_WORKER_TOKEN'));
+    const generation = g2 && Boolean(cloneGenerationConfigured(this.config));
     return {
       inputEnabled: enabled,
       analysisEnabled: analysis,
@@ -59,11 +60,13 @@ export class CloneService {
       audioTranscriptionEnabled: false,
       originalTrackKeepEnabled: false,
       burnedInKeepEnabled: false,
-      generationEnabled: g2 && Boolean(cloneGenerationConfigured(this.config)),
+      generationEnabled: generation,
       unavailableReason: enabled
         ? g2
           ? analysis
-            ? '抽帧画面分析已接入；音频语义识别、原轨道保留和成片生成暂未开放'
+            ? generation
+              ? null
+              : '逐镜头成片生成尚未启用，请核对生成和审片服务配置'
             : '拆解模型或独立执行服务尚未配置；可浏览已有报告和编辑映射'
           : '真实拆解与成片生成尚未开放'
         : '爆款复刻真实输入尚未启用，请完成数据库迁移及媒体服务配置',

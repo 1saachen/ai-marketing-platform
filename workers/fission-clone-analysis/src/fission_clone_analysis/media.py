@@ -13,6 +13,10 @@ class MediaError(RuntimeError):
     """Safe media failure; never includes FFmpeg stderr or a local file path."""
 
 
+MOTION_SAMPLE_INTERVAL_MS = 500
+LEGACY_DURATION_TOLERANCE_MS = 42
+
+
 @dataclass(frozen=True)
 class MediaLimits:
     ffmpeg: str = "ffmpeg"
@@ -26,7 +30,7 @@ class MediaLimits:
     process_timeout: float = 45
 
     def __post_init__(self) -> None:
-        if not 2 <= self.max_frames <= 48 or self.interval_ms < 1000:
+        if not 2 <= self.max_frames <= 48 or self.interval_ms < MOTION_SAMPLE_INTERVAL_MS:
             raise ValueError("invalid bounded frame sampling configuration")
         if not 1 <= self.process_timeout <= 120:
             raise ValueError("invalid media process timeout")
@@ -200,7 +204,23 @@ async def _sampling_plan(
     )
 
 
-async def sample_video(source: Path, directory: Path, limits: MediaLimits) -> Sample:
+def _positive_duration_seconds(value: object) -> float | None:
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
+
+
+async def sample_video(
+    source: Path,
+    directory: Path,
+    limits: MediaLimits,
+    *,
+    frozen_media: dict[str, Any] | None = None,
+) -> Sample:
     output = await run_process(
         [
             limits.ffprobe,
@@ -220,19 +240,43 @@ async def sample_video(source: Path, directory: Path, limits: MediaLimits) -> Sa
         video = next(
             stream for stream in streams if stream.get("codec_type") == "video"
         )
-        duration = float(
-            probe.get("format", {}).get("duration") or video.get("duration")
-        )
+        duration = _positive_duration_seconds(video.get("duration"))
+        if duration is None:
+            duration = _positive_duration_seconds(probe.get("format", {}).get("duration"))
         width, height = int(video["width"]), int(video["height"])
-        if not math.isfinite(duration) or width <= 0 or height <= 0:
+        if duration is None or width <= 0 or height <= 0:
             raise ValueError("invalid probe")
-        duration_ms = math.floor(duration * 1000 + 0.5)
+        probed_duration_ms = math.floor(duration * 1000 + 0.5)
         if width * height > limits.max_pixels:
             raise ValueError("pixel limit")
         has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
-    except (KeyError, ValueError, TypeError, StopIteration) as exc:
+    except (KeyError, ValueError, TypeError, StopIteration, OverflowError) as exc:
         raise MediaError("参考视频媒体信息无效") from exc
-    times, cuts = await _sampling_plan(source, duration_ms, limits)
+    duration_ms = probed_duration_ms
+    if frozen_media is not None:
+        frozen_duration = frozen_media.get("durationMs")
+        frozen_width = frozen_media.get("width")
+        frozen_height = frozen_media.get("height")
+        if (
+            type(frozen_duration) is not int
+            or frozen_duration <= 0
+            or type(frozen_width) is not int
+            or frozen_width <= 0
+            or type(frozen_height) is not int
+            or frozen_height <= 0
+        ):
+            raise MediaError("已确认的参考视频媒体信息无效")
+        if (width, height) != (frozen_width, frozen_height):
+            raise MediaError("参考视频尺寸与已确认来源不一致")
+        if abs(frozen_duration - probed_duration_ms) > LEGACY_DURATION_TOLERANCE_MS:
+            raise MediaError("参考视频时长与已确认来源不一致")
+        duration_ms = frozen_duration
+    if not 1 <= duration_ms <= limits.max_duration_ms:
+        raise MediaError("参考视频时长不在支持范围内")
+    # Preserve the frozen report timeline but only request frames within both time ranges.
+    times, cuts = await _sampling_plan(
+        source, min(probed_duration_ms, duration_ms), limits
+    )
     frames: list[Frame] = []
     total_bytes = 0
     for index, timestamp in enumerate(times):

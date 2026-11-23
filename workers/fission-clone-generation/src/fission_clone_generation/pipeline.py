@@ -15,28 +15,50 @@ from ai_runtime.seedance import VideoOutput
 from pydantic import ValidationError
 
 from .api import Api
-from .media import MediaError, compose
-from .plan import validate_plan
+from .media import (
+    MediaError,
+    compose,
+    compose_source_edit,
+    extract_shot_reference,
+    normalize_original,
+)
+from .plan import SHOT_REFERENCE_MODE, SOURCE_EDIT_MODE, SOURCE_VIDEO_MAX_BYTES, validate_plan
 from .planning import PlanningPort
-from .provider import RenderCheckpoint
+from .provider import RenderCheckpoint, render_create_rejected
 from .review import review_passed
 
-Renderer = Callable[
-    [
-        dict[str, Any],
-        str,
-        str,
-        dict[str, bytes],
-        RenderCheckpoint,
-        Callable[[RenderCheckpoint], Awaitable[None]],
-    ],
+SaveCheckpoint = Callable[[RenderCheckpoint], Awaitable[None]]
+SourceRenderer = Callable[
+    [dict[str, Any], str | None, str, dict[str, bytes], RenderCheckpoint, SaveCheckpoint],
     Awaitable[VideoOutput],
 ]
+RenderClip = Callable[[RenderCheckpoint, SaveCheckpoint], Awaitable[VideoOutput]]
+
+
+class Renderer(Protocol):
+    async def __call__(
+        self,
+        plan: dict[str, Any],
+        shot_id: str,
+        model: str,
+        images: dict[str, bytes],
+        checkpoint: RenderCheckpoint,
+        save_checkpoint: SaveCheckpoint,
+        /,
+        *,
+        reference_url: str | None = None,
+    ) -> VideoOutput: ...
 
 
 class ReviewPort(Protocol):
     async def evaluate(
-        self, plan: dict[str, Any], model: str, final: Path, images: dict[str, Path]
+        self,
+        plan: dict[str, Any],
+        model: str,
+        final: Path,
+        images: dict[str, Path],
+        *,
+        original: Path | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -76,6 +98,8 @@ async def execute_generation(
     reviewer: ReviewPort,
     ffmpeg: str,
     ffprobe: str,
+    *,
+    render_source: SourceRenderer | None = None,
 ) -> None:
     snapshot, steps = claim["snapshot"], claim["checkpoints"]
     plan = snapshot["plan"]
@@ -103,11 +127,38 @@ async def execute_generation(
             limit=limit,
         )
 
+    async def render_clip(slot: str, clip: Path, provider: RenderClip) -> None:
+        saved = steps.get(f"FILE:{slot}")
+        if saved is not None:
+            await download(saved, clip)
+            return
+        identity = steps.get(f"RENDER:{slot}", {"state": "NOT_STARTED"})
+        checkpoint = RenderCheckpoint(identity["state"], identity.get("providerTaskId"))
+
+        async def persist(value: RenderCheckpoint) -> None:
+            payload: dict[str, Any] = {"state": value.state}
+            if value.provider_task_id:
+                payload["providerTaskId"] = value.provider_task_id
+            await api.call("PUT", f"render/{slot}", payload)
+
+        result = await provider(checkpoint, persist)
+        clip.write_bytes(result.content)
+        del result
+        await api.upload(slot, clip)
+
     if "REVIEW_V1" in steps:
         if not review_passed(plan, steps["REVIEW_V1"]):
             raise QualityBlocked()
         await api.call("POST", "complete")
         return
+    source_edit = plan["mode"] == SOURCE_EDIT_MODE
+    shot_reference = plan["mode"] == SHOT_REFERENCE_MODE
+    render_slots = 1 if source_edit else len(plan["shots"])
+    if any(
+        steps.get(f"RENDER:{index}", {}).get("state") == "CREATE_REJECTED"
+        for index in range(render_slots)
+    ):
+        raise render_create_rejected()
     with TemporaryDirectory(prefix="clone-generation-") as tmp:
         root = Path(tmp)
         images: dict[str, Path] = {}
@@ -116,53 +167,94 @@ async def execute_generation(
             source = root / f"{file_id}.image"
             await download(image, source, 4 * 1024 * 1024)
             images[file_id] = source
+        original: Path | None = None
+        if source_edit or shot_reference:
+            raw_original = root / "original-upload.mov"
+            original = root / "original.mp4"
+            await download(plan["sourceVideo"], raw_original, SOURCE_VIDEO_MAX_BYTES)
+            await normalize_original(
+                plan, raw_original, original, ffmpeg=ffmpeg, ffprobe=ffprobe
+            )
         final = root / "final.mp4"
         if "FILE:final" in steps:
             await download(steps["FILE:final"], final)
+        elif source_edit:
+            if render_source is None or original is None:
+                raise ValueError("missing original-video edit renderer")
+
+            async def edit(
+                checkpoint: RenderCheckpoint, persist: SaveCheckpoint
+            ) -> VideoOutput:
+                url = None
+                contents: dict[str, bytes] = {}
+                if checkpoint.state == "NOT_STARTED":
+                    contents = {file_id: path.read_bytes() for file_id, path in images.items()}
+                    url = await api.source_video_url()
+                return await render_source(
+                    plan, url, snapshot["model"], contents, checkpoint, persist
+                )
+
+            edited = root / "edited.mp4"
+            await progress(10, "RENDER")
+            await render_clip("0", edited, edit)
+            await progress(70, "COMPOSE")
+            await compose_source_edit(
+                plan, original, edited, final, ffmpeg=ffmpeg, ffprobe=ffprobe
+            )
+            await api.upload("final", final)
         else:
             clips: dict[str, Path] = {}
             for index, shot in enumerate(plan["shots"]):
                 slot = str(index)
                 shot_id = shot["shotId"]
                 clip = root / f"shot-{index}.mp4"
+
+                async def generate_shot(
+                    checkpoint: RenderCheckpoint,
+                    persist: SaveCheckpoint,
+                    current: dict[str, Any] = shot,
+                    shot_index: int = index,
+                ) -> VideoOutput:
+                    contents: dict[str, bytes] = {}
+                    reference_url = None
+                    if checkpoint.state == "NOT_STARTED":
+                        contents = {
+                            file_id: images[file_id].read_bytes()
+                            for file_id in {
+                                target["imageFileObjectId"] for target in current["targets"]
+                                if target["imageFileObjectId"]
+                            }
+                        }
+                        if shot_reference:
+                            if original is None:
+                                raise ValueError("missing original video for shot reference")
+                            reference_slot = f"reference-{shot_index}"
+                            if f"FILE:{reference_slot}" not in steps:
+                                reference = root / f"{reference_slot}.mp4"
+                                await extract_shot_reference(
+                                    plan, shot_index, original, reference,
+                                    ffmpeg=ffmpeg, ffprobe=ffprobe,
+                                )
+                                await api.upload(reference_slot, reference)
+                            reference_url = await api.shot_reference_video_url(str(shot_index))
+                    return await render(
+                        plan, current["shotId"], snapshot["model"], contents, checkpoint, persist,
+                        reference_url=reference_url,
+                    )
+
                 await progress(10 + 55 * index // len(plan["shots"]), "RENDER")
-                saved = steps.get(f"FILE:{slot}")
-                if saved:
-                    await download(saved, clip)
-                else:
-                    identity = steps.get(f"RENDER:{slot}", {"state": "NOT_STARTED"})
-                    checkpoint = RenderCheckpoint(
-                        identity["state"], identity.get("providerTaskId")
-                    )
-
-                    async def persist(
-                        value: RenderCheckpoint, current: str = slot
-                    ) -> None:
-                        payload: dict[str, Any] = {"state": value.state}
-                        if value.provider_task_id:
-                            payload["providerTaskId"] = value.provider_task_id
-                        await api.call("PUT", f"render/{current}", payload)
-
-                    file_ids = {
-                        target["imageFileObjectId"]
-                        for target in shot["targets"]
-                        if target["imageFileObjectId"]
-                    }
-                    contents = {
-                        file_id: images[file_id].read_bytes() for file_id in file_ids
-                    }
-                    result = await render(
-                        plan, shot_id, snapshot["model"], contents, checkpoint, persist
-                    )
-                    clip.write_bytes(result.content)
-                    del result, contents
-                    await api.upload(slot, clip)
+                await render_clip(slot, clip, generate_shot)
                 clips[shot_id] = clip
             await progress(70, "COMPOSE")
             await compose(plan, clips, final, ffmpeg=ffmpeg, ffprobe=ffprobe)
             await api.upload("final", final)
         await progress(86, "REVIEW")
-        review = await reviewer.evaluate(plan, snapshot["reviewModel"], final, images)
+        if original is not None:
+            review = await reviewer.evaluate(
+                plan, snapshot["reviewModel"], final, images, original=original
+            )
+        else:
+            review = await reviewer.evaluate(plan, snapshot["reviewModel"], final, images)
         passed = review_passed(plan, review)
         await api.call("PUT", "review", review)
         if not passed:
@@ -178,6 +270,8 @@ async def process_generation(
     ffmpeg: str,
     ffprobe: str,
     planner: PlanningPort | None = None,
+    *,
+    render_source: SourceRenderer | None = None,
 ) -> None:
     claim = await api.call("POST", "claim")
     if not claim["claimed"]:
@@ -196,7 +290,9 @@ async def process_generation(
     work = asyncio.create_task(
         execute_planning(api, planning, planner)
         if planning is not None
-        else execute_generation(api, claim, render, reviewer, ffmpeg, ffprobe)
+        else execute_generation(
+            api, claim, render, reviewer, ffmpeg, ffprobe, render_source=render_source
+        )
     )
     failure: tuple[str, bool] | None = None
     try:

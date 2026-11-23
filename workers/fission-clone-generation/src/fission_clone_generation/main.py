@@ -16,7 +16,7 @@ from .health import marker
 from .pipeline import process_generation
 from .plan import validator
 from .planning import BatchPlanner
-from .provider import render_shot
+from .provider import render_shot, render_source_edit
 from .review import Reviewer
 
 LOGGER = logging.getLogger(__name__)
@@ -100,6 +100,7 @@ async def consume() -> None:
                                 ffmpeg,
                                 ffprobe,
                                 planner,
+                                render_source=partial(render_source_edit, transport),
                             )
                         finally:
                             await api.close()

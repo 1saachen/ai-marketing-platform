@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { Play, Upload, Plus, X, Info } from '@lucide/vue';
+import { ChevronDown, Play, Upload, Plus, X, Info } from '@lucide/vue';
 import type { CloneCapabilities, CloneInputDraft, CloneUpload } from '@ai-marketing/contracts';
-import CloneIcon from './CloneIcon.vue';
 
 const props = defineProps<{
   draft: CloneInputDraft;
@@ -120,23 +119,18 @@ function drop(event: DragEvent, role: 'reference' | 'materials') {
               @change="
                 emit('edit', { sourceRightsConfirmed: ($event.target as HTMLInputElement).checked })
               "
-            />我有权使用上传的参考视频与商品素材</label
+            />我有权使用本次复刻的素材</label
           >
         </div>
       </section>
-      <section class="frg-card" @dragover.prevent @drop.prevent="drop($event, 'materials')">
-        <header class="frg-card-head">
-          <b>商品原料</b><span class="frg-optional">当前商品</span><span class="grow" /><button
-            class="frg-btn"
-            :disabled="busy"
-            @click="emit('library', 'PRODUCT')"
-          >
-            项目资产
-          </button>
-        </header>
+      <details class="frg-card clone-optional-materials">
+        <summary class="frg-card-head">
+          <b>补充商品资料</b><span class="frg-optional">可选</span><span class="grow" />
+          <ChevronDown :size="16" class="clone-materials-chevron" aria-hidden="true" />
+        </summary>
         <div class="clone-product-fields">
           <label
-            ><span>商品名称 <b>*</b></span
+            ><span>商品名称</span
             ><input
               :value="draft.productName"
               maxlength="200"
@@ -145,7 +139,7 @@ function drop(event: DragEvent, role: 'reference' | 'materials') {
               @input="emit('edit', { productName: ($event.target as HTMLInputElement).value })"
           /></label>
           <label
-            ><span>商品事实与依据 <b>*</b></span
+            ><span>商品事实与依据</span
             ><textarea
               :value="draft.productFacts"
               rows="4"
@@ -155,14 +149,19 @@ function drop(event: DragEvent, role: 'reference' | 'materials') {
               @input="emit('edit', { productFacts: ($event.target as HTMLTextAreaElement).value })"
             />
           </label>
-          <div class="clone-pid-unavailable">
-            <span>商品链接 / PID 自动取材</span><button class="frg-btn" disabled>暂不可用</button
-            ><small>尚未接入商品数据源，请上传商品素材。</small>
-          </div>
+          <button
+            class="frg-btn clone-materials-picker"
+            :disabled="busy"
+            @click="emit('library', 'PRODUCT')"
+          >
+            项目资产
+          </button>
         </div>
         <label
           class="frg-material-uploader"
           tabindex="0"
+          @dragover.prevent
+          @drop.prevent="drop($event, 'materials')"
           @keydown.enter="($event.currentTarget as HTMLElement).querySelector('input')?.click()"
         >
           <input
@@ -182,7 +181,7 @@ function drop(event: DragEvent, role: 'reference' | 'materials') {
             >
           </div>
         </label>
-        <div class="frg-materials">
+        <div v-if="materials.length" class="frg-materials">
           <article v-for="file in materials" :key="file.id" class="frg-material">
             <button
               class="frg-material-thumb"
@@ -215,11 +214,8 @@ function drop(event: DragEvent, role: 'reference' | 'materials') {
               </div>
             </div>
           </article>
-          <div v-if="!materials.length" class="frg-note warn">
-            <CloneIcon type="image" :size="16" />添加商品多角度素材，有助于后续准确替换。
-          </div>
         </div>
-      </section>
+      </details>
     </div>
     <div class="frg-note">
       <Info
@@ -233,6 +229,22 @@ function drop(event: DragEvent, role: 'reference' | 'materials') {
   object-fit: contain;
   background: #172235;
 }
+.clone-optional-materials {
+  align-self: start;
+}
+.clone-optional-materials summary {
+  cursor: pointer;
+  list-style: none;
+}
+.clone-optional-materials summary::-webkit-details-marker {
+  display: none;
+}
+.clone-optional-materials:not([open]) summary {
+  border-bottom: 0;
+}
+.clone-optional-materials[open] .clone-materials-chevron {
+  transform: rotate(180deg);
+}
 .clone-product-fields {
   display: grid;
   gap: 14px;
@@ -243,9 +255,6 @@ function drop(event: DragEvent, role: 'reference' | 'materials') {
   gap: 7px;
   font-size: 12px;
   color: #475569;
-}
-.clone-product-fields label b {
-  color: #dc2626;
 }
 .clone-product-fields input,
 .clone-product-fields textarea {
@@ -259,16 +268,8 @@ function drop(event: DragEvent, role: 'reference' | 'materials') {
   background: white;
   resize: vertical;
 }
-.clone-pid-unavailable {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: center;
-  font-size: 12px;
-  color: #64748b;
-}
-.clone-pid-unavailable small {
-  width: 100%;
+.clone-materials-picker {
+  justify-self: start;
 }
 .clone-source-rights {
   padding: 0 20px 20px;

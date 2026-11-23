@@ -5,6 +5,7 @@ import type {
   Asset,
   CloneAnalysisReport,
   CloneCapabilities,
+  CloneGenerationImage,
   CloneMappingBinding,
   CloneMappingDraft,
   CloneMappingTarget,
@@ -42,20 +43,28 @@ const binding = computed(() =>
   props.draft.bindings.find((item) => item.elementId === source.value?.elementId),
 );
 const target = computed(() => binding.value?.target);
+const isProp = computed(() => source.value?.type === 'prop');
 const isTextElement = computed(
   () => source.value?.type === 'subtitle' || source.value?.type === 'voiceover',
 );
 const isAudio = computed(() => source.value?.type === 'bgm' || source.value?.type === 'voiceover');
+const targetImageTypes: CloneGenerationImage['mimeType'][] = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+];
 const targetPrefixes = computed(() =>
   isAudio.value
     ? ['audio/']
     : source.value?.type === 'subtitle'
       ? ['text/', 'application/x-subrip']
-      : ['image/', 'video/'],
+      : source.value?.type === 'product' || source.value?.type === 'scene'
+        ? targetImageTypes
+        : ['image/', 'video/'],
 );
 const keepBlocked = computed(() => {
   if (!source.value) return '';
-  if (source.value.type === 'product') return '该元素必须逐项替换为目标商品或已确认目标。';
+  if (source.value.type === 'product') return '每个必换商品都需要绑定一张目标图片。';
   if (isAudio.value) return '当前尚未验证独立原声轨道的保留能力，请使用替换配置。';
   if (source.value.type === 'subtitle')
     return source.value.sourceTrack === 'BURNED_IN'
@@ -63,14 +72,12 @@ const keepBlocked = computed(() => {
       : '当前未开放原字幕表现保留，请选择替换；已识别文字可在内容策略中单独保留并核对。';
   return '';
 });
-const complete = (item: CloneMappingBinding) =>
-  item.action === 'KEEP'
-    ? item.type === 'person' || item.type === 'scene'
-    : !!(
-        item.target?.asset ||
-        item.target?.text.trim() ||
-        (item.type !== 'product' && item.target?.style.trim())
-      );
+function complete(item: CloneMappingBinding) {
+  if (item.action === 'KEEP') return ['person', 'scene', 'prop'].includes(item.type);
+  if (item.type === 'prop') return false;
+  if (item.type === 'product') return !!item.target?.asset;
+  return !!(item.target?.asset || item.target?.text.trim() || item.target?.style.trim());
+}
 const completed = computed(() => props.draft.bindings.filter(complete).length);
 const required = computed(() =>
   props.report.elements.filter((element) => element.type === 'product'),
@@ -98,14 +105,15 @@ function newTarget(): CloneMappingTarget {
   };
 }
 function patchTarget(patch: Partial<CloneMappingTarget>) {
-  if (!binding.value || props.disabled) return;
+  if (binding.value?.action !== 'REPLACE' || props.disabled || isProp.value) return;
   emit('edit', {
     ...binding.value,
     target: { ...(binding.value.target ?? newTarget()), ...patch },
   });
 }
 function setAction(action: 'KEEP' | 'REPLACE') {
-  if (!binding.value || props.disabled || (action === 'KEEP' && keepBlocked.value)) return;
+  if (!binding.value || props.disabled || (action === 'KEEP' ? keepBlocked.value : isProp.value))
+    return;
   emit('edit', {
     ...binding.value,
     action,
@@ -131,12 +139,17 @@ async function chooseAsset(assetId: string, version: number, asset: Asset) {
   library.value = false;
 }
 watch(
-  [() => props.projectId, () => target.value?.asset?.assetId, () => target.value?.asset?.version],
-  async ([projectId, assetId, version]) => {
+  [
+    () => props.projectId,
+    isProp,
+    () => target.value?.asset?.assetId,
+    () => target.value?.asset?.version,
+  ],
+  async ([projectId, prop, assetId, version]) => {
     assetRequest?.abort();
     targetAsset.value = null;
     assetError.value = '';
-    if (!assetId || !version) return;
+    if (prop || !assetId || !version) return;
     const request = new AbortController();
     assetRequest = request;
     try {
@@ -158,12 +171,12 @@ onBeforeUnmount(() => assetRequest?.abort());
         <span><LockKeyhole :size="18" /></span>
         <div>
           <b>原视频结构时间线（锁定）</b
-          ><small>锁定已确认报告的镜头顺序、阶段边界与已识别节奏锚点</small>
+          ><small>按已确认报告锁定原片的镜头顺序、切点与阶段边界</small>
         </div>
         <div class="frg-lock-meta">
           <em>{{ cloneTime(report.durationMs) }}</em
           ><em>{{ report.structure.stages.length }} 个阶段</em
-          ><em>{{ report.audio.beatsMs.length }} 个已识别节奏点</em
+          ><em>{{ report.shots.length }} 个镜头</em
           ><strong class="frg-lock-status"><LockKeyhole :size="12" />结构已锁定</strong>
         </div>
       </header>
@@ -205,7 +218,11 @@ onBeforeUnmount(() => assetRequest?.abort());
               ></span
             ><span class="fem-nav-meta"
               ><em :class="{ required: element.type === 'product' }">{{
-                element.type === 'product' ? '必换' : '可配置'
+                element.type === 'product'
+                  ? '必换'
+                  : element.type === 'prop'
+                    ? '镜头参考'
+                    : '可配置'
               }}</em
               ><i
                 :class="{
@@ -253,6 +270,7 @@ onBeforeUnmount(() => assetRequest?.abort());
           <span class="fem-confidence">识别置信度 {{ Math.round(source.confidence * 100) }}%</span>
           <div class="fem-strategy">
             <button
+              v-if="!isProp"
               :class="{ active: binding?.action === 'REPLACE' }"
               :disabled="disabled || !binding"
               @click="setAction('REPLACE')"
@@ -264,7 +282,7 @@ onBeforeUnmount(() => assetRequest?.abort());
               :title="keepBlocked"
               @click="setAction('KEEP')"
             >
-              保留
+              {{ isProp ? '保留为镜头参考' : '保留' }}
             </button>
           </div>
         </header>
@@ -278,30 +296,37 @@ onBeforeUnmount(() => assetRequest?.abort());
           </article>
           <div class="fem-flow-arrow">
             <ArrowRight :size="19" /><small>{{
-              binding?.action === 'KEEP' ? '保留' : '映射'
+              isProp ? '参考' : binding?.action === 'KEEP' ? '保留' : '映射'
             }}</small>
           </div>
           <article class="fem-flow-card target" :class="{ empty: !binding || !complete(binding) }">
             <span class="fem-flow-visual"><CloneIcon :type="source.type" /></span>
             <div class="fem-flow-copy">
-              <span>目标配置</span
+              <span>{{ isProp ? '镜头参考' : '目标配置' }}</span
               ><strong>{{
-                binding?.action === 'KEEP'
-                  ? '保留已确认的视觉特征'
-                  : targetAsset?.name || target?.text || '尚未配置目标'
+                isProp
+                  ? source.label
+                  : binding?.action === 'KEEP'
+                    ? '保留已确认的视觉特征'
+                    : targetAsset?.name || target?.text || '尚未配置目标'
               }}</strong
               ><small>{{
-                target?.asset
-                  ? `已锁定资产第 ${target.asset.version} 版`
-                  : binding?.action === 'KEEP'
-                    ? '保留配置与外观目标，不承诺逐像素一致'
-                    : `目标商品：${productName}`
+                isProp
+                  ? '参考原片中的位置和构图关系'
+                  : target?.asset
+                    ? `已锁定资产第 ${target.asset.version} 版`
+                    : binding?.action === 'KEEP'
+                      ? '保留配置与外观目标，不承诺逐像素一致'
+                      : source.type === 'product' && productName
+                        ? `目标商品 ${productName}`
+                        : '按当前元素选择目标素材'
               }}</small>
             </div>
           </article>
         </section>
         <nav class="fem-tabs">
-          <button :class="{ active: tab === 'assets' }" @click="tab = 'assets'">目标配置</button
+          <button :class="{ active: tab === 'assets' }" @click="tab = 'assets'">
+            {{ isProp ? '镜头参考' : '目标配置' }}</button
           ><button :class="{ active: tab === 'impact' }" @click="tab = 'impact'">镜头影响</button
           ><span class="grow" />
         </nav>
@@ -310,16 +335,33 @@ onBeforeUnmount(() => assetRequest?.abort());
             <AlertTriangle :size="15" />{{ keepBlocked }}
           </div>
           <div v-if="!binding" class="frg-map-empty"><p>请先按当前报告初始化映射配置。</p></div>
+          <div v-else-if="isProp" class="fem-retain-empty">
+            <div v-if="binding.action === 'KEEP'">
+              <b>已保留为镜头参考</b>
+              <p>可在「镜头影响」查看这个道具出现的区间、运镜和构图。</p>
+            </div>
+            <div v-else>
+              <b>此道具仍使用旧替换配置</b>
+              <p>需要单独更换这个道具时，可以使用局部元素替换。</p>
+            </div>
+          </div>
           <div v-else-if="binding.action === 'KEEP'" class="fem-retain-empty">
             <div>
               <b>保留{{ source.label }}的配置与视觉特征</b>
-              <p>结构时间线保持锁定，生成执行能力将在后续阶段验证。</p>
+              <p>结构时间线保持锁定。</p>
             </div>
           </div>
           <div v-else class="clone-target-editor">
             <div class="clone-target-asset">
               <div>
-                <b>项目资产精确版本</b><small>可以选择同项目素材，也可以填写明确的目标描述。</small>
+                <b>项目资产精确版本</b>
+                <small v-if="source.type === 'product'">
+                  请选择当前项目的 JPEG、PNG 或 WebP 目标商品图片。
+                </small>
+                <small v-else-if="source.type === 'scene'">
+                  可以选择同项目参考图片，或填写明确的场景描述。
+                </small>
+                <small v-else>可以选择同项目素材，也可以填写明确的目标描述。</small>
               </div>
               <button
                 class="frg-btn"
@@ -457,14 +499,24 @@ onBeforeUnmount(() => assetRequest?.abort());
           <div class="fem-impact-label">
             <b>镜头影响与连续性</b><span>仅列此元素实际关联的镜头</span>
           </div>
+          <p v-if="isProp" class="clone-mapping-note">
+            出现区间
+            {{
+              source.ranges
+                .map((range) => `${cloneTime(range.startMs)}–${cloneTime(range.endMs)}`)
+                .join('、')
+            }}
+          </p>
           <div class="clone-impact-shots">
             <article v-for="shot in impact" :key="shot.shotId">
               <b>{{ cloneTime(shot.startMs) }}–{{ cloneTime(shot.endMs) }} · {{ shot.framing }}</b>
               <p>{{ shot.cameraMovement }} · {{ shot.composition }}</p>
               <small>{{
-                binding?.action === 'KEEP'
-                  ? '保留已确认的视觉特征'
-                  : '使用当前替换目标，结构与时序不变'
+                isProp
+                  ? '作为该镜头的画面参考'
+                  : binding?.action === 'KEEP'
+                    ? '保留已确认的视觉特征'
+                    : '使用当前替换目标，结构与时序不变'
               }}</small>
             </article>
           </div>
@@ -472,11 +524,11 @@ onBeforeUnmount(() => assetRequest?.abort());
       </div>
     </section>
     <div v-if="requiredComplete < required.length" class="fem-gate-note">
-      所有必换产品都须完成目标配置：当前 {{ requiredComplete }} /
-      {{ required.length }} 项，确认时还会检查来源、资产可用性与文本依据。
+      已绑定目标图片 {{ requiredComplete }} /
+      {{ required.length }} 项。确认时还会检查来源与资产版本。
     </div>
     <CloneAssetPicker
-      v-if="library && source"
+      v-if="library && source && !isProp"
       :project-id="projectId"
       :title="`选择${cloneElementLabels[source.type]}目标素材`"
       :mime-prefixes="targetPrefixes"

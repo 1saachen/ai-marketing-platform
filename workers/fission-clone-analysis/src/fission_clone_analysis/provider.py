@@ -7,11 +7,25 @@ from typing import Any, Protocol
 import httpx
 from ai_runtime.responses import StructuredResponsesMixin
 
-from .contracts import KeepTextOutput, MappingOutput, ReportOutput, validate_result
+from .contracts import (
+    GROUNDED_ANALYSIS_VERSIONS,
+    MOTION_ANALYSIS_VERSIONS,
+    PROP_ANALYSIS_VERSION,
+    GroundedMotionReportOutput,
+    KeepTextOutput,
+    MappingOutput,
+    MotionReportOutput,
+    PropReportOutput,
+    ReportOutput,
+    validate_result,
+)
 from .media import Sample
 
 PROMPT_VERSION = "clone-analysis-g2-2026-11-11"
 ANALYSIS_PROMPT_VERSION = "clone-analysis-g2-2026-11-17"
+MOTION_ANALYSIS_PROMPT_VERSION = "clone-analysis-g2-2026-11-20"
+GROUNDED_ANALYSIS_PROMPT_VERSION = "clone-analysis-g2-grounded-v3"
+PROP_ANALYSIS_PROMPT_VERSION = "clone-analysis-g2-props-v4"
 
 
 class ProviderPort(Protocol):
@@ -124,6 +138,63 @@ class Provider(StructuredResponsesMixin):
             "不得推断语速、音色、BGM或节拍。媒体hasAudio仅表示ffprobe音轨存在。"
             "证据覆盖不足时降低confidence并写limitations；阶段proportion=(endMs-startMs)/durationMs。"
         )
+        version = snapshot.get("analysisInstructionVersion")
+        include_motion = version in MOTION_ANALYSIS_VERSIONS
+        grounded = version in GROUNDED_ANALYSIS_VERSIONS
+        report_model = ReportOutput
+        prompt_version = ANALYSIS_PROMPT_VERSION
+        if include_motion:
+            report_model = MotionReportOutput
+            prompt_version = MOTION_ANALYSIS_PROMPT_VERSION
+            instructions += (
+                "每个shots条目还须填写motion，为后续复刻记录当前镜头怎么拍。"
+                "openingState和closingState分别描述可见的开场和收尾，包括主体位置、商品朝向、手的接触和遮挡；"
+                "开场或收尾缺少画面证据时可留空，用reason说明。"
+                "对照带时间戳的连续采样帧，按原片绝对毫秒将可观察的动作拆为有序、不重叠的events。"
+                "区间边界是基于相邻画面的估计。subjectAction记录主体动作，cameraAction独立描述相机动作；"
+                "用contact记录手抓住或松开的位置、商品与台面接触和遮挡，用productPose记录商品朝向和变化。"
+                "每个事件至少填写一项可见的动作或姿态观察。"
+                "固定机位仍可能有主体运动；单个画面可支持姿态，用前后帧判断变化。"
+            )
+            instructions += (
+                "每个事件引用至少一个实际采样时刻，按时点升序填入evidenceFramesMs。镜头自身的证据可记录开场、收尾等补充时点，后台会自动汇总事件证据。"
+                if grounded
+                else "每个事件引用至少一个实际采样时刻，按时点升序填入evidenceFramesMs并归入镜头自身的证据。"
+            )
+            instructions += (
+                "证据时点在事件起止之间，且早于镜头结束。"
+                "存在有证据的动作时用OBSERVED并填写events。多帧覆盖足以判断画面稳定时用NO_VISIBLE_MOTION，"
+                "并在所属镜头的evidenceFramesMs中引用至少两个不同的实际采样时刻。"
+                "稀疏采样、遮挡或无从辨认时用INSUFFICIENT_EVIDENCE。后二者的events为空并说明reason。"
+            )
+        if grounded:
+            report_model = GroundedMotionReportOutput
+            prompt_version = GROUNDED_ANALYSIS_PROMPT_VERSION
+            instructions += (
+                "逐镜头按时间先核对首个可见状态、相邻帧变化和最后可见状态，再写报告。"
+                "首个证据已显示主体在画面内、手已握持或商品已悬空，就直接写这个状态。"
+                "开场、结构概述、元素描述与证据、迁移建议统一采用同一事实，禁止补写采样前的进画、伸手或抓起。"
+                "分别写单帧可见的持续状态，以及由前后帧支持的状态变化。结合固定背景判断相机移动，独立记录主体自身运动。"
+                "若可见，分清悬空下放、首次触面、已接触但手仍扶稳、手离开且商品保持原位。"
+                "触面或松手落在采样间隙时，在contact中写最后可确认的前态与最早可确认的后态所夹的区间，"
+                "说明准确时点不可见，禁止把某一张采样图或推算的毫秒点当成动作发生时刻。接触状态始终被遮挡时写无法确认。"
+                "openingState、productPose、closingState分别写清起始、变化和收尾时商品哪一面朝镜头，引用可辨的标识、字块、边缘或轮廓。"
+                "若前后证据支持正面标识转离、侧面或背面转向镜头，明确记录这个变化。面别或文字认不清就说明不确定，避免猜测。"
+            )
+        if version == PROP_ANALYSIS_VERSION:
+            report_model = PropReportOutput
+            prompt_version = PROP_ANALYSIS_PROMPT_VERSION
+            instructions += (
+                "把可独立选择替换的清晰邻近物件逐个识别为prop，例如主商品旁的盒子、圆盒、杯子或托盘。"
+                "主商品仍是必换的product；手、身体、墙面、桌面及不可辨认的背景杂物不当成prop。"
+                "每件道具独立使用一个稳定elementId，同一件跨镜头复用同一个id，"
+                "填写简短label、可凭外观与周围参照物定位的description、实际出现的shotIds和ranges。"
+                "例如：橙色长方盒，首镜在小瓶右上方、黑色粉盒左侧。"
+                "prop使用sourceTrack=VISUAL、required=false、空transcriptText。"
+                "至少填写一条对应原片可辨画面的VISUAL证据，证据startMs取道具确实入画的已提供采样时点，"
+                "endMs大于startMs，道具出现区间覆盖证据时点。后台会将相关证据时点归入该镜头。"
+                "道具不可辨认或不可独立定位时省略，不按道具数量凑项。"
+            )
         content = [_text({"media": sample.metadata()})]
         for frame in sample.frames:
             content.append(_text({"sampleTimeMs": frame.time_ms}))
@@ -139,11 +210,11 @@ class Provider(StructuredResponsesMixin):
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": content},
             ],
-            ReportOutput,
+            report_model,
             schema_name="clone_analysis_report",
             stage="ANALYZE",
             model=snapshot["model"],
-            prompt_version=ANALYSIS_PROMPT_VERSION,
+            prompt_version=prompt_version,
             request_timeout=self.timeout,
             max_output_tokens=self.max_output_tokens,
         )
@@ -163,6 +234,11 @@ class Provider(StructuredResponsesMixin):
             "字幕/口播区分contentStrategy和presentationStrategy；音轨、原音色、烧录字幕均不支持直接KEEP。"
             "替换目标文本只使用目标商品事实，明确lockedAttributes及allowedVariations，不擅自变更用户已锁定目标。"
         )
+        if any(element["type"] == "prop" for element in snapshot["analysis"]["report"]["elements"]):
+            instructions += (
+                "可选道具（prop）由用户选择。已有道具binding原样保留；"
+                "尚未配置的道具填action=KEEP、target=null。不得为道具自行选择替换素材。"
+            )
         result = await self._structured(
             [
                 {"role": "system", "content": instructions},

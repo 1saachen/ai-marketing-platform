@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -10,8 +11,8 @@ from uuid import UUID
 from ai_runtime.http import InternalApiError
 from ai_runtime.responses import ProviderError
 
-from .contracts import validate_result
-from .media import MediaError, MediaLimits, sample_video
+from .contracts import MOTION_ANALYSIS_VERSIONS, PROP_ANALYSIS_VERSION, validate_result
+from .media import MOTION_SAMPLE_INTERVAL_MS, MediaError, MediaLimits, sample_video
 from .provider import ProviderPort, apply_media_evidence
 
 CHECKPOINT_KEY = "RESULT_V1"
@@ -47,6 +48,11 @@ def validate_snapshot(snapshot: Any) -> dict[str, Any]:
         raise ValueError("invalid task snapshot")
     if snapshot.get("operation") not in {"ANALYZE", "MAP_SUGGEST"}:
         raise ValueError("unsupported task operation")
+    if "analysisInstructionVersion" in snapshot and (
+        snapshot["operation"] != "ANALYZE"
+        or snapshot["analysisInstructionVersion"] not in MOTION_ANALYSIS_VERSIONS
+    ):
+        raise ValueError("unsupported analysis instruction version")
     if not isinstance(snapshot.get("model"), str) or not snapshot["model"].strip():
         raise ValueError("frozen model is missing")
     files = snapshot.get("input", {}).get("files")
@@ -99,6 +105,14 @@ def validate_for_snapshot(result: dict[str, Any], snapshot: dict[str, Any]) -> N
     if result["operation"] != snapshot["operation"]:
         raise ValueError("result operation does not match task")
     if snapshot["operation"] == "ANALYZE":
+        if snapshot.get("analysisInstructionVersion") in MOTION_ANALYSIS_VERSIONS and any(
+            "motion" not in shot for shot in result["report"]["shots"]
+        ):
+            raise ValueError("analysis result is missing shot motion observations")
+        if snapshot.get("analysisInstructionVersion") != PROP_ANALYSIS_VERSION and any(
+            element["type"] == "prop" for element in result["report"]["elements"]
+        ):
+            raise ValueError("prop elements must match the analysis version")
         return
     if result["purpose"] != snapshot["purpose"]:
         raise ValueError("result purpose does not match task")
@@ -122,6 +136,11 @@ def validate_for_snapshot(result: dict[str, Any], snapshot: dict[str, Any]) -> N
             (candidate["assetId"], candidate["version"])
             for candidate in snapshot["candidates"]
         }
+        prop_bindings = {
+            item["elementId"]: item
+            for item in snapshot["mapping"]["bindings"]
+            if item["type"] == "prop"
+        }
         for binding in bindings:
             element = elements[binding["elementId"]]
             if binding["type"] != element["type"] or set(binding["shotIds"]) != set(
@@ -131,6 +150,12 @@ def validate_for_snapshot(result: dict[str, Any], snapshot: dict[str, Any]) -> N
             if element["type"] == "product" and binding["action"] != "REPLACE":
                 raise ValueError("every source product must be replaced")
             target = binding["target"]
+            if element["type"] == "prop":
+                selected = prop_bindings.get(binding["elementId"])
+                if (selected is not None and selected != binding) or (
+                    selected is None and (binding["action"] != "KEEP" or target is not None)
+                ):
+                    raise ValueError("prop suggestions must preserve user selections")
             if target is not None and target["asset"] is not None:
                 reference = target["asset"]
                 if (reference["assetId"], reference["version"]) not in candidates:
@@ -177,6 +202,20 @@ class Pipeline:
             "PUT", "progress", {"progress": value, "stage": stage, "message": message}
         )
 
+    async def save_result(self, method: str, path: str, body: dict[str, Any]) -> None:
+        try:
+            await self.api.call(method, path, body)
+        except InternalApiError as error:
+            if (
+                self.snapshot["operation"] == "ANALYZE"
+                and not error.retryable
+                and error.status_code in {400, 409}
+            ):
+                # A conflict can also mean lease loss. The failure endpoint checks
+                # the same attempt token before accepting any terminal write.
+                raise ValueError("analysis report rejected by API") from error
+            raise
+
     async def run(self) -> None:
         for checkpoint in self.checkpoints:
             if (
@@ -186,7 +225,7 @@ class Pipeline:
                 result = checkpoint["output"]
                 validate_for_snapshot(result, self.snapshot)
                 await self.progress(95, "SAVE", "恢复已完成结果，正在提交")
-                await self.api.call("POST", "complete", {"result": result})
+                await self.save_result("POST", "complete", {"result": result})
                 return
         if self.snapshot["operation"] == "ANALYZE":
             await self.progress(5, "DOWNLOAD", "读取已确认参考视频")
@@ -204,8 +243,16 @@ class Pipeline:
                     expected_size=reference["sizeBytes"],
                     expected_sha256=reference["sha256"],
                 )
+                frozen_media = reference.get("media")
+                if not isinstance(frozen_media, dict):
+                    raise MediaError("已确认的参考视频媒体信息无效")
                 await self.progress(15, "SAMPLE", "采集有时间依据的参考画面")
-                sample = await sample_video(source, directory, self.limits)
+                limits = self.limits
+                if self.snapshot.get("analysisInstructionVersion") in MOTION_ANALYSIS_VERSIONS:
+                    limits = replace(limits, interval_ms=MOTION_SAMPLE_INTERVAL_MS)
+                sample = await sample_video(
+                    source, directory, limits, frozen_media=frozen_media
+                )
                 await self.progress(
                     40, "ANALYZE", "分析结构、创意、产品、镜头与视觉证据"
                 )
@@ -223,13 +270,13 @@ class Pipeline:
             result = await self.provider.validate_keep_text(self.snapshot)
         validate_for_snapshot(result, self.snapshot)
         await self.progress(85, "VALIDATE", "结果结构校验通过，正在保存检查点")
-        await self.api.call(
+        await self.save_result(
             "PUT",
             "checkpoints",
             {"key": CHECKPOINT_KEY, "inputHash": self.input_hash, "output": result},
         )
         await self.progress(95, "SAVE", "正在提交完整结果")
-        await self.api.call("POST", "complete", {"result": result})
+        await self.save_result("POST", "complete", {"result": result})
 
 
 async def process_task(
@@ -250,23 +297,31 @@ async def process_task(
         for task in done:
             await task
     except InternalApiError as error:
-        if error.status_code not in {404, 409}:
+        if error.retryable or error.status_code not in {404, 409}:
             raise
     except (ProviderError, MediaError, ValueError, KeyError, TypeError) as error:
         if api.token:
-            await api.call(
-                "POST",
-                "fail",
-                {
-                    "code": "CLONE_PROVIDER_FAILED"
-                    if isinstance(error, ProviderError)
-                    else "CLONE_RESULT_INVALID",
-                    "message": "分析服务暂时失败，请重试"
-                    if isinstance(error, ProviderError)
-                    else "媒体或任务结果不符合当前契约，请检查后重试",
-                    "retryable": isinstance(error, ProviderError) and error.retryable,
-                },
-            )
+            provider_error = isinstance(error, ProviderError)
+            message = "媒体或任务结果不符合当前契约，请检查后重试"
+            if provider_error:
+                message = "分析服务暂时失败，请重试"
+            elif isinstance(error, MediaError):
+                message = str(error)
+            try:
+                await api.call(
+                    "POST",
+                    "fail",
+                    {
+                        "code": "CLONE_PROVIDER_FAILED"
+                        if provider_error
+                        else "CLONE_RESULT_INVALID",
+                        "message": message,
+                        "retryable": isinstance(error, ProviderError) and error.retryable,
+                    },
+                )
+            except InternalApiError as failure:
+                if failure.retryable or failure.status_code not in {404, 409}:
+                    raise
     finally:
         for task in active:
             if not task.done():

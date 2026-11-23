@@ -7,6 +7,7 @@ export function cloneTime(milliseconds: number) {
 
 export const cloneElementLabels = {
   product: '产品',
+  prop: '道具',
   person: '人物',
   scene: '场景',
   subtitle: '字幕',

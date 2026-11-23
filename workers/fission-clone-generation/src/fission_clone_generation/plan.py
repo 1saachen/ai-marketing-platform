@@ -8,6 +8,18 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, ValidationError
 
+SOURCE_EDIT_MODE = "SEEDANCE_2_0_SOURCE_EDIT"
+SHOT_REFERENCE_MODE = "SEEDANCE_2_0_SHOT_REFERENCE"
+MIN_SHOT_REFERENCE_FRAMES = 48
+SOURCE_VIDEO_MAX_BYTES = 200_000_000
+
+
+def prompt_product_fields(
+    plan: dict[str, Any], *, name_key: str = "product", facts_key: str = "facts"
+) -> dict[str, str]:
+    fields = {name_key: plan["productName"], facts_key: plan["productFacts"]}
+    return {key: value for key, value in fields.items() if value.strip()}
+
 
 @lru_cache(maxsize=5)
 def validator(kind: str = "plan") -> Draft202012Validator:
@@ -28,6 +40,32 @@ def validator(kind: str = "plan") -> Draft202012Validator:
     return Draft202012Validator(schema)
 
 
+def _validate_shot_motion(motion: dict[str, Any], duration_ms: int) -> None:
+    events = motion["events"]
+    if motion["status"] != "OBSERVED":
+        if events or not motion["reason"].strip():
+            raise ValueError("invalid status for frozen shot motion")
+        return
+    if not events:
+        raise ValueError("observed shot motion requires events")
+    previous_end = 0
+    for event in events:
+        if not any(
+            event[key].strip()
+            for key in ("subjectAction", "cameraAction", "contact", "productPose")
+        ):
+            raise ValueError("motion event is missing an observable action or state")
+        start, end = event["startMs"], event["endMs"]
+        evidence = event["evidenceFramesMs"]
+        if (
+            not previous_end <= start < end <= duration_ms
+            or evidence != sorted(set(evidence))
+            or any(not start <= time <= end or time >= duration_ms for time in evidence)
+        ):
+            raise ValueError("motion event or evidence is outside its relative shot interval")
+        previous_end = end
+
+
 def validate_plan(plan: dict[str, Any]) -> None:
     try:
         validator().validate(plan)
@@ -40,6 +78,29 @@ def validate_plan(plan: dict[str, Any]) -> None:
     numerator = int(timeline["fpsNumerator"])
     denominator = int(timeline["fpsDenominator"])
     units = denominator * 1000
+    source_edit = plan["mode"] == SOURCE_EDIT_MODE
+    shot_reference = plan["mode"] == SHOT_REFERENCE_MODE
+    source = plan.get("sourceVideo")
+    if source_edit:
+        if (
+            source is None
+            or duration < 4000
+            or source.get("renderSeconds") != (duration + 999) // 1000
+            or source["sizeBytes"] > SOURCE_VIDEO_MAX_BYTES
+            or len(plan["images"]) > 9
+            or plan.get("renderInstructionVersion") != 2
+        ):
+            raise ValueError("source edit requires a frozen original and full render interval")
+    elif shot_reference:
+        if (
+            source is None
+            or "renderSeconds" in source
+            or source["sizeBytes"] > SOURCE_VIDEO_MAX_BYTES
+            or plan.get("renderInstructionVersion") != 2
+        ):
+            raise ValueError("shot reference requires a frozen original and current instructions")
+    elif source is not None:
+        raise ValueError("legacy render cannot use a source video")
 
     def frame(time_ms: int) -> int:
         return (2 * time_ms * numerator + units) // (2 * units)
@@ -79,6 +140,8 @@ def validate_plan(plan: dict[str, Any]) -> None:
         for image in plan["images"]
     ):
         raise ValueError("invalid frozen image identity or aspect ratio")
+    if source is not None and source["fileObjectId"] in frozen_images:
+        raise ValueError("source video cannot also serve as a target image")
     used = set()
     ids = set()
     has_product = False
@@ -94,6 +157,16 @@ def validate_plan(plan: dict[str, Any]) -> None:
             or not stage["startMs"] <= span["startMs"] < span["endMs"] <= stage["endMs"]
         ):
             raise ValueError("shot differs from the locked timeline")
+        expected_reference_frames = max(MIN_SHOT_REFERENCE_FRAMES, count)
+        if shot_reference:
+            if shot.get("referenceFrames") != expected_reference_frames:
+                raise ValueError("shot reference length differs from the locked timeline")
+        elif "referenceFrames" in shot:
+            raise ValueError("historical render cannot use shot reference frames")
+        if "motion" in shot:
+            if plan.get("renderInstructionVersion") != 2:
+                raise ValueError("frozen shot motion requires the current render instructions")
+            _validate_shot_motion(shot["motion"], span["endMs"] - span["startMs"])
         ids.add(shot["shotId"])
         target_ids = {target["elementId"] for target in shot["targets"]}
         image_ids = set()
@@ -106,10 +179,17 @@ def validate_plan(plan: dict[str, Any]) -> None:
                 or not variation["direction"].strip()
             ):
                 raise ValueError("scene direction exceeds confirmed mapping scope")
+            if source_edit or shot_reference:
+                if not target.get("sourceDescription", "").strip():
+                    raise ValueError("each video reference target requires an original object description")
+                if shot_reference and target["type"] == "prop":
+                    raise ValueError("shot reference accepts only product and scene targets")
+            elif target["type"] == "prop" or "sourceDescription" in target:
+                raise ValueError("legacy render accepts only legacy targets")
             if target["type"] == "product":
                 has_product = True
-                if file_id is None:
-                    raise ValueError("each product must have a frozen image")
+            if target["type"] in {"product", "prop"} and file_id is None:
+                raise ValueError("each product or prop must have a frozen image")
             if file_id is not None:
                 image_ids.add(file_id)
         if (
@@ -119,10 +199,5 @@ def validate_plan(plan: dict[str, Any]) -> None:
         ):
             raise ValueError("shot references invalid targets")
         used.update(image_ids)
-    if (
-        not has_product
-        or used != frozen_images.keys()
-        or not plan["productName"].strip()
-        or not plan["productFacts"].strip()
-    ):
-        raise ValueError("generation plan is missing confirmed product facts or images")
+    if not has_product or used != frozen_images.keys():
+        raise ValueError("generation plan is missing confirmed product or images")

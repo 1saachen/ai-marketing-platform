@@ -29,12 +29,7 @@
           "properties": {
             "status": {
               "type": "string",
-              "enum": [
-                "OBSERVED",
-                "NOT_DETECTED",
-                "UNASSESSED",
-                "NOT_APPLICABLE"
-              ]
+              "enum": ["OBSERVED", "NOT_DETECTED", "UNASSESSED", "NOT_APPLICABLE"]
             },
             "summary": {
               "type": "string",
@@ -66,12 +61,7 @@
                   },
                   "kind": {
                     "type": "string",
-                    "enum": [
-                      "VISUAL",
-                      "TRANSCRIPT",
-                      "INFERENCE",
-                      "UNASSESSED"
-                    ]
+                    "enum": ["VISUAL", "TRANSCRIPT", "INFERENCE", "UNASSESSED"]
                   },
                   "description": {
                     "type": "string",
@@ -83,26 +73,14 @@
                     "maximum": 1
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs",
-                  "kind",
-                  "description",
-                  "confidence"
-                ],
+                "required": ["startMs", "endMs", "kind", "description", "confidence"],
                 "additionalProperties": false
               },
               "minItems": 0,
               "maxItems": 100
             }
           },
-          "required": [
-            "status",
-            "summary",
-            "reason",
-            "confidence",
-            "evidence"
-          ],
+          "required": ["status", "summary", "reason", "confidence", "evidence"],
           "additionalProperties": false
         },
         "stages": {
@@ -138,14 +116,7 @@
                 "maximum": 1
               }
             },
-            "required": [
-              "stageId",
-              "startMs",
-              "endMs",
-              "role",
-              "summary",
-              "proportion"
-            ],
+            "required": ["stageId", "startMs", "endMs", "role", "summary", "proportion"],
             "additionalProperties": false
           },
           "minItems": 1,
@@ -167,10 +138,7 @@
                 "maximum": 120000
               }
             },
-            "required": [
-              "startMs",
-              "endMs"
-            ],
+            "required": ["startMs", "endMs"],
             "additionalProperties": false
           },
           "minItems": 0,
@@ -192,10 +160,7 @@
                 "maximum": 120000
               }
             },
-            "required": [
-              "startMs",
-              "endMs"
-            ],
+            "required": ["startMs", "endMs"],
             "additionalProperties": false
           },
           "minItems": 0,
@@ -221,24 +186,14 @@
                 "maxLength": 4000
               }
             },
-            "required": [
-              "timeMs",
-              "intensity",
-              "description"
-            ],
+            "required": ["timeMs", "intensity", "description"],
             "additionalProperties": false
           },
           "minItems": 0,
           "maxItems": 1000
         }
       },
-      "required": [
-        "overview",
-        "stages",
-        "hookRanges",
-        "conversionRanges",
-        "rhythm"
-      ],
+      "required": ["overview", "stages", "hookRanges", "conversionRanges", "rhythm"],
       "additionalProperties": false
     },
     "creativity": {
@@ -249,12 +204,7 @@
           "properties": {
             "status": {
               "type": "string",
-              "enum": [
-                "OBSERVED",
-                "NOT_DETECTED",
-                "UNASSESSED",
-                "NOT_APPLICABLE"
-              ]
+              "enum": ["OBSERVED", "NOT_DETECTED", "UNASSESSED", "NOT_APPLICABLE"]
             },
             "summary": {
               "type": "string",
@@ -286,12 +236,7 @@
                   },
                   "kind": {
                     "type": "string",
-                    "enum": [
-                      "VISUAL",
-                      "TRANSCRIPT",
-                      "INFERENCE",
-                      "UNASSESSED"
-                    ]
+                    "enum": ["VISUAL", "TRANSCRIPT", "INFERENCE", "UNASSESSED"]
                   },
                   "description": {
                     "type": "string",
@@ -303,26 +248,14 @@
                     "maximum": 1
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs",
-                  "kind",
-                  "description",
-                  "confidence"
-                ],
+                "required": ["startMs", "endMs", "kind", "description", "confidence"],
                 "additionalProperties": false
               },
               "minItems": 0,
               "maxItems": 100
             }
           },
-          "required": [
-            "status",
-            "summary",
-            "reason",
-            "confidence",
-            "evidence"
-          ],
+          "required": ["status", "summary", "reason", "confidence", "evidence"],
           "additionalProperties": false
         },
         "concept": {
@@ -347,13 +280,7 @@
           "maxItems": 100
         }
       },
-      "required": [
-        "overview",
-        "concept",
-        "emotion",
-        "contrast",
-        "memoryPoints"
-      ],
+      "required": ["overview", "concept", "emotion", "contrast", "memoryPoints"],
       "additionalProperties": false
     },
     "product": {
@@ -364,12 +291,7 @@
           "properties": {
             "status": {
               "type": "string",
-              "enum": [
-                "OBSERVED",
-                "NOT_DETECTED",
-                "UNASSESSED",
-                "NOT_APPLICABLE"
-              ]
+              "enum": ["OBSERVED", "NOT_DETECTED", "UNASSESSED", "NOT_APPLICABLE"]
             },
             "summary": {
               "type": "string",
@@ -401,12 +323,7 @@
                   },
                   "kind": {
                     "type": "string",
-                    "enum": [
-                      "VISUAL",
-                      "TRANSCRIPT",
-                      "INFERENCE",
-                      "UNASSESSED"
-                    ]
+                    "enum": ["VISUAL", "TRANSCRIPT", "INFERENCE", "UNASSESSED"]
                   },
                   "description": {
                     "type": "string",
@@ -418,26 +335,14 @@
                     "maximum": 1
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs",
-                  "kind",
-                  "description",
-                  "confidence"
-                ],
+                "required": ["startMs", "endMs", "kind", "description", "confidence"],
                 "additionalProperties": false
               },
               "minItems": 0,
               "maxItems": 100
             }
           },
-          "required": [
-            "status",
-            "summary",
-            "reason",
-            "confidence",
-            "evidence"
-          ],
+          "required": ["status", "summary", "reason", "confidence", "evidence"],
           "additionalProperties": false
         },
         "originalProductDescription": {
@@ -461,12 +366,7 @@
           "maxLength": 4000
         }
       },
-      "required": [
-        "overview",
-        "originalProductDescription",
-        "closeupRatio",
-        "transferAdvice"
-      ],
+      "required": ["overview", "originalProductDescription", "closeupRatio", "transferAdvice"],
       "additionalProperties": false
     },
     "shots": {
@@ -526,6 +426,85 @@
             },
             "minItems": 0,
             "maxItems": 100
+          },
+          "motion": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["OBSERVED", "NO_VISIBLE_MOTION", "INSUFFICIENT_EVIDENCE"]
+              },
+              "openingState": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "closingState": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "events": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "startMs": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 120000
+                    },
+                    "endMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 120000
+                    },
+                    "subjectAction": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "cameraAction": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "contact": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "productPose": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "evidenceFramesMs": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 120000
+                      },
+                      "minItems": 1,
+                      "maxItems": 12
+                    }
+                  },
+                  "required": [
+                    "startMs",
+                    "endMs",
+                    "subjectAction",
+                    "cameraAction",
+                    "contact",
+                    "productPose",
+                    "evidenceFramesMs"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 0,
+                "maxItems": 12
+              }
+            },
+            "required": ["status", "openingState", "closingState", "reason", "events"],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -553,12 +532,7 @@
           "properties": {
             "status": {
               "type": "string",
-              "enum": [
-                "OBSERVED",
-                "NOT_DETECTED",
-                "UNASSESSED",
-                "NOT_APPLICABLE"
-              ]
+              "enum": ["OBSERVED", "NOT_DETECTED", "UNASSESSED", "NOT_APPLICABLE"]
             },
             "summary": {
               "type": "string",
@@ -590,12 +564,7 @@
                   },
                   "kind": {
                     "type": "string",
-                    "enum": [
-                      "VISUAL",
-                      "TRANSCRIPT",
-                      "INFERENCE",
-                      "UNASSESSED"
-                    ]
+                    "enum": ["VISUAL", "TRANSCRIPT", "INFERENCE", "UNASSESSED"]
                   },
                   "description": {
                     "type": "string",
@@ -607,26 +576,14 @@
                     "maximum": 1
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs",
-                  "kind",
-                  "description",
-                  "confidence"
-                ],
+                "required": ["startMs", "endMs", "kind", "description", "confidence"],
                 "additionalProperties": false
               },
               "minItems": 0,
               "maxItems": 100
             }
           },
-          "required": [
-            "status",
-            "summary",
-            "reason",
-            "confidence",
-            "evidence"
-          ],
+          "required": ["status", "summary", "reason", "confidence", "evidence"],
           "additionalProperties": false
         },
         "hasAudio": {
@@ -637,12 +594,7 @@
           "properties": {
             "status": {
               "type": "string",
-              "enum": [
-                "OBSERVED",
-                "NOT_DETECTED",
-                "UNASSESSED",
-                "NOT_APPLICABLE"
-              ]
+              "enum": ["OBSERVED", "NOT_DETECTED", "UNASSESSED", "NOT_APPLICABLE"]
             },
             "summary": {
               "type": "string",
@@ -674,12 +626,7 @@
                   },
                   "kind": {
                     "type": "string",
-                    "enum": [
-                      "VISUAL",
-                      "TRANSCRIPT",
-                      "INFERENCE",
-                      "UNASSESSED"
-                    ]
+                    "enum": ["VISUAL", "TRANSCRIPT", "INFERENCE", "UNASSESSED"]
                   },
                   "description": {
                     "type": "string",
@@ -691,26 +638,14 @@
                     "maximum": 1
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs",
-                  "kind",
-                  "description",
-                  "confidence"
-                ],
+                "required": ["startMs", "endMs", "kind", "description", "confidence"],
                 "additionalProperties": false
               },
               "minItems": 0,
               "maxItems": 100
             }
           },
-          "required": [
-            "status",
-            "summary",
-            "reason",
-            "confidence",
-            "evidence"
-          ],
+          "required": ["status", "summary", "reason", "confidence", "evidence"],
           "additionalProperties": false
         },
         "bgm": {
@@ -718,12 +653,7 @@
           "properties": {
             "status": {
               "type": "string",
-              "enum": [
-                "OBSERVED",
-                "NOT_DETECTED",
-                "UNASSESSED",
-                "NOT_APPLICABLE"
-              ]
+              "enum": ["OBSERVED", "NOT_DETECTED", "UNASSESSED", "NOT_APPLICABLE"]
             },
             "summary": {
               "type": "string",
@@ -755,12 +685,7 @@
                   },
                   "kind": {
                     "type": "string",
-                    "enum": [
-                      "VISUAL",
-                      "TRANSCRIPT",
-                      "INFERENCE",
-                      "UNASSESSED"
-                    ]
+                    "enum": ["VISUAL", "TRANSCRIPT", "INFERENCE", "UNASSESSED"]
                   },
                   "description": {
                     "type": "string",
@@ -772,26 +697,14 @@
                     "maximum": 1
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs",
-                  "kind",
-                  "description",
-                  "confidence"
-                ],
+                "required": ["startMs", "endMs", "kind", "description", "confidence"],
                 "additionalProperties": false
               },
               "minItems": 0,
               "maxItems": 100
             }
           },
-          "required": [
-            "status",
-            "summary",
-            "reason",
-            "confidence",
-            "evidence"
-          ],
+          "required": ["status", "summary", "reason", "confidence", "evidence"],
           "additionalProperties": false
         },
         "soundEffects": {
@@ -799,12 +712,7 @@
           "properties": {
             "status": {
               "type": "string",
-              "enum": [
-                "OBSERVED",
-                "NOT_DETECTED",
-                "UNASSESSED",
-                "NOT_APPLICABLE"
-              ]
+              "enum": ["OBSERVED", "NOT_DETECTED", "UNASSESSED", "NOT_APPLICABLE"]
             },
             "summary": {
               "type": "string",
@@ -836,12 +744,7 @@
                   },
                   "kind": {
                     "type": "string",
-                    "enum": [
-                      "VISUAL",
-                      "TRANSCRIPT",
-                      "INFERENCE",
-                      "UNASSESSED"
-                    ]
+                    "enum": ["VISUAL", "TRANSCRIPT", "INFERENCE", "UNASSESSED"]
                   },
                   "description": {
                     "type": "string",
@@ -853,26 +756,14 @@
                     "maximum": 1
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs",
-                  "kind",
-                  "description",
-                  "confidence"
-                ],
+                "required": ["startMs", "endMs", "kind", "description", "confidence"],
                 "additionalProperties": false
               },
               "minItems": 0,
               "maxItems": 100
             }
           },
-          "required": [
-            "status",
-            "summary",
-            "reason",
-            "confidence",
-            "evidence"
-          ],
+          "required": ["status", "summary", "reason", "confidence", "evidence"],
           "additionalProperties": false
         },
         "transcript": {
@@ -904,13 +795,7 @@
                 "maximum": 1
               }
             },
-            "required": [
-              "transcriptId",
-              "startMs",
-              "endMs",
-              "text",
-              "confidence"
-            ],
+            "required": ["transcriptId", "startMs", "endMs", "text", "confidence"],
             "additionalProperties": false
           },
           "minItems": 0,
@@ -952,10 +837,7 @@
                 "maximum": 120000
               }
             },
-            "required": [
-              "startMs",
-              "endMs"
-            ],
+            "required": ["startMs", "endMs"],
             "additionalProperties": false
           },
           "minItems": 0,
@@ -983,12 +865,7 @@
           "properties": {
             "status": {
               "type": "string",
-              "enum": [
-                "OBSERVED",
-                "NOT_DETECTED",
-                "UNASSESSED",
-                "NOT_APPLICABLE"
-              ]
+              "enum": ["OBSERVED", "NOT_DETECTED", "UNASSESSED", "NOT_APPLICABLE"]
             },
             "summary": {
               "type": "string",
@@ -1020,12 +897,7 @@
                   },
                   "kind": {
                     "type": "string",
-                    "enum": [
-                      "VISUAL",
-                      "TRANSCRIPT",
-                      "INFERENCE",
-                      "UNASSESSED"
-                    ]
+                    "enum": ["VISUAL", "TRANSCRIPT", "INFERENCE", "UNASSESSED"]
                   },
                   "description": {
                     "type": "string",
@@ -1037,26 +909,14 @@
                     "maximum": 1
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs",
-                  "kind",
-                  "description",
-                  "confidence"
-                ],
+                "required": ["startMs", "endMs", "kind", "description", "confidence"],
                 "additionalProperties": false
               },
               "minItems": 0,
               "maxItems": 100
             }
           },
-          "required": [
-            "status",
-            "summary",
-            "reason",
-            "confidence",
-            "evidence"
-          ],
+          "required": ["status", "summary", "reason", "confidence", "evidence"],
           "additionalProperties": false
         },
         "subtitles": {
@@ -1080,12 +940,7 @@
                 "type": "boolean"
               }
             },
-            "required": [
-              "elementId",
-              "text",
-              "style",
-              "burnedIn"
-            ],
+            "required": ["elementId", "text", "style", "burnedIn"],
             "additionalProperties": false
           },
           "minItems": 0,
@@ -1113,14 +968,7 @@
           "maxLength": 4000
         }
       },
-      "required": [
-        "overview",
-        "subtitles",
-        "color",
-        "stickers",
-        "aspectRatio",
-        "safeArea"
-      ],
+      "required": ["overview", "subtitles", "color", "stickers", "aspectRatio", "safeArea"],
       "additionalProperties": false
     },
     "elements": {
@@ -1134,14 +982,7 @@
           },
           "type": {
             "type": "string",
-            "enum": [
-              "product",
-              "person",
-              "scene",
-              "subtitle",
-              "bgm",
-              "voiceover"
-            ]
+            "enum": ["product", "prop", "person", "scene", "subtitle", "bgm", "voiceover"]
           },
           "label": {
             "type": "string",
@@ -1176,10 +1017,7 @@
                   "maximum": 120000
                 }
               },
-              "required": [
-                "startMs",
-                "endMs"
-              ],
+              "required": ["startMs", "endMs"],
               "additionalProperties": false
             },
             "minItems": 0,
@@ -1202,12 +1040,7 @@
                 },
                 "kind": {
                   "type": "string",
-                  "enum": [
-                    "VISUAL",
-                    "TRANSCRIPT",
-                    "INFERENCE",
-                    "UNASSESSED"
-                  ]
+                  "enum": ["VISUAL", "TRANSCRIPT", "INFERENCE", "UNASSESSED"]
                 },
                 "description": {
                   "type": "string",
@@ -1219,13 +1052,7 @@
                   "maximum": 1
                 }
               },
-              "required": [
-                "startMs",
-                "endMs",
-                "kind",
-                "description",
-                "confidence"
-              ],
+              "required": ["startMs", "endMs", "kind", "description", "confidence"],
               "additionalProperties": false
             },
             "minItems": 0,
@@ -1240,13 +1067,7 @@
           },
           "sourceTrack": {
             "type": "string",
-            "enum": [
-              "VISUAL",
-              "BURNED_IN",
-              "AUDIO_MIX",
-              "INDEPENDENT",
-              "UNKNOWN"
-            ]
+            "enum": ["VISUAL", "BURNED_IN", "AUDIO_MIX", "INDEPENDENT", "UNKNOWN"]
           },
           "confidence": {
             "type": "number",

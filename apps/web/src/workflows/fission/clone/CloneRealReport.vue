@@ -23,6 +23,26 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ edit: [report: CloneAnalysisReport] }>();
 const video = ref<HTMLVideoElement | null>(null);
+const motionStatuses = {
+  OBSERVED: '已观察到动作',
+  NO_VISIBLE_MOTION: '采样中未见动作',
+  INSUFFICIENT_EVIDENCE: '动作证据不足',
+} as const;
+const motionStates = [
+  ['openingState', '起始状态'],
+  ['closingState', '结束状态'],
+  ['reason', '观察依据与限制'],
+] as const;
+const motionEventFields = [
+  ['subjectAction', '主体动作'],
+  ['cameraAction', '相机运动'],
+  ['contact', '接触与遮挡'],
+  ['productPose', '商品朝向与姿态'],
+] as const;
+const motionEventTimes = [
+  ['startMs', '动作起点（秒）'],
+  ['endMs', '动作终点（秒）'],
+] as const;
 const fields = {
   creativity: [
     ['concept', '核心创意'],
@@ -86,6 +106,15 @@ function seek(milliseconds: number) {
   video.value.currentTime = milliseconds / 1000;
   video.value.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
+function motionBoundary(
+  shotIndex: number,
+  eventIndex: number,
+  edge: 'startMs' | 'endMs',
+  seconds: number,
+) {
+  if (Number.isFinite(seconds))
+    update(['shots', shotIndex, 'motion', 'events', eventIndex, edge], Math.round(seconds * 1000));
+}
 </script>
 <template>
   <div class="frg-body clone-real-report">
@@ -93,7 +122,7 @@ function seek(milliseconds: number) {
       <div>
         <span>参考视频</span><b>{{ referenceName }}</b>
       </div>
-      <div>
+      <div v-if="productName">
         <span>关联商品</span><b>{{ productName }}</b>
       </div>
       <div>
@@ -293,7 +322,7 @@ function seek(milliseconds: number) {
         <article class="frg-dimension">
           <header>
             <span><Film :size="17" /></span><b>4. 镜头</b
-            ><small>{{ report.shots.length }} 个镜头 · 纵向时间线</small>
+            ><small>{{ report.shots.length }} 个镜头 · 切点与动作证据</small>
           </header>
           <div class="frg-shot-timeline">
             <article v-for="(shot, index) in report.shots" :key="shot.shotId" class="frg-shot-card">
@@ -402,6 +431,89 @@ function seek(milliseconds: number) {
                     {{ cloneTime(time) }}
                   </button>
                 </div>
+                <details v-if="shot.motion" class="clone-shot-motion">
+                  <summary>镜头内动作 · {{ motionStatuses[shot.motion.status] }}</summary>
+                  <div class="clone-motion-fields">
+                    <template v-for="[key, label] in motionStates" :key="key">
+                      <label v-if="editing">
+                        {{ label }}
+                        <textarea
+                          :value="shot.motion[key]"
+                          maxlength="1000"
+                          @input="
+                            update(
+                              ['shots', index, 'motion', key],
+                              ($event.target as HTMLTextAreaElement).value,
+                            )
+                          "
+                        />
+                      </label>
+                      <div v-else-if="shot.motion[key]">
+                        <b>{{ label }}</b> {{ shot.motion[key] }}
+                      </div>
+                    </template>
+                  </div>
+                  <ol v-if="shot.motion.events.length" class="clone-motion-events">
+                    <li v-for="(event, eventIndex) in shot.motion.events" :key="eventIndex">
+                      <div v-if="editing" class="clone-time-inputs">
+                        <label v-for="[edge, label] in motionEventTimes" :key="edge">
+                          {{ label }}
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.001"
+                            :value="event[edge] / 1000"
+                            @change="
+                              motionBoundary(
+                                index,
+                                eventIndex,
+                                edge,
+                                ($event.target as HTMLInputElement).valueAsNumber,
+                              )
+                            "
+                          />
+                        </label>
+                      </div>
+                      <strong v-else
+                        >{{ cloneTime(event.startMs) }}–{{ cloneTime(event.endMs) }}</strong
+                      >
+                      <div class="clone-motion-fields">
+                        <template v-for="[key, label] in motionEventFields" :key="key">
+                          <label v-if="editing">
+                            {{ label }}
+                            <textarea
+                              :value="event[key]"
+                              maxlength="1000"
+                              @input="
+                                update(
+                                  ['shots', index, 'motion', 'events', eventIndex, key],
+                                  ($event.target as HTMLTextAreaElement).value,
+                                )
+                              "
+                            />
+                          </label>
+                          <div v-else-if="event[key]">
+                            <b>{{ label }}</b> {{ event[key] }}
+                          </div>
+                        </template>
+                      </div>
+                      <div class="clone-frame-points">
+                        <span>动作证据</span>
+                        <button
+                          v-for="time in event.evidenceFramesMs"
+                          :key="time"
+                          class="frg-btn"
+                          type="button"
+                          :disabled="!referenceUrl"
+                          :aria-label="`查看动作证据 ${cloneTime(time)}`"
+                          @click="seek(time)"
+                        >
+                          {{ cloneTime(time) }}
+                        </button>
+                      </div>
+                    </li>
+                  </ol>
+                </details>
               </div>
             </article>
           </div>
@@ -515,8 +627,14 @@ function seek(milliseconds: number) {
           <header>
             <b>{{ cloneElementLabels[element.type] }} · {{ element.label }}</b
             ><span
-              >{{ element.type === 'product' ? '产品必换' : '可配置' }} ·
-              {{ element.shotIds.length }} 个关联镜头</span
+              >{{
+                element.type === 'product'
+                  ? '产品必换'
+                  : element.type === 'prop'
+                    ? '镜头参考'
+                    : '可配置'
+              }}
+              · {{ element.shotIds.length }} 个关联镜头</span
             >
           </header>
           <label
@@ -537,6 +655,14 @@ function seek(milliseconds: number) {
               cloneTime(evidence.endMs)
             }}
             · {{ evidence.description }}
+            <button
+              v-if="element.type === 'prop' && evidence.kind === 'VISUAL'"
+              class="frg-btn"
+              :disabled="!referenceUrl"
+              @click="seek(evidence.startMs)"
+            >
+              查看画面证据
+            </button>
           </p>
         </article>
       </div>
@@ -692,6 +818,41 @@ function seek(milliseconds: number) {
 }
 .clone-frame-points button {
   padding: 4px 7px;
+}
+.clone-shot-motion {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #dce5f2;
+  color: #34435b;
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.clone-shot-motion summary {
+  cursor: pointer;
+  color: #3c6397;
+  font-weight: 600;
+}
+.clone-motion-fields {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+.clone-motion-fields b {
+  margin-right: 5px;
+}
+.clone-motion-events {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.clone-motion-events li {
+  min-width: 0;
+  padding: 9px 10px;
+  background: #f7faff;
+  border-radius: 8px;
 }
 .clone-element-evidence {
   display: grid;

@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import sys
@@ -90,6 +91,80 @@ async def test_real_local_media_probe_and_sampling(tmp_path):
     assert not list(tmp_path.glob("frame-*.jpg"))
     assert value.metadata()["audioSemantics"] == "UNASSESSED"
     assert value.cut_candidates == ()
+
+
+@pytest.mark.parametrize("video_duration", [None, "N/A", "nan", "inf", "0", "-1"])
+async def test_probe_falls_back_to_container_for_unusable_video_duration(
+    tmp_path, monkeypatch, video_duration
+):
+    async def tool(args, timeout):
+        if args[0] == "ffprobe":
+            return json.dumps(
+                {
+                    "streams": [
+                        {
+                            "codec_type": "video",
+                            "duration": video_duration,
+                            "width": 96,
+                            "height": 128,
+                        }
+                    ],
+                    "format": {"duration": "4.042000"},
+                }
+            ).encode()
+        Path(args[-1]).write_bytes(b"jpeg")
+        return b""
+
+    monkeypatch.setattr("fission_clone_analysis.media.run_process", tool)
+    result = await sample_video(
+        tmp_path / "source", tmp_path, MediaLimits(max_frames=2)
+    )
+    assert result.duration_ms == 4042
+    assert [frame.time_ms for frame in result.frames] == [0, 3842]
+
+
+async def test_real_legacy_container_duration_keeps_report_and_video_evidence_separate(
+    tmp_path,
+):
+    ffmpeg, ffprobe = local_tools()
+    source = tmp_path / "different-av-durations.mp4"
+    await run_process(
+        [
+            ffmpeg, "-nostdin", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=96x128:rate=24:d=4",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:d=4.042",
+            "-c:v", "libx264", "-c:a", "aac", "-y", str(source),
+        ],
+        30,
+    )
+    output = await run_process(
+        [
+            ffprobe, "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "format=duration:stream=duration,nb_frames",
+            "-of", "json", str(source),
+        ],
+        30,
+    )
+    probe = json.loads(output)
+    assert float(probe["streams"][0]["duration"]) == 4
+    assert int(probe["streams"][0]["nb_frames"]) == 96
+    assert float(probe["format"]["duration"]) == 4.042
+
+    limits = MediaLimits(ffmpeg=ffmpeg, ffprobe=ffprobe, max_frames=2)
+    current = await sample_video(source, tmp_path, limits)
+    assert current.duration_ms == 4000
+
+    frozen = {"durationMs": 4042, "width": 96, "height": 128}
+    legacy = await sample_video(source, tmp_path, limits, frozen_media=frozen)
+    assert legacy.metadata()["durationMs"] == 4042
+    assert legacy.frames == current.frames
+    assert [frame.time_ms for frame in legacy.frames] == [0, 3800]
+
+    shorter = await sample_video(
+        source, tmp_path, limits, frozen_media={**frozen, "durationMs": 3958}
+    )
+    assert shorter.metadata()["durationMs"] == 3958
+    assert [frame.time_ms for frame in shorter.frames] == [0, 3758]
 
 
 async def test_real_hard_cut_supplies_both_sides_within_frame_budget(tmp_path):

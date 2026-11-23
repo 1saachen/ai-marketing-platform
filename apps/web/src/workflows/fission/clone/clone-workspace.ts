@@ -589,7 +589,7 @@ export function createCloneWorkspace(api = cloneWorkspaceApi) {
         elementId: element.elementId,
         type: element.type,
         shotIds: [...element.shotIds],
-        action: element.type === 'person' || element.type === 'scene' ? 'KEEP' : 'REPLACE',
+        action: ['person', 'scene', 'prop'].includes(element.type) ? 'KEEP' : 'REPLACE',
         target: null,
       })),
     };

@@ -8,6 +8,11 @@ node_modules
 **/.venv
 **/__pycache__
 **/.pytest_cache
+**/.pytest-*
+**/.mypy_cache
+**/.ruff_cache
+# Local worker test runs and their generated media.
+**/.pt*
 **/src/generated
 .tmp*
 tmp
@@ -16,6 +21,7 @@ output
 .playwright-mcp
 references
 docs
+素材
 deployment-logs
 backups
 release.tar.gz

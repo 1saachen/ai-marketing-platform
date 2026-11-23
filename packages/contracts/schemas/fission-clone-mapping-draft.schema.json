@@ -25,11 +25,7 @@
               "pattern": "^[a-f0-9]{64}$"
             }
           },
-          "required": [
-            "artifactId",
-            "revision",
-            "contentHash"
-          ],
+          "required": ["artifactId", "revision", "contentHash"],
           "additionalProperties": false
         },
         {
@@ -56,11 +52,7 @@
               "pattern": "^[a-f0-9]{64}$"
             }
           },
-          "required": [
-            "artifactId",
-            "revision",
-            "contentHash"
-          ],
+          "required": ["artifactId", "revision", "contentHash"],
           "additionalProperties": false
         },
         {
@@ -79,21 +71,11 @@
           },
           "type": {
             "type": "string",
-            "enum": [
-              "product",
-              "person",
-              "scene",
-              "subtitle",
-              "bgm",
-              "voiceover"
-            ]
+            "enum": ["product", "prop", "person", "scene", "subtitle", "bgm", "voiceover"]
           },
           "action": {
             "type": "string",
-            "enum": [
-              "KEEP",
-              "REPLACE"
-            ]
+            "enum": ["KEEP", "REPLACE"]
           },
           "shotIds": {
             "type": "array",
@@ -124,10 +106,7 @@
                             "maximum": 9007199254740991
                           }
                         },
-                        "required": [
-                          "assetId",
-                          "version"
-                        ],
+                        "required": ["assetId", "version"],
                         "additionalProperties": false
                       },
                       {
@@ -149,19 +128,11 @@
                   },
                   "contentStrategy": {
                     "type": "string",
-                    "enum": [
-                      "KEEP",
-                      "REPLACE",
-                      "NONE"
-                    ]
+                    "enum": ["KEEP", "REPLACE", "NONE"]
                   },
                   "presentationStrategy": {
                     "type": "string",
-                    "enum": [
-                      "KEEP",
-                      "REPLACE",
-                      "NONE"
-                    ]
+                    "enum": ["KEEP", "REPLACE", "NONE"]
                   },
                   "lockedAttributes": {
                     "type": "array",
@@ -200,13 +171,7 @@
             ]
           }
         },
-        "required": [
-          "elementId",
-          "type",
-          "action",
-          "shotIds",
-          "target"
-        ],
+        "required": ["elementId", "type", "action", "shotIds", "target"],
         "additionalProperties": false
       },
       "minItems": 0,
@@ -255,14 +220,7 @@
                     "maximum": 1
                   }
                 },
-                "required": [
-                  "stageId",
-                  "startMs",
-                  "endMs",
-                  "role",
-                  "summary",
-                  "proportion"
-                ],
+                "required": ["stageId", "startMs", "endMs", "role", "summary", "proportion"],
                 "additionalProperties": false
               },
               "minItems": 1,
@@ -292,12 +250,7 @@
                     "maximum": 120000
                   }
                 },
-                "required": [
-                  "shotId",
-                  "stageId",
-                  "startMs",
-                  "endMs"
-                ],
+                "required": ["shotId", "stageId", "startMs", "endMs"],
                 "additionalProperties": false
               },
               "minItems": 1,
@@ -339,10 +292,7 @@
                     "maximum": 120000
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs"
-                ],
+                "required": ["startMs", "endMs"],
                 "additionalProperties": false
               },
               "minItems": 0,
@@ -364,10 +314,7 @@
                     "maximum": 120000
                   }
                 },
-                "required": [
-                  "startMs",
-                  "endMs"
-                ],
+                "required": ["startMs", "endMs"],
                 "additionalProperties": false
               },
               "minItems": 0,
@@ -391,12 +338,6 @@
       ]
     }
   },
-  "required": [
-    "schemaVersion",
-    "sourceInput",
-    "sourceAnalysis",
-    "bindings",
-    "structureLock"
-  ],
+  "required": ["schemaVersion", "sourceInput", "sourceAnalysis", "bindings", "structureLock"],
   "additionalProperties": false
 }
