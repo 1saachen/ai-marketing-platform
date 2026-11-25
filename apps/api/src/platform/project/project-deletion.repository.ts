@@ -8,6 +8,10 @@ import { ApiHttpException } from '../../common/api-http-exception';
 
 // Typed storage-key columns, including archived assets, revisions, failed outputs and staging.
 // JSON snapshots refer to these objects; never interpret arbitrary JSON text as a deletable key.
+import {
+  AVATAR_RENDER_ACTIVE_STATUSES,
+  avatarSyncReconciliationFilter,
+} from '../workflow/fission-avatar-scope';
 import { PROJECT_STORAGE_COLUMNS } from '../file/storage-reference-columns';
 export { PROJECT_STORAGE_COLUMNS } from '../file/storage-reference-columns';
 
@@ -67,7 +71,40 @@ async function assertProjectInactive(
     status: { in: ['QUEUED', 'RUNNING'] as ('QUEUED' | 'RUNNING')[] },
   };
   const now = new Date();
+  // G1 projects can still be deleted on installations that have not added the sync table.
+  // Feature flags change admission, not the protection for already-admitted work.
+  const [avatarTables] = await tx.$queryRaw<
+    { sync: boolean; render: boolean; segments: boolean; picture: boolean }[]
+  >(
+    Prisma.sql`SELECT
+      to_regclass('fission_avatar_sync_tasks') IS NOT NULL AS "sync",
+      to_regclass('fission_avatar_render_tasks') IS NOT NULL AS "render",
+      to_regclass('fission_avatar_sync_segments') IS NOT NULL AS "segments",
+      EXISTS (SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass('fission_avatar_sync_segments')
+          AND attname = 'pictureStarted' AND NOT attisdropped) AS "picture"`,
+  );
   const counts = await Promise.all([
+    ...(avatarTables?.sync
+      ? [
+          tx.fissionAvatarSyncTask.count({
+            where: {
+              projectId,
+              OR: [
+                { status: active.status },
+                avatarSyncReconciliationFilter(!!avatarTables.segments, !!avatarTables.picture),
+              ],
+            },
+          }),
+        ]
+      : []),
+    ...(avatarTables?.render
+      ? [
+          tx.fissionAvatarRenderTask.count({
+            where: { projectId, status: { in: AVATAR_RENDER_ACTIVE_STATUSES } },
+          }),
+        ]
+      : []),
     ...(localReplaceEnabled
       ? [
           tx.fissionLocalReplaceTask.count({

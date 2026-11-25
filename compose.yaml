@@ -412,6 +412,93 @@ services:
       - /tmp:size=800m,mode=1777
     cpus: '1.0'
     mem_limit: 1400m
+  fission-avatar-worker:
+    profiles: ['fission-avatar']
+    build:
+      context: .
+      dockerfile: workers/fission-avatar/Dockerfile
+    environment:
+      INTERNAL_API_BASE_URL: http://host.docker.internal:${API_PORT:-3000}/api
+      FISSION_AVATAR_SYNC_WORKER_TOKEN: ${FISSION_AVATAR_SYNC_WORKER_TOKEN:-}
+      FISSION_AVATAR_SYNC_TIMEOUT_SECONDS: ${FISSION_AVATAR_SYNC_TIMEOUT_SECONDS:-900}
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      VOLC_TTS_API_KEY: ${VOLC_TTS_API_KEY:-}
+      VOLC_MEDIAKIT_API_KEY: ${VOLC_MEDIAKIT_API_KEY:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=384m,mode=1777
+    cpus: '1.0'
+    mem_limit: 768m
+  fission-avatar-render-worker:
+    profiles: ['fission-avatar-render']
+    build:
+      context: .
+      dockerfile: workers/fission-avatar/Dockerfile
+    environment:
+      INTERNAL_API_BASE_URL: http://host.docker.internal:${API_PORT:-3000}/api
+      FISSION_AVATAR_WORKER_MODE: render
+      FISSION_AVATAR_SYNC_WORKER_TOKEN: ${FISSION_AVATAR_SYNC_WORKER_TOKEN:-}
+      FISSION_AVATAR_RENDER_TIMEOUT_SECONDS: ${FISSION_AVATAR_RENDER_TIMEOUT_SECONDS:-180}
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=384m,mode=1777
+    cpus: '2.0'
+    mem_limit: 1024m
+
+  fission-avatar-long-sync-worker:
+    profiles: ['fission-avatar-long']
+    build:
+      context: .
+      dockerfile: workers/fission-avatar/Dockerfile
+    environment:
+      INTERNAL_API_BASE_URL: http://host.docker.internal:${API_PORT:-3000}/api
+      FISSION_AVATAR_WORKER_MODE: long-sync
+      FISSION_AVATAR_SYNC_WORKER_TOKEN: ${FISSION_AVATAR_SYNC_WORKER_TOKEN:-}
+      FISSION_AVATAR_LONG_SYNC_TIMEOUT_SECONDS: ${FISSION_AVATAR_LONG_SYNC_TIMEOUT_SECONDS:-2400}
+      FISSION_AVATAR_TAIL_PICTURE_TIMEOUT_SECONDS: ${FISSION_AVATAR_TAIL_PICTURE_TIMEOUT_SECONDS:-600}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      VOLC_TTS_API_KEY: ${VOLC_TTS_API_KEY:-}
+      VOLC_MEDIAKIT_API_KEY: ${VOLC_MEDIAKIT_API_KEY:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=1536m,mode=1777
+    cpus: '2.0'
+    mem_limit: 2304m
+  fission-avatar-long-render-worker:
+    profiles: ['fission-avatar-long']
+    build:
+      context: .
+      dockerfile: workers/fission-avatar/Dockerfile
+    environment:
+      INTERNAL_API_BASE_URL: http://host.docker.internal:${API_PORT:-3000}/api
+      FISSION_AVATAR_WORKER_MODE: long-render
+      FISSION_AVATAR_SYNC_WORKER_TOKEN: ${FISSION_AVATAR_SYNC_WORKER_TOKEN:-}
+      FISSION_AVATAR_LONG_RENDER_TIMEOUT_SECONDS: ${FISSION_AVATAR_LONG_RENDER_TIMEOUT_SECONDS:-480}
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cpus: '2.0'
+    mem_limit: 1280m
 
 volumes:
   postgres-data:

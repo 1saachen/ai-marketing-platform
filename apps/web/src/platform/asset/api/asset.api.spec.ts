@@ -101,6 +101,29 @@ describe('asset API', () => {
     expect(form.get('name')).toBeNull();
   });
 
+  it('keeps a single background upload in its avatar library scope', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ success: true, data: asset })));
+    vi.stubGlobal('fetch', fetchMock);
+    const file = new File(['image'], 'background.png', { type: 'image/png' });
+    await importAsset('project-1', file, {
+      name: '背景',
+      directory: 'VISUAL_ASSETS',
+      type: 'SCENE_BACKGROUND',
+      tags: [],
+      storageWorkflow: 'FISSION',
+      workflowSpace: 'FISSION_AVATAR',
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/projects/project-1/assets');
+    const form = (fetchMock.mock.calls[0]?.[1] as RequestInit).body as FormData;
+    expect(Object.fromEntries(form)).toMatchObject({
+      type: 'SCENE_BACKGROUND',
+      storageWorkflow: 'FISSION',
+      workflowSpace: 'FISSION_AVATAR',
+    });
+  });
+
   it('uses frozen version, snapshot, upgrade and batch routes', async () => {
     const fetchMock = vi
       .fn()

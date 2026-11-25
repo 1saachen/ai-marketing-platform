@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-tail-chain-worker-input.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "voiceSpeaker": {
+      "type": "string",
+      "pattern": "^zh_[a-z0-9_]{1,80}_uranus_bigtts$"
+    },
+    "scriptText": {
+      "type": "string",
+      "maxLength": 720,
+      "minLength": 1
+    },
+    "sourceTaskId": {
+      "type": "string",
+      "pattern": "^cgt-[A-Za-z0-9_-]{1,120}$"
+    },
+    "model": {
+      "const": "doubao-seedance-2-0-fast-260128"
+    },
+    "ttsOperationId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "ttsStarted": {
+      "type": "boolean"
+    },
+    "plan": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "masterSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "sourceSamples": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2160000
+            },
+            "segments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "sourceStartSample": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2159999
+                  },
+                  "sourceEndSample": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2160000
+                  },
+                  "leadingSilenceSamples": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23999
+                  },
+                  "durationSeconds": {
+                    "type": "integer",
+                    "minimum": 4,
+                    "maximum": 15
+                  }
+                },
+                "required": [
+                  "sourceStartSample",
+                  "sourceEndSample",
+                  "leadingSilenceSamples",
+                  "durationSeconds"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 5,
+              "maxItems": 12
+            }
+          },
+          "required": ["masterSha256", "sourceSamples", "segments"],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "ordinal": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12
+          },
+          "pictureStarted": {
+            "type": "boolean"
+          },
+          "pictureTaskId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^cgt-[A-Za-z0-9_-]{1,120}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lipSyncClientToken": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+          },
+          "lipSyncStarted": {
+            "type": "boolean"
+          },
+          "lipSyncTaskId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^amk-tool-lip-sync-[A-Za-z0-9_-]{1,120}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "media": {
+                    "type": "object",
+                    "properties": {
+                      "audioDurationMs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30000
+                      },
+                      "videoDurationMs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30000
+                      },
+                      "audioLagMs": {
+                        "type": "integer",
+                        "minimum": -100,
+                        "maximum": 100
+                      },
+                      "minimumAudioCorrelationPermille": {
+                        "type": "integer",
+                        "minimum": 980,
+                        "maximum": 1000
+                      },
+                      "wordTimings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "text": {
+                              "type": "string",
+                              "maxLength": 80,
+                              "minLength": 1
+                            },
+                            "startMs": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 29999
+                            },
+                            "endMs": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 30000
+                            },
+                            "confidencePermille": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 1000
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": ["text", "startMs", "endMs", "confidencePermille"],
+                          "additionalProperties": false
+                        },
+                        "minItems": 1,
+                        "maxItems": 240
+                      }
+                    },
+                    "required": [
+                      "audioDurationMs",
+                      "videoDurationMs",
+                      "audioLagMs",
+                      "minimumAudioCorrelationPermille",
+                      "wordTimings"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "audio": {
+                    "type": "object",
+                    "properties": {
+                      "sizeBytes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8388608
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": ["sizeBytes", "sha256"],
+                    "additionalProperties": false
+                  },
+                  "video": {
+                    "type": "object",
+                    "properties": {
+                      "sizeBytes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 67108864
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": ["sizeBytes", "sha256"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["media", "audio", "video"],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "ordinal",
+          "pictureStarted",
+          "pictureTaskId",
+          "lipSyncClientToken",
+          "lipSyncStarted",
+          "lipSyncTaskId",
+          "result"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 12
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "voiceSpeaker",
+    "scriptText",
+    "sourceTaskId",
+    "model",
+    "ttsOperationId",
+    "ttsStarted",
+    "plan",
+    "segments"
+  ],
+  "additionalProperties": false
+}

@@ -10,6 +10,6 @@ import { AssetService } from './asset.service';
   imports: [FileModule, ProjectModule],
   controllers: [AssetController],
   providers: [AssetRepository, AssetService],
-  exports: [AssetService],
+  exports: [AssetService, AssetRepository],
 })
 export class AssetModule {}

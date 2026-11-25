@@ -8,7 +8,13 @@ import type {
   WorkingArtifact,
   EffectWorkflowBranchTreeData,
 } from '@ai-marketing/contracts';
-import { FISSION_CLONE_NODES } from '@ai-marketing/contracts';
+import {
+  AVATAR_COMPOSITION_NODE,
+  AVATAR_OUTPUT_NODE,
+  AVATAR_SYNC_NODE,
+  FISSION_AVATAR_NODES,
+  FISSION_CLONE_NODES,
+} from '@ai-marketing/contracts';
 import {
   AlertTriangle,
   ArrowUpRight,
@@ -226,7 +232,10 @@ const projectAsset = computed(() =>
 );
 const canResume = computed(() => {
   if (props.currentProject?.id !== props.project.id) return false;
-  if (props.workflow === 'FISSION' && props.space === 'FISSION_CLONE') {
+  if (
+    props.workflow === 'FISSION' &&
+    (props.space === 'FISSION_CLONE' || props.space === 'FISSION_AVATAR')
+  ) {
     return (
       props.currentWorkflow === 'FISSION' &&
       selected.value?.source.kind === 'working' &&
@@ -259,6 +268,10 @@ const resumeId = computed(() => {
       'TEMPLATE_MIX',
       'FINAL_OUTPUT',
       ...FISSION_CLONE_NODES,
+      ...Object.values(FISSION_AVATAR_NODES),
+      AVATAR_SYNC_NODE,
+      AVATAR_COMPOSITION_NODE,
+      AVATAR_OUTPUT_NODE,
     ].includes(id)
     ? id
     : null;

@@ -16,6 +16,10 @@ export type WorkflowPauseRunRequest = {
   expectedCloneDraftRevisions?: Record<string, number>;
   /** Latest saved local replacement draft editing revision. */
   expectedLocalReplaceDraftRevision?: number;
+  /** Latest saved Avatar workspace editing revision. */
+  expectedAvatarDraftRevision?: number;
+  /** Latest saved Avatar background and caption editing revision, if a draft exists. */
+  expectedAvatarCompositionDraftRevision?: number;
 };
 
 export const WORKING_ARTIFACT_KINDS = ['FILE', 'STRUCTURED'] as const;

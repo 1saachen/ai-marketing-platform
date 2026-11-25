@@ -1,4 +1,8 @@
 /* Integration and responsive corrections on top of frozen prototype styles. */
+.fas-studio.fas-studio--with-status {
+  grid-template-rows: 48px auto minmax(290px, 1fr) minmax(190px, 225px) 62px minmax(48px, auto);
+  min-height: 730px;
+}
 .fas-style-section-title {
   display: flex;
   align-items: center;
@@ -324,7 +328,17 @@
     text-overflow: ellipsis;
   }
 }
+
+@media (max-width: 1180px) {
+  .fas-studio.fas-studio--with-status {
+    grid-template-rows: 48px auto 560px 245px 62px minmax(48px, auto);
+  }
+}
+
 @media (max-width: 900px) {
+  .fas-studio.fas-studio--with-status {
+    grid-template-rows: 48px auto 875px 265px 84px minmax(60px, auto);
+  }
   .fas-studio {
     grid-template-rows: 48px 875px 265px 84px 60px;
     min-height: 1332px;

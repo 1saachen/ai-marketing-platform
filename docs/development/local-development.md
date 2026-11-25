@@ -127,6 +127,39 @@ docker compose --profile effect-segment-render up -d effect-segment-render-worke
 
 代码目录为 `workers/effect-segment-render`，Python 包为 `effect_segment_render`，入口命令为 `effect-segment-render-worker`。从旧服务迁移时，须在没有活动渲染/返修任务时先停止原 `seedance-worker` 容器；新服务不会自动替换旧容器，不得同时运行两个消费者叠加供应商额度。队列、Token 及 `SEEDANCE_*` / `SEGMENT_RENDER_*` 配置保持不变。无付费验证和运行边界见[片段渲染 Worker](../../workers/effect-segment-render/README.md)。
 
+## 数字人口播项目工作台
+
+`FISSION_AVATAR_ENABLED` 默认关闭。试点环境先核对目标数据库及备份，应用 `20261124090000_fission_avatar_asset_grants`，再启用工作台。项目数字人库里的形象和音色按具体资产版本登记授权。使用已有本地开发启动方式验证草稿、确认产物和鉴权媒体。 [数字人口播 API 和授权登记](../../apps/api/src/workflows/fission/avatar/README.md)
+
+G2 口播生成使用默认关闭的 `FISSION_AVATAR_SYNC_ENABLED` 和独立 `fission-avatar` profile。准备启用时，先核对并应用 `20261124110000_fission_avatar_sync`，设置 API 和 Worker 的同一个 `FISSION_AVATAR_SYNC_WORKER_TOKEN`。TTS 与 MediaKit 密钥由 Worker 从环境读取。API 配置 `FISSION_AVATAR_FFPROBE_PATH` 或在 PATH 提供 ffprobe。资产登记时为实际允许使用的音色设置生成映射。 [数字人口播 API 和授权登记](../../apps/api/src/workflows/fission/avatar/README.md)
+
+```powershell
+docker compose --profile fission-avatar config --quiet
+docker compose --profile fission-avatar build fission-avatar-worker
+```
+
+启动该消费者会处理真实队列。启用前核对已授权的项目素材、账号与调用范围。需要停止接收新任务时关闭生成开关，并用当前版本核对活动任务与待对账记录。 [同步 Worker](../../workers/fission-avatar/README.md)
+
+G3 使用 `20261124120000_fission_avatar_render` 迁移、默认关闭的 `FISSION_AVATAR_RENDER_ENABLED` 和 `fission-avatar-render` profile。渲染消费者与 API 共用 `FISSION_AVATAR_SYNC_WORKER_TOKEN`，使用本地 FFmpeg，最长运行时间由 `FISSION_AVATAR_RENDER_TIMEOUT_SECONDS` 设置。纯合成消费者无需供应商密钥。
+
+```powershell
+docker compose --profile fission-avatar-render config --quiet
+docker compose --profile fission-avatar-render build fission-avatar-render-worker
+```
+
+配置独立的 `FISSION_AVATAR_RENDER_REVIEW_TOKEN` 和已校准方法的 `FISSION_AVATAR_RENDER_REVIEW_METHOD` 后，授权评审人员可读取候选并提交与其 SHA-256 匹配的测量报告。未配置方法或报告未达到门槛时，候选成片不会发布。 [候选读取与报告提交](../../scripts/fission-avatar/README.md#g3-成片评审)
+
+G4 长片采用 `20261124130000_fission_avatar_segmented_sync` 迁移、默认关闭的 `FISSION_AVATAR_LONG_ENABLED` 和 `fission-avatar-long` profile。工作台生成及成片操作分别还需要对应的 G2、G3 开关。长片同步使用相同的内部 Worker 凭据和两种供应商密钥，长片渲染使用本地 FFmpeg。隔离联调使用测试供应商替身，实拍试点前校准口型评审及核对供应商调用授权。 [长片隔离联调](../workflows/fission/avatar/evidence/2026-11-24-G4工作台长片链路验证.md)
+
+```powershell
+docker compose --profile fission-avatar-long config --quiet
+docker compose --profile fission-avatar-long build fission-avatar-long-sync-worker fission-avatar-long-render-worker
+```
+
+尾帧接续需要加法迁移 `20261124140000_fission_avatar_continuity` 和 API 开关 `FISSION_AVATAR_CONTINUITY_ENABLED`，开关默认关闭。长片同步消费者使用同一方舟账号的 `ARK_API_KEY` 与 `ARK_BASE_URL`，`FISSION_AVATAR_TAIL_PICTURE_TIMEOUT_SECONDS` 默认 600 秒。启用后，长片新建会检查当前授权形象登记的原始任务。先验证方舟鉴权、原始尾帧可读性及项目授权，再接收试点任务。 [形象来源登记与任务对账](../../apps/api/src/workflows/fission/avatar/README.md#g4-尾帧接续)
+
+G0 供应商小样使用独立脚本和本地私有产物目录。脚本预检仅读本地文件，执行模式需要已授权素材、账号及费用授权。 [单条小样运行说明](../../scripts/fission-avatar/README.md)
+
 ## 爆款复刻拆解与映射 Worker
 
 复刻输入开关 `FISSION_CLONE_ENABLED` 与 G2 开关 `FISSION_CLONE_G2_ENABLED` 默认关闭。先核对目标数据库与备份，再应用 `20261111120000_fission_clone_uploads`、`20261111130000_fission_clone_g2_tasks`；迁移不是只读检查，不因构建或浏览器验收自动迁移日常数据库。API 配置 `FISSION_CLONE_ANALYSIS_MODEL` 及媒体工具，API/Worker 配置相同的独立 `FISSION_CLONE_ANALYSIS_WORKER_TOKEN`。Worker 还需要 `ARK_API_KEY`、含 `/api` 的 `INTERNAL_API_BASE_URL` 和 RabbitMQ 连接。

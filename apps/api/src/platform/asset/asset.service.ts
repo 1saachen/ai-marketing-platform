@@ -40,6 +40,7 @@ import { normalizeMultipartFileName, safeOriginalFileName } from '../file/file-n
 import type { StoragePort, StorageRange, StoredStream } from '../file/storage.port';
 import { STORAGE_PORT } from '../file/storage.port';
 import { ProjectService } from '../project/project.service';
+import { isAvatarRenderArchive } from '../workflow/fission-avatar-delivery';
 import { AssetRepository } from './asset.repository';
 
 export type UploadedAssetFile = {
@@ -626,6 +627,11 @@ export class AssetService {
         : await this.versionRecord(projectId, assetId, version);
     if (!record) throw assetNotFound();
     if (!record.hasFile) throw assetNotFound();
+    if (
+      isAvatarRenderArchive(record) &&
+      !(await this.repository.canReadAvatarRenderArchive(record))
+    )
+      throw assetNotFound();
     const mimeType = recordMimeType(record);
     const previewKind = previewKindForMimeType(mimeType);
     const supportsRange = previewKind === 'AUDIO' || previewKind === 'VIDEO';
@@ -829,6 +835,7 @@ export class AssetService {
     const source = await this.repository.find(input.sourceProjectId, input.sourceAssetId);
     if (!source)
       throw new ApiHttpException('来源资产不存在', HttpStatus.NOT_FOUND, 'SOURCE_ASSET_NOT_FOUND');
+    if (isAvatarRenderArchive(source)) throw validationError('数字人口播成片仅可在其原项目中使用');
     const sourceVersion = input.sourceVersion ?? source.currentVersion;
     const version = await this.repository.findVersion(
       input.sourceProjectId,
@@ -884,6 +891,7 @@ export class AssetService {
     const source = await this.repository.find(target.sourceProjectId, target.sourceAssetId);
     if (!source)
       throw new ApiHttpException('来源资产不存在', HttpStatus.NOT_FOUND, 'SOURCE_ASSET_NOT_FOUND');
+    if (isAvatarRenderArchive(source)) throw validationError('数字人口播成片仅可在其原项目中使用');
     const updated = await this.repository.upgradeSnapshot(projectId, assetId, source);
     if (!updated) throw assetNotFound();
     return this.present(updated);

@@ -45,6 +45,10 @@ describe('validateEnvironment', () => {
   });
   it('supports explicit local replacement opt-in and independent model configuration', () => {
     expect(validateEnvironment(validEnvironment).FISSION_LOCAL_REPLACE_ENABLED).toBe(false);
+    expect(validateEnvironment(validEnvironment).FISSION_AVATAR_ENABLED).toBe(false);
+    expect(validateEnvironment(validEnvironment).FISSION_AVATAR_SYNC_ENABLED).toBe(false);
+    expect(validateEnvironment(validEnvironment).FISSION_AVATAR_RENDER_ENABLED).toBe(false);
+    expect(validateEnvironment(validEnvironment).FISSION_AVATAR_CONTINUITY_ENABLED).toBe(false);
     expect(
       validateEnvironment({
         ...validEnvironment,

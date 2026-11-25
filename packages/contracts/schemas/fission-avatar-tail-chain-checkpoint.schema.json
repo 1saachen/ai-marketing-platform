@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-tail-chain-checkpoint.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "TTS_STARTED"
+        }
+      },
+      "required": ["kind"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "PLAN_READY"
+        },
+        "plan": {
+          "type": "object",
+          "properties": {
+            "masterSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "sourceSamples": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2160000
+            },
+            "segments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "sourceStartSample": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2159999
+                  },
+                  "sourceEndSample": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2160000
+                  },
+                  "leadingSilenceSamples": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23999
+                  },
+                  "durationSeconds": {
+                    "type": "integer",
+                    "minimum": 4,
+                    "maximum": 15
+                  }
+                },
+                "required": [
+                  "sourceStartSample",
+                  "sourceEndSample",
+                  "leadingSilenceSamples",
+                  "durationSeconds"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 5,
+              "maxItems": 12
+            }
+          },
+          "required": ["masterSha256", "sourceSamples", "segments"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["kind", "plan"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "PICTURE_STARTED"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        }
+      },
+      "required": ["kind", "ordinal"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "PICTURE_ACCEPTED"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "providerTaskId": {
+          "type": "string",
+          "pattern": "^cgt-[A-Za-z0-9_-]{1,120}$"
+        }
+      },
+      "required": ["kind", "ordinal", "providerTaskId"],
+      "additionalProperties": false
+    }
+  ]
+}

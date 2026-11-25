@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-sync-checkpoint.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["TTS_SUBMIT", "LIP_SYNC_SUBMIT"]
+        }
+      },
+      "required": ["kind"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "LIP_SYNC_ACCEPTED"
+        },
+        "providerTaskId": {
+          "type": "string",
+          "pattern": "^amk-tool-lip-sync-[A-Za-z0-9_-]{1,120}$"
+        }
+      },
+      "required": ["kind", "providerTaskId"],
+      "additionalProperties": false
+    }
+  ]
+}

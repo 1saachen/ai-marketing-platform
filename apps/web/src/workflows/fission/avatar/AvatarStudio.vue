@@ -24,6 +24,8 @@ import {
 import AvatarDialog from './AvatarDialog.vue';
 import AvatarSubtitleSettings from './AvatarSubtitleSettings.vue';
 import AvatarTimeline from './AvatarTimeline.vue';
+import AvatarStudioLayout from './AvatarStudioLayout.vue';
+import AvatarToolTabs from './AvatarToolTabs.vue';
 import {
   avatars,
   voices,
@@ -55,7 +57,6 @@ const state = ref(
   restoreDemo(localStorage.getItem(storageKey(props.projectId)), props.projectId) ??
     createDemo(props.projectId),
 );
-const root = ref<HTMLElement>();
 const query = ref('');
 const page = ref(1);
 const busy = ref('');
@@ -143,13 +144,6 @@ const summary = computed(() =>
             ? '数字人口播视频已生成'
             : '等待生成数字人口播视频',
 );
-const tools: { key: Tool; name: string; icon: typeof UserRound }[] = [
-  { key: 'avatar', name: '数字人', icon: UserRound },
-  { key: 'voice', name: '音色', icon: AudioLines },
-  { key: 'background', name: '背景', icon: ImageIcon },
-  { key: 'copy', name: '文案', icon: FileText },
-  { key: 'subtitle', name: '字幕', icon: Captions },
-];
 const assetNames = computed(() => [
   '口播文案',
   '数字人版本引用',
@@ -621,8 +615,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="root" class="fas-studio" aria-label="数字人口播自由配置工作台" @keydown="keyboard">
-    <header class="fas-topbar">
+  <AvatarStudioLayout :busy="!!busy" @keydown="keyboard">
+    <template #header>
       <div class="fas-brand">
         <span>AI</span>
         <div>
@@ -643,533 +637,518 @@ onBeforeUnmount(() => {
           busy ? `${progress}%` : generated ? '重新生成视频' : '生成数字人口播视频'
         }}
       </button>
-    </header>
-    <section class="fas-workspace" :inert="!!busy">
-      <aside class="fas-left-panel">
-        <nav class="fas-tool-tabs" aria-label="数字人口播配置">
-          <button
-            v-for="tool in tools"
-            :key="tool.key"
-            :class="{
-              active: state.tool === tool.key,
-              locked: tool.key === 'subtitle' && !generated,
-            }"
-            :disabled="!!busy || (tool.key === 'subtitle' && !generated)"
-            @click="choose(tool.key)"
-          >
-            <component :is="tool.icon" :size="16" /><span>{{ tool.name }}</span
-            ><i v-if="tool.key === 'subtitle' && !generated">生成后</i>
-          </button>
-        </nav>
-        <div class="fas-resource-panel">
-          <template v-if="state.tool === 'avatar'"
-            ><div class="fas-panel-head">
-              <div>
-                <b>全局数字人资产库</b><small>{{ matches.length }} 个可用 · 支持跨项目复用</small>
-              </div>
-            </div>
-            <label class="fas-search"
-              ><Search :size="14" /><input
-                v-model="query"
-                aria-label="搜索数字人"
-                placeholder="按名称搜索数字人"
-                :disabled="!!busy"
-            /></label>
-            <div class="fas-avatar-list">
-              <button
-                v-for="a in pagedAvatars"
-                :key="a.id"
-                class="fas-avatar-item"
-                :class="{ selected: state.avatarId === a.id }"
-                :disabled="!!busy"
-                @click="
-                  state.avatarId = a.id;
-                  selection = [];
-                "
-              >
-                <span class="fas-avatar-face"
-                  ><img v-if="a.previewUrl" :src="a.previewUrl" :alt="a.name" /><component
-                    :is="icon(a)"
-                    v-else
-                    :size="22" /></span
-                ><span
-                  ><b>{{ a.name }}</b
-                  ><small>{{ a.tags.join(' · ') }}</small
-                  ><em>{{ a.previewUrl ? '本地导入' : '共享资产' }} · {{ a.version }}</em></span
-                ><i><Check v-if="state.avatarId === a.id" :size="12" /></i>
-              </button>
-            </div>
-            <div v-if="!matches.length" class="fas-empty">
-              没有匹配的数字人资产，请调整检索词或上传参考图。
-            </div>
-            <div class="fas-pager">
-              <button aria-label="上一页" :disabled="page <= 1" @click="page--">
-                <ChevronLeft :size="14" /></button
-              ><span>{{ page }} / {{ totalPages }}</span
-              ><button aria-label="下一页" :disabled="page >= totalPages" @click="page++">
-                <ChevronRight :size="14" />
-              </button>
-            </div>
-            <button class="fas-wide-import" :disabled="!!busy" @click="modal = 'avatar'">
-              <Upload :size="14" />上传真人参考图生成数字人
-            </button></template
-          >
-          <template v-else-if="state.tool === 'voice'"
-            ><div class="fas-panel-head">
-              <div><b>音色素材</b><small>选择音色后在右侧调整语速和语调</small></div>
-            </div>
-            <div class="fas-choice-list">
-              <button
-                v-for="v in voiceList"
-                :key="v.id"
-                :class="{ selected: state.voiceId === v.id }"
-                :disabled="!!busy"
-                @click="state.voiceId = v.id"
-              >
-                <i><component :is="icon(v)" :size="16" /></i
-                ><span
-                  ><b>{{ v.name }}</b
-                  ><small>{{ v.meta }}</small></span
-                ><em><Check v-if="state.voiceId === v.id" :size="14" /></em>
-              </button>
-            </div>
-            <label class="fas-wide-import"
-              ><input
-                type="file"
-                accept="audio/*"
-                :disabled="!!busy"
-                @change="importFile($event, 'voice')"
-              /><Upload :size="14" />人工导入音色 / 口播音频</label
-            ></template
-          >
-          <template v-else-if="state.tool === 'background'"
-            ><div class="fas-panel-head">
-              <div><b>背景素材</b><small>图片 / 视频均可作为合成背景</small></div>
-            </div>
-            <div class="fas-background-grid">
-              <button
-                v-for="scene in sceneList"
-                :key="scene.id"
-                :class="{ selected: state.backgroundId === scene.id }"
-                :disabled="!!busy"
-                @click="state.backgroundId = scene.id"
-              >
-                <i
-                  :class="`tone-${scene.tone}`"
-                  :style="
-                    scene.previewUrl && scene.mediaType !== 'video'
-                      ? { backgroundImage: `url(${scene.previewUrl})`, backgroundSize: 'cover' }
-                      : {}
-                  "
-                /><b>{{ scene.name }}</b
-                ><small
-                  >{{ scene.mediaType === 'video' ? '视频' : '图片' }} · {{ scene.meta }}</small
-                >
-              </button>
-            </div>
-            <label class="fas-wide-import"
-              ><input
-                type="file"
-                accept="image/*,video/*"
-                :disabled="!!busy"
-                @change="importFile($event, 'background')"
-              /><Upload :size="14" />人工导入背景图片 / 视频</label
-            ></template
-          >
-          <template v-else-if="state.tool === 'copy'"
-            ><div class="fas-panel-head">
-              <div>
-                <b>口播文案</b
-                ><small>{{ state.copy.length }} 字 · 预计 {{ estimateDuration(state) }} 秒</small>
-              </div>
-            </div>
-            <textarea
-              v-model="state.copy"
-              class="fas-copy-editor"
-              aria-label="口播文案"
-              placeholder="请输入数字人口播文案…"
-              :disabled="!!busy"
-            />
-            <div class="fas-copy-note">
-              文案用于生成口播音频；同步字幕需在视频生成完成后单独生成。
-            </div></template
-          >
-          <template v-else
-            ><div class="fas-panel-head">
-              <div><b>同步字幕</b><small>先识别口播，再统一配置字幕样式</small></div>
-            </div>
-            <div v-if="!state.tracks.subtitle.length" class="fas-subtitle-empty">
-              <span><Captions :size="24" /></span
-              ><b>{{ busy ? '正在识别口播并匹配时间码' : '视频已生成，尚未生成字幕' }}</b>
-              <p>系统将根据口播停顿拆分字幕，并自动对齐视频时间轴。</p>
-              <div class="fas-mini-progress"><i :style="{ width: `${progress}%` }" /></div>
-              <button :disabled="!!busy || stale" @click="generateSubtitles">
-                {{ busy ? '生成中…' : '生成同步字幕' }}
-              </button>
-            </div>
-            <template v-else
-              ><div class="fas-subtitle-toolbar">
-                <span>{{ state.tracks.subtitle.length }} 条字幕</span
-                ><button :disabled="!!busy" @click="generateSubtitles">重新生成</button>
-              </div>
-              <button v-if="preset" class="fas-btn" @click="patchStyle(preset)">
-                应用已保存样式预设
-              </button>
-              <div class="fas-subtitle-list">
-                <button
-                  v-for="(clip, i) in state.tracks.subtitle"
-                  :key="clip.id"
-                  :class="{ selected: selection.includes(clip.id) }"
-                  @click="
-                    select(
-                      'subtitle',
-                      clip.id,
-                      $event.ctrlKey || $event.metaKey || $event.shiftKey,
-                    );
-                    playhead = clip.start;
-                  "
-                >
-                  <i>{{ i + 1 }}</i
-                  ><span
-                    ><b>{{ clip.text }}</b
-                    ><small
-                      >{{ timeLabel(clip.start) }} -
-                      {{ timeLabel(clip.start + clip.duration) }}</small
-                    ></span
-                  >
-                </button>
-              </div></template
-            ><label class="fas-wide-import"
-              ><input
-                type="file"
-                accept=".srt,.ass,.vtt"
-                :disabled="!!busy"
-                @change="importFile($event, 'subtitle')"
-              /><Upload :size="14" />人工导入 SRT / ASS / VTT</label
-            ></template
-          >
+    </template>
+    <template #tools>
+      <AvatarToolTabs
+        :active="state.tool"
+        :busy="!!busy"
+        :unavailable="generated ? {} : { subtitle: '生成后' }"
+        @choose="choose"
+      />
+    </template>
+    <template #resources>
+      <template v-if="state.tool === 'avatar'"
+        ><div class="fas-panel-head">
+          <div>
+            <b>全局数字人资产库</b><small>{{ matches.length }} 个可用 · 支持跨项目复用</small>
+          </div>
         </div>
-      </aside>
-      <section class="fas-player-panel">
-        <header>
-          <b>播放器（画面预览区）</b
-          ><span>9:16 竖屏 · 1080P · {{ generated ? '已生成' : '配置预览' }}</span>
-        </header>
-        <div class="fas-preview-stage">
-          <div class="fas-video-frame" :class="`tone-${selectedScene.tone}`">
-            <video
-              v-if="selectedScene.previewUrl && selectedScene.mediaType === 'video'"
-              :src="selectedScene.previewUrl"
-              muted
-              autoplay
-              loop
-            /><img
-              v-else-if="selectedScene.previewUrl"
-              class="fas-background-media"
-              :src="selectedScene.previewUrl"
-              alt="导入的背景"
-            />
-            <div class="fas-frame-shade" />
-            <span class="fas-frame-badge">{{ state.outputId || '组合预览' }}</span>
-            <div
-              class="fas-person"
-              :style="{
-                opacity: state.opacity / 100,
-                transform: `translateX(-50%) scale(${state.scale / 100})`,
-                left: state.position === '左侧' ? '35%' : state.position === '右侧' ? '65%' : '50%',
-              }"
+        <label class="fas-search"
+          ><Search :size="14" /><input
+            v-model="query"
+            aria-label="搜索数字人"
+            placeholder="按名称搜索数字人"
+            :disabled="!!busy"
+        /></label>
+        <div class="fas-avatar-list">
+          <button
+            v-for="a in pagedAvatars"
+            :key="a.id"
+            class="fas-avatar-item"
+            :class="{ selected: state.avatarId === a.id }"
+            :disabled="!!busy"
+            @click="
+              state.avatarId = a.id;
+              selection = [];
+            "
+          >
+            <span class="fas-avatar-face"
+              ><img v-if="a.previewUrl" :src="a.previewUrl" :alt="a.name" /><component
+                :is="icon(a)"
+                v-else
+                :size="22" /></span
+            ><span
+              ><b>{{ a.name }}</b
+              ><small>{{ a.tags.join(' · ') }}</small
+              ><em>{{ a.previewUrl ? '本地导入' : '共享资产' }} · {{ a.version }}</em></span
+            ><i><Check v-if="state.avatarId === a.id" :size="12" /></i>
+          </button>
+        </div>
+        <div v-if="!matches.length" class="fas-empty">
+          没有匹配的数字人资产，请调整检索词或上传参考图。
+        </div>
+        <div class="fas-pager">
+          <button aria-label="上一页" :disabled="page <= 1" @click="page--">
+            <ChevronLeft :size="14" /></button
+          ><span>{{ page }} / {{ totalPages }}</span
+          ><button aria-label="下一页" :disabled="page >= totalPages" @click="page++">
+            <ChevronRight :size="14" />
+          </button>
+        </div>
+        <button class="fas-wide-import" :disabled="!!busy" @click="modal = 'avatar'">
+          <Upload :size="14" />上传真人参考图生成数字人
+        </button></template
+      >
+      <template v-else-if="state.tool === 'voice'"
+        ><div class="fas-panel-head">
+          <div><b>音色素材</b><small>选择音色后在右侧调整语速和语调</small></div>
+        </div>
+        <div class="fas-choice-list">
+          <button
+            v-for="v in voiceList"
+            :key="v.id"
+            :class="{ selected: state.voiceId === v.id }"
+            :disabled="!!busy"
+            @click="state.voiceId = v.id"
+          >
+            <i><component :is="icon(v)" :size="16" /></i
+            ><span
+              ><b>{{ v.name }}</b
+              ><small>{{ v.meta }}</small></span
+            ><em><Check v-if="state.voiceId === v.id" :size="14" /></em>
+          </button>
+        </div>
+        <label class="fas-wide-import"
+          ><input
+            type="file"
+            accept="audio/*"
+            :disabled="!!busy"
+            @change="importFile($event, 'voice')"
+          /><Upload :size="14" />人工导入音色 / 口播音频</label
+        ></template
+      >
+      <template v-else-if="state.tool === 'background'"
+        ><div class="fas-panel-head">
+          <div><b>背景素材</b><small>图片 / 视频均可作为合成背景</small></div>
+        </div>
+        <div class="fas-background-grid">
+          <button
+            v-for="scene in sceneList"
+            :key="scene.id"
+            :class="{ selected: state.backgroundId === scene.id }"
+            :disabled="!!busy"
+            @click="state.backgroundId = scene.id"
+          >
+            <i
+              :class="`tone-${scene.tone}`"
+              :style="
+                scene.previewUrl && scene.mediaType !== 'video'
+                  ? { backgroundImage: `url(${scene.previewUrl})`, backgroundSize: 'cover' }
+                  : {}
+              "
+            /><b>{{ scene.name }}</b
+            ><small>{{ scene.mediaType === 'video' ? '视频' : '图片' }} · {{ scene.meta }}</small>
+          </button>
+        </div>
+        <label class="fas-wide-import"
+          ><input
+            type="file"
+            accept="image/*,video/*"
+            :disabled="!!busy"
+            @change="importFile($event, 'background')"
+          /><Upload :size="14" />人工导入背景图片 / 视频</label
+        ></template
+      >
+      <template v-else-if="state.tool === 'copy'"
+        ><div class="fas-panel-head">
+          <div>
+            <b>口播文案</b
+            ><small>{{ state.copy.length }} 字 · 预计 {{ estimateDuration(state) }} 秒</small>
+          </div>
+        </div>
+        <textarea
+          v-model="state.copy"
+          class="fas-copy-editor"
+          aria-label="口播文案"
+          placeholder="请输入数字人口播文案…"
+          :disabled="!!busy"
+        />
+        <div class="fas-copy-note">
+          文案用于生成口播音频；同步字幕需在视频生成完成后单独生成。
+        </div></template
+      >
+      <template v-else
+        ><div class="fas-panel-head">
+          <div><b>同步字幕</b><small>先识别口播，再统一配置字幕样式</small></div>
+        </div>
+        <div v-if="!state.tracks.subtitle.length" class="fas-subtitle-empty">
+          <span><Captions :size="24" /></span
+          ><b>{{ busy ? '正在识别口播并匹配时间码' : '视频已生成，尚未生成字幕' }}</b>
+          <p>系统将根据口播停顿拆分字幕，并自动对齐视频时间轴。</p>
+          <div class="fas-mini-progress"><i :style="{ width: `${progress}%` }" /></div>
+          <button :disabled="!!busy || stale" @click="generateSubtitles">
+            {{ busy ? '生成中…' : '生成同步字幕' }}
+          </button>
+        </div>
+        <template v-else
+          ><div class="fas-subtitle-toolbar">
+            <span>{{ state.tracks.subtitle.length }} 条字幕</span
+            ><button :disabled="!!busy" @click="generateSubtitles">重新生成</button>
+          </div>
+          <button v-if="preset" class="fas-btn" @click="patchStyle(preset)">
+            应用已保存样式预设
+          </button>
+          <div class="fas-subtitle-list">
+            <button
+              v-for="(clip, i) in state.tracks.subtitle"
+              :key="clip.id"
+              :class="{ selected: selection.includes(clip.id) }"
+              @click="
+                select('subtitle', clip.id, $event.ctrlKey || $event.metaKey || $event.shiftKey);
+                playhead = clip.start;
+              "
             >
-              <img
+              <i>{{ i + 1 }}</i
+              ><span
+                ><b>{{ clip.text }}</b
+                ><small
+                  >{{ timeLabel(clip.start) }} - {{ timeLabel(clip.start + clip.duration) }}</small
+                ></span
+              >
+            </button>
+          </div></template
+        ><label class="fas-wide-import"
+          ><input
+            type="file"
+            accept=".srt,.ass,.vtt"
+            :disabled="!!busy"
+            @change="importFile($event, 'subtitle')"
+          /><Upload :size="14" />人工导入 SRT / ASS / VTT</label
+        ></template
+      >
+    </template>
+    <template #player>
+      <header>
+        <b>播放器（画面预览区）</b
+        ><span>9:16 竖屏 · 1080P · {{ generated ? '已生成' : '配置预览' }}</span>
+      </header>
+      <div class="fas-preview-stage">
+        <div class="fas-video-frame" :class="`tone-${selectedScene.tone}`">
+          <video
+            v-if="selectedScene.previewUrl && selectedScene.mediaType === 'video'"
+            :src="selectedScene.previewUrl"
+            muted
+            autoplay
+            loop
+          /><img
+            v-else-if="selectedScene.previewUrl"
+            class="fas-background-media"
+            :src="selectedScene.previewUrl"
+            alt="导入的背景"
+          />
+          <div class="fas-frame-shade" />
+          <span class="fas-frame-badge">{{ state.outputId || '组合预览' }}</span>
+          <div
+            class="fas-person"
+            :style="{
+              opacity: state.opacity / 100,
+              transform: `translateX(-50%) scale(${state.scale / 100})`,
+              left: state.position === '左侧' ? '35%' : state.position === '右侧' ? '65%' : '50%',
+            }"
+          >
+            <img
+              v-if="selectedAvatar.previewUrl"
+              :src="selectedAvatar.previewUrl"
+              :alt="selectedAvatar.name"
+            /><strong v-else><component :is="icon(selectedAvatar)" :size="34" /></strong><i />
+          </div>
+          <div
+            v-if="subtitle"
+            class="fas-preview-subtitle"
+            :class="{ selected: selection.includes(subtitle.id) }"
+            :style="previewStyle"
+            title="拖动调整字幕位置"
+            @pointerdown="startSubtitleDrag"
+            @pointermove="moveSubtitle"
+            @pointerup="subtitleDrag = null"
+            @pointercancel="subtitleDrag = null"
+          >
+            <template v-for="(part, i) in highlighted" :key="i"
+              ><mark v-if="part.highlight" :style="{ color: subtitle.style?.highlightColor }">{{
+                part.text
+              }}</mark
+              ><span v-else>{{ part.text }}</span></template
+            >
+          </div>
+          <div v-if="busy" class="fas-render-mask">
+            <strong>{{ progress }}%</strong><span>{{ busy }}</span>
+          </div>
+        </div>
+      </div>
+      <footer class="fas-player-controls">
+        <input
+          v-model.number="playhead"
+          type="range"
+          min="0"
+          :max="duration"
+          step="0.1"
+          class="avatar-seek"
+          aria-label="播放进度"
+        />
+        <div>
+          <span>{{ timeLabel(playhead) }} / {{ timeLabel(duration) }}</span
+          ><button :aria-label="playing ? '暂停' : '播放'" @click="togglePlay">
+            <Pause v-if="playing" :size="16" /><Play v-else :size="16" /></button
+          ><button
+            aria-label="返回开头"
+            @click="
+              stopPlayback();
+              playhead = 0;
+            "
+          >
+            <RotateCcw :size="15" /></button
+          ><em>1x · 精剪 · 9:16</em>
+        </div>
+      </footer>
+    </template>
+    <template #inspector>
+      <header>
+        <b>{{
+          selectedTrack === 'subtitle' && selection.length
+            ? '字幕设置'
+            : activeClip
+              ? '片段属性'
+              : '参数配置'
+        }}</b
+        ><span v-if="selection.length">已选 {{ selection.length }} 条</span>
+      </header>
+      <div class="fas-inspector-body">
+        <template v-if="selection.length && selectedTrack === 'subtitle'"
+          ><div class="fas-selected-summary">
+            <i class="subtitle">T</i>
+            <div>
+              <b>{{
+                selection.length === 1 ? activeClip?.title : `已选择 ${selection.length} 条字幕`
+              }}</b
+              ><small>下方设置将即时覆盖选中字幕</small>
+            </div>
+          </div>
+          <label v-if="activeClip" class="fas-field"
+            >字幕文本<textarea
+              v-model="activeClip.text"
+              rows="3"
+              :disabled="!!busy"
+              @focus="checkpoint"
+            /></label
+          ><AvatarSubtitleSettings
+            :style-value="selectedStyle"
+            :count="selection.length"
+            @patch="patchStyle"
+            @preset="
+              preset = clone(selectedStyle);
+              notify('样式预设已保存到当前演示会话');
+            "
+        /></template>
+        <template v-else-if="activeClip"
+          ><div class="fas-selected-summary">
+            <i :class="selectedTrack"
+              ><Video v-if="selectedTrack === 'video'" :size="18" /><AudioLines v-else :size="18"
+            /></i>
+            <div>
+              <b>{{ activeClip.title }}</b
+              ><small
+                >{{ timeLabel(activeClip.start) }} · {{ activeClip.duration.toFixed(2) }} 秒</small
+              >
+            </div>
+          </div>
+          <label class="fas-field"
+            >片段名称<input v-model="activeClip.title" @focus="checkpoint" /></label
+          ><label v-if="activeClip.text" class="fas-field"
+            >口播内容<textarea v-model="activeClip.text" rows="4" @focus="checkpoint" />
+          </label>
+          <div class="fas-two-fields">
+            <label class="fas-field"
+              >开始时间<input
+                v-model.number="activeClip.start"
+                type="number"
+                min="0"
+                :max="duration - activeClip.duration"
+                step="0.25"
+                @focus="checkpoint" /></label
+            ><label class="fas-field"
+              >时长（秒）<input
+                v-model.number="activeClip.duration"
+                type="number"
+                min="0.25"
+                :max="duration - activeClip.start"
+                step="0.25"
+                @focus="checkpoint"
+            /></label>
+          </div>
+          <div class="fas-inline-actions">
+            <button class="danger" @click="remove">删除片段</button>
+          </div></template
+        >
+        <template v-else-if="state.tool === 'avatar'"
+          ><div class="fas-selected-summary">
+            <span class="fas-avatar-face"
+              ><img
                 v-if="selectedAvatar.previewUrl"
                 :src="selectedAvatar.previewUrl"
-                :alt="selectedAvatar.name"
-              /><strong v-else><component :is="icon(selectedAvatar)" :size="34" /></strong><i />
-            </div>
-            <div
-              v-if="subtitle"
-              class="fas-preview-subtitle"
-              :class="{ selected: selection.includes(subtitle.id) }"
-              :style="previewStyle"
-              title="拖动调整字幕位置"
-              @pointerdown="startSubtitleDrag"
-              @pointermove="moveSubtitle"
-              @pointerup="subtitleDrag = null"
-              @pointercancel="subtitleDrag = null"
-            >
-              <template v-for="(part, i) in highlighted" :key="i"
-                ><mark v-if="part.highlight" :style="{ color: subtitle.style?.highlightColor }">{{
-                  part.text
-                }}</mark
-                ><span v-else>{{ part.text }}</span></template
-              >
-            </div>
-            <div v-if="busy" class="fas-render-mask">
-              <strong>{{ progress }}%</strong><span>{{ busy }}</span>
+                :alt="selectedAvatar.name" /><UserRound v-else :size="22"
+            /></span>
+            <div>
+              <b>{{ selectedAvatar.name }}</b
+              ><small>共享资产 · {{ selectedAvatar.version }}</small>
             </div>
           </div>
-        </div>
-        <footer class="fas-player-controls">
-          <input
-            v-model.number="playhead"
-            type="range"
-            min="0"
-            :max="duration"
-            step="0.1"
-            class="avatar-seek"
-            aria-label="播放进度"
-          />
-          <div>
-            <span>{{ timeLabel(playhead) }} / {{ timeLabel(duration) }}</span
-            ><button :aria-label="playing ? '暂停' : '播放'" @click="togglePlay">
-              <Pause v-if="playing" :size="16" /><Play v-else :size="16" /></button
-            ><button
-              aria-label="返回开头"
-              @click="
-                stopPlayback();
-                playhead = 0;
-              "
-            >
-              <RotateCcw :size="15" /></button
-            ><em>1x · 精剪 · 9:16</em>
+          <dl class="fas-meta-list">
+            <div>
+              <dt>资产范围</dt>
+              <dd>全局数字人资产库</dd>
+            </div>
+            <div>
+              <dt>三视图</dt>
+              <dd>{{ selectedAvatar.meta }}</dd>
+            </div>
+            <div>
+              <dt>标签</dt>
+              <dd>{{ selectedAvatar.tags.join(' / ') }}</dd>
+            </div>
+            <div>
+              <dt>授权状态</dt>
+              <dd>Mock 演示授权 · 版本锁定 {{ selectedAvatar.version }}</dd>
+            </div>
+          </dl></template
+        >
+        <template v-else-if="state.tool === 'voice'"
+          ><div class="fas-selected-summary">
+            <i class="audio"><AudioLines :size="18" /></i>
+            <div>
+              <b>{{ selectedVoice.name }}</b
+              ><small>{{ selectedVoice.meta }}</small>
+            </div>
           </div>
-        </footer>
-      </section>
-      <aside class="fas-inspector">
-        <header>
-          <b>{{
-            selectedTrack === 'subtitle' && selection.length
-              ? '字幕设置'
-              : activeClip
-                ? '片段属性'
-                : '参数配置'
-          }}</b
-          ><span v-if="selection.length">已选 {{ selection.length }} 条</span>
-        </header>
-        <div class="fas-inspector-body">
-          <template v-if="selection.length && selectedTrack === 'subtitle'"
-            ><div class="fas-selected-summary">
-              <i class="subtitle">T</i>
-              <div>
-                <b>{{
-                  selection.length === 1 ? activeClip?.title : `已选择 ${selection.length} 条字幕`
-                }}</b
-                ><small>下方设置将即时覆盖选中字幕</small>
-              </div>
+          <label class="fas-field fas-range"
+            >语速<output>{{ state.speed.toFixed(2) }}x</output
+            ><input
+              v-model.number="state.speed"
+              type="range"
+              min="0.7"
+              max="1.5"
+              step="0.05"
+              :disabled="!!busy" /></label
+          ><label class="fas-field fas-range"
+            >语调<output>{{ state.pitch === 0 ? '自然' : state.pitch }}</output
+            ><input
+              v-model.number="state.pitch"
+              type="range"
+              min="-5"
+              max="5"
+              :disabled="!!busy" /></label
+          ><button class="avatar-audition" @click="auditionVoice">
+            <Pause v-if="audition" :size="20" /><Play v-else :size="20" /><span
+              ><b>{{ audition ? '正在试听…' : '试听当前音色' }}</b
+              ><small>本地 Mock · 动效示例</small></span
+            >
+          </button></template
+        >
+        <template v-else-if="state.tool === 'background'"
+          ><div class="fas-selected-summary">
+            <i><ImageIcon :size="18" /></i>
+            <div>
+              <b>{{ selectedScene.name }}</b
+              ><small>{{ selectedScene.meta }}</small>
             </div>
-            <label v-if="activeClip" class="fas-field"
-              >字幕文本<textarea
-                v-model="activeClip.text"
-                rows="3"
-                :disabled="!!busy"
-                @focus="checkpoint"
-              /></label
-            ><AvatarSubtitleSettings
-              :style-value="selectedStyle"
-              :count="selection.length"
-              @patch="patchStyle"
-              @preset="
-                preset = clone(selectedStyle);
-                notify('样式预设已保存到当前演示会话');
-              "
-          /></template>
-          <template v-else-if="activeClip"
-            ><div class="fas-selected-summary">
-              <i :class="selectedTrack"
-                ><Video v-if="selectedTrack === 'video'" :size="18" /><AudioLines v-else :size="18"
-              /></i>
-              <div>
-                <b>{{ activeClip.title }}</b
-                ><small
-                  >{{ timeLabel(activeClip.start) }} ·
-                  {{ activeClip.duration.toFixed(2) }} 秒</small
-                >
-              </div>
-            </div>
-            <label class="fas-field"
-              >片段名称<input v-model="activeClip.title" @focus="checkpoint" /></label
-            ><label v-if="activeClip.text" class="fas-field"
-              >口播内容<textarea v-model="activeClip.text" rows="4" @focus="checkpoint" />
-            </label>
-            <div class="fas-two-fields">
-              <label class="fas-field"
-                >开始时间<input
-                  v-model.number="activeClip.start"
-                  type="number"
-                  min="0"
-                  :max="duration - activeClip.duration"
-                  step="0.25"
-                  @focus="checkpoint" /></label
-              ><label class="fas-field"
-                >时长（秒）<input
-                  v-model.number="activeClip.duration"
-                  type="number"
-                  min="0.25"
-                  :max="duration - activeClip.start"
-                  step="0.25"
-                  @focus="checkpoint"
-              /></label>
-            </div>
-            <div class="fas-inline-actions">
-              <button class="danger" @click="remove">删除片段</button>
-            </div></template
-          >
-          <template v-else-if="state.tool === 'avatar'"
-            ><div class="fas-selected-summary">
-              <span class="fas-avatar-face"
-                ><img
-                  v-if="selectedAvatar.previewUrl"
-                  :src="selectedAvatar.previewUrl"
-                  :alt="selectedAvatar.name" /><UserRound v-else :size="22"
-              /></span>
-              <div>
-                <b>{{ selectedAvatar.name }}</b
-                ><small>共享资产 · {{ selectedAvatar.version }}</small>
-              </div>
-            </div>
-            <dl class="fas-meta-list">
-              <div>
-                <dt>资产范围</dt>
-                <dd>全局数字人资产库</dd>
-              </div>
-              <div>
-                <dt>三视图</dt>
-                <dd>{{ selectedAvatar.meta }}</dd>
-              </div>
-              <div>
-                <dt>标签</dt>
-                <dd>{{ selectedAvatar.tags.join(' / ') }}</dd>
-              </div>
-              <div>
-                <dt>授权状态</dt>
-                <dd>Mock 演示授权 · 版本锁定 {{ selectedAvatar.version }}</dd>
-              </div>
-            </dl></template
-          >
-          <template v-else-if="state.tool === 'voice'"
-            ><div class="fas-selected-summary">
-              <i class="audio"><AudioLines :size="18" /></i>
-              <div>
-                <b>{{ selectedVoice.name }}</b
-                ><small>{{ selectedVoice.meta }}</small>
-              </div>
-            </div>
-            <label class="fas-field fas-range"
-              >语速<output>{{ state.speed.toFixed(2) }}x</output
-              ><input
-                v-model.number="state.speed"
-                type="range"
-                min="0.7"
-                max="1.5"
-                step="0.05"
-                :disabled="!!busy" /></label
-            ><label class="fas-field fas-range"
-              >语调<output>{{ state.pitch === 0 ? '自然' : state.pitch }}</output
-              ><input
-                v-model.number="state.pitch"
-                type="range"
-                min="-5"
-                max="5"
-                :disabled="!!busy" /></label
-            ><button class="avatar-audition" @click="auditionVoice">
-              <Pause v-if="audition" :size="20" /><Play v-else :size="20" /><span
-                ><b>{{ audition ? '正在试听…' : '试听当前音色' }}</b
-                ><small>本地 Mock · 动效示例</small></span
-              >
-            </button></template
-          >
-          <template v-else-if="state.tool === 'background'"
-            ><div class="fas-selected-summary">
-              <i><ImageIcon :size="18" /></i>
-              <div>
-                <b>{{ selectedScene.name }}</b
-                ><small>{{ selectedScene.meta }}</small>
-              </div>
-            </div>
-            <label class="fas-field"
-              >数字人位置<select v-model="state.position" :disabled="!!busy">
-                <option>居中</option>
-                <option>左侧</option>
-                <option>右侧</option>
-              </select></label
-            ><label class="fas-field fas-range"
-              >人物缩放<output>{{ state.scale }}%</output
-              ><input
-                v-model.number="state.scale"
-                type="range"
-                min="60"
-                max="140"
-                :disabled="!!busy" /></label
-            ><label class="fas-field fas-range"
-              >背景融合<output>{{ state.opacity }}%</output
-              ><input
-                v-model.number="state.opacity"
-                type="range"
-                min="20"
-                max="100"
-                :disabled="!!busy"
-            /></label>
-            <div class="fas-copy-note">仅修改背景与构图，口播文案和音轨保留。</div></template
-          >
-          <template v-else-if="state.tool === 'copy'"
-            ><h4>口播文案配置</h4>
-            <div class="fas-copy-note">
-              {{ state.copy.length }} 字 · 预计
-              {{ estimateDuration(state) }} 秒<br />确认文案后点击上方“生成数字人口播视频”。
-            </div>
-            <label class="fas-field"
-              >音色<select v-model="state.voiceId" :disabled="!!busy">
-                <option v-for="voice in voiceList" :key="voice.id" :value="voice.id">
-                  {{ voice.name }}
-                </option>
-              </select></label
-            ></template
-          >
-          <template v-else
-            ><div class="fas-copy-note">
-              选择左侧字幕或时间轴片段，调整文字、样式与位置。按 Ctrl/⌘ 可多选。
-            </div></template
-          >
-        </div>
-      </aside>
-    </section>
-    <AvatarTimeline
-      :tracks="state.tracks"
-      :duration="duration"
-      :playhead="playhead"
-      :selection="selection"
-      :can-undo="!!undo.length"
-      :can-redo="!!redo.length"
-      :generated="generated"
-      :busy="!!busy"
-      @select="select"
-      @select-many="
-        selectedTrack = 'subtitle';
-        selection = $event;
-      "
-      @seek="playhead = $event"
-      @checkpoint="checkpoint"
-      @undo="history(true)"
-      @redo="history(false)"
-      @remove="remove"
-      @split="split"
-      @subtitles="generateSubtitles"
-    />
-    <section class="fas-artifact-entry-bar">
-      <span class="fas-artifact-entry-icon"><Archive :size="23" /></span>
-      <div>
-        <b>数字人口播项目产物</b
-        ><small>{{ projectName }} · {{ projectId }} · 裂变类 · 数字人口播存储区</small>
+          </div>
+          <label class="fas-field"
+            >数字人位置<select v-model="state.position" :disabled="!!busy">
+              <option>居中</option>
+              <option>左侧</option>
+              <option>右侧</option>
+            </select></label
+          ><label class="fas-field fas-range"
+            >人物缩放<output>{{ state.scale }}%</output
+            ><input
+              v-model.number="state.scale"
+              type="range"
+              min="60"
+              max="140"
+              :disabled="!!busy" /></label
+          ><label class="fas-field fas-range"
+            >背景融合<output>{{ state.opacity }}%</output
+            ><input
+              v-model.number="state.opacity"
+              type="range"
+              min="20"
+              max="100"
+              :disabled="!!busy"
+          /></label>
+          <div class="fas-copy-note">仅修改背景与构图，口播文案和音轨保留。</div></template
+        >
+        <template v-else-if="state.tool === 'copy'"
+          ><h4>口播文案配置</h4>
+          <div class="fas-copy-note">
+            {{ state.copy.length }} 字 · 预计
+            {{ estimateDuration(state) }} 秒<br />确认文案后点击上方“生成数字人口播视频”。
+          </div>
+          <label class="fas-field"
+            >音色<select v-model="state.voiceId" :disabled="!!busy">
+              <option v-for="voice in voiceList" :key="voice.id" :value="voice.id">
+                {{ voice.name }}
+              </option>
+            </select></label
+          ></template
+        >
+        <template v-else
+          ><div class="fas-copy-note">
+            选择左侧字幕或时间轴片段，调整文字、样式与位置。按 Ctrl/⌘ 可多选。
+          </div></template
+        >
       </div>
-      <em :class="{ stored: state.stored.length === assetNames.length }">{{
-        state.stored.length === assetNames.length
-          ? '已模拟入库'
-          : `待入库 ${assetNames.filter((n) => !state.stored.includes(n)).length} 项`
-      }}</em
-      ><button class="fas-btn primary" :disabled="!!busy" @click="openAssets">
-        保存到项目资产库
-      </button>
-    </section>
-    <footer class="fas-render-dock">
+    </template>
+    <template #timeline>
+      <AvatarTimeline
+        :tracks="state.tracks"
+        :duration="duration"
+        :playhead="playhead"
+        :selection="selection"
+        :can-undo="!!undo.length"
+        :can-redo="!!redo.length"
+        :generated="generated"
+        :busy="!!busy"
+        @select="select"
+        @select-many="
+          selectedTrack = 'subtitle';
+          selection = $event;
+        "
+        @seek="playhead = $event"
+        @checkpoint="checkpoint"
+        @undo="history(true)"
+        @redo="history(false)"
+        @remove="remove"
+        @split="split"
+        @subtitles="generateSubtitles"
+      />
+    </template>
+    <template #artifacts>
+      <section class="fas-artifact-entry-bar">
+        <span class="fas-artifact-entry-icon"><Archive :size="23" /></span>
+        <div>
+          <b>数字人口播项目产物</b
+          ><small>{{ projectName }} · {{ projectId }} · 裂变类 · 数字人口播存储区</small>
+        </div>
+        <em :class="{ stored: state.stored.length === assetNames.length }">{{
+          state.stored.length === assetNames.length
+            ? '已模拟入库'
+            : `待入库 ${assetNames.filter((n) => !state.stored.includes(n)).length} 项`
+        }}</em
+        ><button class="fas-btn primary" :disabled="!!busy" @click="openAssets">
+          保存到项目资产库
+        </button>
+      </section>
+    </template>
+    <template #render>
       <div>
         <i :class="busy ? 'rendering' : state.status" /><span
           ><b>{{ summary }}</b
@@ -1182,8 +1161,8 @@ onBeforeUnmount(() => {
           busy ? `${progress}%` : generated ? '导出视频' : '渲染输出成片'
         }}
       </button>
-    </footer>
-  </div>
+    </template>
+  </AvatarStudioLayout>
   <div v-if="failure || storageError" class="avatar-error" role="alert">
     {{ failure || storageError }}<button v-if="failure" @click="generate">重新尝试</button>
   </div>
@@ -1346,5 +1325,3 @@ onBeforeUnmount(() => {
     </footer></AvatarDialog
   >
 </template>
-<style src="./avatar-studio.css"></style>
-<style src="./avatar-integration.css"></style>

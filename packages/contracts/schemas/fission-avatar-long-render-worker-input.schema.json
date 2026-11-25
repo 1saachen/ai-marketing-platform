@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-long-render-worker-input.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "background": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "SOLID"
+                },
+                "color": {
+                  "type": "string",
+                  "pattern": "^#[0-9a-fA-F]{6}$"
+                }
+              },
+              "required": ["kind", "color"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "IMAGE"
+                },
+                "assetId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2147483647
+                }
+              },
+              "required": ["kind", "assetId", "version"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "insetPercent": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 25
+        },
+        "captionMode": {
+          "type": "string",
+          "enum": ["OFF", "SIDECAR", "BURN", "BOTH"]
+        },
+        "captions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "startMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 89999
+              },
+              "endMs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 90000
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 60,
+                "minLength": 1
+              }
+            },
+            "required": ["startMs", "endMs", "text"],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 120
+        }
+      },
+      "required": ["background", "insetPercent", "captionMode", "captions"],
+      "additionalProperties": false
+    },
+    "videoSizeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 134217728
+    },
+    "audioSizeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16777216
+    },
+    "backgroundSizeBytes": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12582912
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "audioDurationMs": {
+      "type": "integer",
+      "minimum": 60900,
+      "maximum": 90000
+    },
+    "videoDurationMs": {
+      "type": "integer",
+      "minimum": 61000,
+      "maximum": 90000
+    },
+    "seamTimesMs": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 89999
+      },
+      "minItems": 2,
+      "maxItems": 11
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "settings",
+    "videoSizeBytes",
+    "audioSizeBytes",
+    "backgroundSizeBytes",
+    "audioDurationMs",
+    "videoDurationMs",
+    "seamTimesMs"
+  ],
+  "additionalProperties": false
+}

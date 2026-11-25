@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import zlib
-from dataclasses import dataclass
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
+
 import httpx
 
 ProgressCallback = Callable[[int, str | None], Awaitable[None]]
@@ -229,6 +231,25 @@ class SeedanceTransport:
             current_progress = min(88, current_progress + 3)
             await progress(current_progress, provider_task_id)
             await asyncio.sleep(self._poll_delay(provider_task_id))
+
+    async def read_task(self, provider_task_id: str) -> Mapping[str, Any]:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", provider_task_id):
+            raise ProviderError(
+                "SEEDANCE_INVALID_TASK_ID", "Seedance 任务 ID 无效", retryable=False
+            )
+        deadline = asyncio.get_running_loop().time() + self._timeout_seconds
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                result = await self._read_task_with_retry(provider_task_id, deadline)
+        except TimeoutError as error:
+            raise ProviderError(
+                "SEEDANCE_TIMEOUT", "Seedance 查询任务超时", retryable=True
+            ) from error
+        if result.get("id") != provider_task_id:
+            raise ProviderError(
+                "SEEDANCE_INVALID_RESPONSE", "Seedance 回执任务 ID 不一致", retryable=False
+            )
+        return result
 
     async def _read_task_with_retry(
         self, provider_task_id: str, deadline: float

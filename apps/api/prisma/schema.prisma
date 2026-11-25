@@ -311,6 +311,8 @@ enum JobOutboxStatus {
 
 model Project {
   fissionLocalReplaceTasks FissionLocalReplaceTask[]
+  fissionAvatarSyncTasks FissionAvatarSyncTask[]
+  fissionAvatarRenderTasks FissionAvatarRenderTask[]
   fissionCloneTasks FissionCloneTask[]
   fissionCloneUploads FissionCloneUpload[]
   customizedProductionTasks CustomizedProductionTask[]
@@ -411,6 +413,8 @@ model Asset {
 
 model WorkflowRun {
   fissionLocalReplaceTasks FissionLocalReplaceTask[]
+  fissionAvatarSyncTasks FissionAvatarSyncTask[]
+  fissionAvatarRenderTasks FissionAvatarRenderTask[]
   fissionCloneMappingFiles FissionCloneMappingFile[]
   fissionCloneTasks FissionCloneTask[]
   fissionCloneUploads FissionCloneUpload[]
@@ -810,10 +814,118 @@ model AssetVersion {
   createdAt        DateTime    @default(now())
   project          Project     @relation(fields: [projectId], references: [id], onDelete: Restrict)
   asset            Asset       @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  fissionAvatarGrants FissionAvatarAssetGrant[]
 
   @@unique([projectId, assetId, version])
   @@index([projectId, assetId, createdAt])
   @@map("asset_versions")
+}
+
+model FissionAvatarSyncTask {
+  id                  String      @id @default(uuid()) @db.Uuid
+  projectId           String      @db.Uuid
+  workflowRunId       String      @db.Uuid
+  idempotencyKey      String      @db.Uuid
+  draftRevision       Int
+  inputSnapshot       Json
+  executionKind       String      @default("SHORT") @db.VarChar(16)
+  continuityPlan      Json?
+  status              String      @default("QUEUED") @db.VarChar(16)
+  phase               String      @default("QUEUED") @db.VarChar(16)
+  progress            Int         @default(0)
+  attemptCount        Int         @default(0)
+  attemptToken        String?     @db.Uuid
+  leaseExpiresAt      DateTime?
+  ttsOperationId      String      @unique(map: "avatar_sync_tts_operation_key") @db.Uuid
+  ttsStarted          Boolean     @default(false)
+  lipSyncClientToken  String      @unique(map: "avatar_sync_lip_operation_key") @db.Uuid
+  lipSyncStarted      Boolean     @default(false)
+  lipSyncTaskId       String?     @unique(map: "avatar_sync_provider_task_key") @db.VarChar(160)
+  errorCode           String?     @db.VarChar(48)
+  retryable           Boolean     @default(false)
+  resultFingerprint   String?     @db.Char(64)
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+  project             Project     @relation(fields: [projectId], references: [id], onDelete: Cascade, map: "avatar_sync_tasks_project_fkey")
+  workflowRun         WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade, map: "avatar_sync_tasks_run_fkey")
+  segments            FissionAvatarSyncSegment[]
+
+  @@unique([projectId, workflowRunId, idempotencyKey], map: "avatar_sync_tasks_idempotency_key")
+  @@unique([projectId, workflowRunId, id], map: "avatar_sync_tasks_scope_key")
+  @@index([projectId, workflowRunId, createdAt], map: "avatar_sync_tasks_recent_idx")
+  @@index([status, leaseExpiresAt], map: "avatar_sync_tasks_lease_idx")
+  @@map("fission_avatar_sync_tasks")
+}
+
+model FissionAvatarSyncSegment {
+  taskId              String               @db.Uuid
+  projectId           String               @db.Uuid
+  workflowRunId       String               @db.Uuid
+  ordinal             Int
+  scriptText          String               @db.VarChar(240)
+  ttsOperationId      String               @unique(map: "avatar_sync_segment_tts_key") @db.Uuid
+  ttsStarted          Boolean              @default(false)
+  pictureStarted      Boolean              @default(false)
+  pictureTaskId       String?              @unique(map: "avatar_sync_segment_picture_key") @db.VarChar(160)
+  lipSyncClientToken  String               @unique(map: "avatar_sync_segment_lip_key") @db.Uuid
+  lipSyncStarted      Boolean              @default(false)
+  lipSyncTaskId       String?              @unique(map: "avatar_sync_segment_provider_key") @db.VarChar(160)
+  resultFingerprint   String?              @db.Char(64)
+  audioFileObjectId   String?              @db.Uuid
+  videoFileObjectId   String?              @db.Uuid
+  media               Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  task                FissionAvatarSyncTask @relation(fields: [projectId, workflowRunId, taskId], references: [projectId, workflowRunId, id], onDelete: Cascade, map: "avatar_sync_segments_task_fkey")
+
+  @@id([taskId, ordinal])
+  @@index([projectId, workflowRunId, taskId], map: "avatar_sync_segments_scope_idx")
+  @@map("fission_avatar_sync_segments")
+}
+
+model FissionAvatarRenderTask {
+  id                String      @id @default(uuid()) @db.Uuid
+  projectId         String      @db.Uuid
+  workflowRunId     String      @db.Uuid
+  idempotencyKey    String      @db.Uuid
+  inputSnapshot     Json
+  status            String      @default("QUEUED") @db.VarChar(24)
+  phase             String      @default("QUEUED") @db.VarChar(16)
+  progress          Int         @default(0)
+  attemptCount      Int         @default(0)
+  attemptToken      String?     @db.Uuid
+  leaseExpiresAt    DateTime?
+  errorCode         String?     @db.VarChar(48)
+  retryable         Boolean     @default(false)
+  resultFingerprint String?     @db.Char(64)
+  candidate         Json?
+  review            Json?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  project           Project     @relation(fields: [projectId], references: [id], onDelete: Cascade, map: "avatar_render_tasks_project_fkey")
+  workflowRun       WorkflowRun @relation(fields: [projectId, workflowRunId], references: [projectId, id], onDelete: Cascade, map: "avatar_render_tasks_run_fkey")
+
+  @@unique([projectId, workflowRunId, idempotencyKey], map: "avatar_render_task_idempotency_key")
+  @@index([projectId, workflowRunId, createdAt], map: "avatar_render_tasks_recent_idx")
+  @@index([status, leaseExpiresAt], map: "avatar_render_tasks_lease_idx")
+  @@map("fission_avatar_render_tasks")
+}
+
+model FissionAvatarAssetGrant {
+  id                   String       @id @default(uuid()) @db.Uuid
+  projectId            String       @db.Uuid
+  assetId              String       @db.Uuid
+  assetVersion         Int
+  evidenceReference    String       @db.VarChar(240)
+  doubaoSpeaker        String?      @db.VarChar(120)
+  seedanceSourceTaskId  String?      @db.VarChar(160)
+  grantedAt            DateTime     @default(now())
+  expiresAt            DateTime?
+  revokedAt            DateTime?
+  version              AssetVersion @relation(fields: [projectId, assetId, assetVersion], references: [projectId, assetId, version], onDelete: Cascade, map: "fission_avatar_asset_grants_version_fkey")
+
+  @@index([projectId, assetId, assetVersion], map: "fission_avatar_asset_grants_project_version_idx")
+  @@map("fission_avatar_asset_grants")
 }
 
 model AssetOperationReceipt {

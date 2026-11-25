@@ -12,6 +12,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { Prisma, Asset as AssetRecord, AssetVersion } from '../../generated/prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { assertCustomizedImportEditable } from '../workflow/customized-branches';
+import { canReadAvatarRenderArchive } from '../workflow/fission-avatar-delivery';
 
 export type CreateAssetRecord = {
   name: string;
@@ -354,6 +355,10 @@ export class AssetRepository {
           ? { asset, assetVersionId: receipt.assetVersionId, version: receipt.version }
           : null;
       });
+  }
+
+  canReadAvatarRenderArchive(record: AssetRecord) {
+    return canReadAvatarRenderArchive(this.prisma, record);
   }
 
   async createVersion(

@@ -42,9 +42,26 @@ const restricted = [
   'asset',
 ];
 
-function fixture(busy?: string, cloneEnabled = false, localReplaceEnabled = false) {
+function fixture(
+  busy?: string,
+  cloneEnabled = false,
+  localReplaceEnabled = false,
+  avatarSyncMigrated = false,
+  avatarRenderMigrated = false,
+  avatarSegmentsMigrated = false,
+  avatarContinuityMigrated = false,
+) {
   const tx: Record<string, any> = {
     $queryRaw: vi.fn().mockImplementation(async (query: { sql?: string }) => {
+      if (query.sql?.includes('to_regclass'))
+        return [
+          {
+            sync: avatarSyncMigrated,
+            render: avatarRenderMigrated,
+            segments: avatarSegmentsMigrated,
+            picture: avatarContinuityMigrated,
+          },
+        ];
       if (query.sql?.includes('WITH refs')) return [{ key: 'owned-file' }];
       return [{ id: 'project-a' }];
     }),
@@ -86,6 +103,8 @@ function fixture(busy?: string, cloneEnabled = false, localReplaceEnabled = fals
     'fissionCloneFileHold',
     'fissionCloneMappingFile',
     'fissionLocalReplaceTask',
+    'fissionAvatarSyncTask',
+    'fissionAvatarRenderTask',
   ]))
     tx[model] = {
       count: vi.fn().mockResolvedValue(model === busy ? 1 : 0),
@@ -198,6 +217,94 @@ describe('permanent project deletion', () => {
       },
     });
     expect(tx.project.delete).not.toHaveBeenCalled();
+  });
+
+  it('protects admitted avatar sync tasks even when generation has been disabled', async () => {
+    const disabledBeforeMigration = fixture();
+    await expect(disabledBeforeMigration.repository.remove('project-a', 'lease')).resolves.toBe(
+      true,
+    );
+    expect(disabledBeforeMigration.tx.fissionAvatarSyncTask.count).not.toHaveBeenCalled();
+
+    const { repository, tx } = fixture('fissionAvatarSyncTask', false, false, true);
+    await expect(repository.remove('project-a', 'lease')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROJECT_BUSY' }),
+    });
+    expect(tx.fissionAvatarSyncTask.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-a',
+        OR: [
+          { status: { in: ['QUEUED', 'RUNNING'] } },
+          {
+            updatedAt: { gt: expect.any(Date) },
+            OR: [
+              { lipSyncStarted: true, lipSyncTaskId: null },
+              { errorCode: 'PROVIDER_CREATION_UNKNOWN' },
+            ],
+          },
+        ],
+      },
+    });
+    expect(tx.project.delete).not.toHaveBeenCalled();
+  });
+
+  it('protects committed render candidates awaiting review before deleting a project', async () => {
+    const { repository, tx } = fixture('fissionAvatarRenderTask', false, false, true, true);
+    await expect(repository.remove('project-a', 'lease')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROJECT_BUSY' }),
+    });
+    expect(tx.fissionAvatarRenderTask.count).toHaveBeenCalledWith({
+      where: { projectId: 'project-a', status: { in: ['QUEUED', 'RUNNING', 'AWAITING_REVIEW'] } },
+    });
+    expect(tx.project.delete).not.toHaveBeenCalled();
+  });
+
+  it('protects an unresolved segmented provider submission after the worker has stopped', async () => {
+    const { repository, tx } = fixture('fissionAvatarSyncTask', false, false, true, true, true);
+    await expect(repository.remove('project-a', 'lease')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROJECT_BUSY' }),
+    });
+    expect(tx.fissionAvatarSyncTask.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-a',
+        OR: [
+          expect.anything(),
+          expect.objectContaining({
+            OR: expect.arrayContaining([
+              { segments: { some: { lipSyncStarted: true, lipSyncTaskId: null } } },
+            ]),
+          }),
+        ],
+      },
+    });
+  });
+
+  it('protects an unresolved picture submission after the continuation migration', async () => {
+    const { repository, tx } = fixture(
+      'fissionAvatarSyncTask',
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+    );
+    await expect(repository.remove('project-a', 'lease')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROJECT_BUSY' }),
+    });
+    expect(tx.fissionAvatarSyncTask.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-a',
+        OR: [
+          expect.anything(),
+          expect.objectContaining({
+            OR: expect.arrayContaining([
+              { segments: { some: { pictureStarted: true, pictureTaskId: null } } },
+            ]),
+          }),
+        ],
+      },
+    });
   });
 
   it.each(activeModels)('rejects submission while %s is active', async (model) => {

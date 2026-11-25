@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-long-render-completion.schema.json",
+  "type": "object",
+  "properties": {
+    "audioDurationMs": {
+      "type": "integer",
+      "minimum": 60900,
+      "maximum": 90000
+    },
+    "videoDurationMs": {
+      "type": "integer",
+      "minimum": 61000,
+      "maximum": 90000
+    },
+    "audioLagMs": {
+      "type": "integer",
+      "minimum": -100,
+      "maximum": 100
+    },
+    "minimumAudioCorrelationPermille": {
+      "type": "integer",
+      "minimum": 980,
+      "maximum": 1000
+    },
+    "schemaVersion": {
+      "const": 2
+    },
+    "seamTimesMs": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 89999
+      },
+      "minItems": 2,
+      "maxItems": 11
+    }
+  },
+  "required": [
+    "audioDurationMs",
+    "videoDurationMs",
+    "audioLagMs",
+    "minimumAudioCorrelationPermille",
+    "schemaVersion",
+    "seamTimesMs"
+  ],
+  "additionalProperties": false
+}

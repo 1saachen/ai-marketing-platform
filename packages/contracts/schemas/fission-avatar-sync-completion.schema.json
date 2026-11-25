@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-sync-completion.schema.json",
+  "type": "object",
+  "properties": {
+    "audioDurationMs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30000
+    },
+    "videoDurationMs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30000
+    },
+    "audioLagMs": {
+      "type": "integer",
+      "minimum": -100,
+      "maximum": 100
+    },
+    "minimumAudioCorrelationPermille": {
+      "type": "integer",
+      "minimum": 980,
+      "maximum": 1000
+    },
+    "wordTimings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1
+          },
+          "startMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 29999
+          },
+          "endMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000
+          },
+          "confidencePermille": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["text", "startMs", "endMs", "confidencePermille"],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 240
+    }
+  },
+  "required": [
+    "audioDurationMs",
+    "videoDurationMs",
+    "audioLagMs",
+    "minimumAudioCorrelationPermille",
+    "wordTimings"
+  ],
+  "additionalProperties": false
+}

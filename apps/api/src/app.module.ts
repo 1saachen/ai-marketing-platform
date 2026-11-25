@@ -19,6 +19,7 @@ import { EffectSegmentRenderModule } from './workflows/effect/segment-render/eff
 import { EffectSourceImportModule } from './workflows/effect/source-import/effect-source-import.module';
 import { EffectTemplateMixModule } from './workflows/effect/template-mix/effect-template-mix.module';
 import { CustomizedSourceImportModule } from './workflows/customized/source-import/customized-source-import.module';
+import { AvatarModule } from './workflows/fission/avatar/avatar.module';
 import { CloneModule } from './workflows/fission/clone/clone.module';
 import { LocalReplaceModule } from './workflows/fission/local-replace/local-replace.module';
 
@@ -37,6 +38,7 @@ import { LocalReplaceModule } from './workflows/fission/local-replace/local-repl
     ProjectModule,
     AssetModule,
     WorkflowModule,
+    AvatarModule,
     CloneModule,
     LocalReplaceModule,
     EffectSourceImportModule,

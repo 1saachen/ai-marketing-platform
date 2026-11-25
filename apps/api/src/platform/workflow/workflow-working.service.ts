@@ -1,4 +1,9 @@
 import {
+  AVATAR_COMPOSITION_NODE,
+  AVATAR_OUTPUT_NODE,
+  AVATAR_SYNC_NODE,
+} from '@ai-marketing/contracts';
+import {
   restoreCustomizedImportDraft,
   CUSTOMIZED_WORKFLOW_NODES,
   customizedWorkflowNodeId,
@@ -193,12 +198,20 @@ const toRun = (record: {
 });
 
 const toArtifact = (record: WorkingArtifactRecord): WorkingArtifact => {
+  const avatarSync = record.nodeId === AVATAR_SYNC_NODE;
+  const avatarOutput = record.nodeId === AVATAR_OUTPUT_NODE;
   const contentPath = `/api/projects/${record.projectId}/working-artifacts/${record.id}/content`;
   const originalFileName = record.originalFileName
     ? safeOriginalFileName(record.originalFileName)
     : null;
   const files = record.files.map(({ fileObject, role, sortOrder }) => {
-    const filePath = `/api/projects/${record.projectId}/file-objects/${fileObject.id}/content`;
+    // The result route rechecks both frozen asset grants. A bare file-object URL cannot do that.
+    const filePath =
+      avatarSync && (role === 'audio' || role === 'video')
+        ? `/api/projects/${record.projectId}/workflow-runs/${record.workflowRunId}/fission-avatar/sync/results/${record.id}/${role}?revision=${record.revision}`
+        : avatarOutput && (role === 'video' || role === 'subtitles')
+          ? `/api/projects/${record.projectId}/workflow-runs/${record.workflowRunId}/fission-avatar/render/outputs/${record.revision}/${role}`
+          : `/api/projects/${record.projectId}/file-objects/${fileObject.id}/content`;
     return {
       id: fileObject.id,
       fileObjectId: fileObject.id,
@@ -211,7 +224,7 @@ const toArtifact = (record: WorkingArtifactRecord): WorkingArtifact => {
       previewKind: previewKind(fileObject.mimeType),
       previewUrl: filePath,
       contentUrl: filePath,
-      downloadUrl: `${filePath}?download=true`,
+      downloadUrl: avatarSync ? filePath : `${filePath}?download=true`,
     };
   });
   return {
@@ -225,7 +238,10 @@ const toArtifact = (record: WorkingArtifactRecord): WorkingArtifact => {
     directory: record.directory,
     type: record.type,
     tags: record.tags,
-    payload: record.payload,
+    payload:
+      avatarSync || avatarOutput || record.nodeId === AVATAR_COMPOSITION_NODE
+        ? null
+        : record.payload,
     metadata: record.metadata,
     originalFileName,
     mimeType: record.mimeType,
@@ -1683,7 +1699,14 @@ export class WorkflowWorkingService {
     rangeHeader?: string,
   ): Promise<WorkingArtifactContent> {
     const record = await this.repository.findArtifact(projectId, artifactId);
-    if (!record || !record.storageKey || !record.mimeType || !record.originalFileName)
+    if (
+      !record ||
+      record.nodeId === AVATAR_SYNC_NODE ||
+      record.nodeId === AVATAR_OUTPUT_NODE ||
+      !record.storageKey ||
+      !record.mimeType ||
+      !record.originalFileName
+    )
       throw new ApiHttpException('工作副本文件不存在', HttpStatus.NOT_FOUND, 'ASSET_NOT_FOUND');
     const kind = previewKind(record.mimeType);
     const partialAllowed = kind === 'AUDIO' || kind === 'VIDEO';
@@ -1718,7 +1741,12 @@ export class WorkflowWorkingService {
     rangeHeader?: string,
   ): Promise<WorkingArtifactContent> {
     const record = await this.repository.findFileObject(projectId, fileObjectId);
-    if (!record || record.status === 'ORPHANED')
+    if (
+      !record ||
+      record.status === 'ORPHANED' ||
+      record.nodeId === AVATAR_SYNC_NODE ||
+      record.nodeId === AVATAR_OUTPUT_NODE
+    )
       throw new ApiHttpException('工作文件不存在', HttpStatus.NOT_FOUND, 'ASSET_NOT_FOUND');
     const kind = previewKind(record.mimeType);
     const partialAllowed = kind === 'AUDIO' || kind === 'VIDEO';

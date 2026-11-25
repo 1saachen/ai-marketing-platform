@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-sync-worker-input.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "scriptText": {
+      "type": "string",
+      "maxLength": 120,
+      "minLength": 1
+    },
+    "voiceSpeaker": {
+      "type": "string",
+      "pattern": "^zh_[a-z0-9_]{1,80}_uranus_bigtts$"
+    },
+    "characterSizeBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "ttsOperationId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "ttsStarted": {
+      "type": "boolean"
+    },
+    "lipSyncClientToken": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "lipSyncStarted": {
+      "type": "boolean"
+    },
+    "lipSyncTaskId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^amk-tool-lip-sync-[A-Za-z0-9_-]{1,120}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "scriptText",
+    "voiceSpeaker",
+    "characterSizeBytes",
+    "ttsOperationId",
+    "ttsStarted",
+    "lipSyncClientToken",
+    "lipSyncStarted",
+    "lipSyncTaskId"
+  ],
+  "additionalProperties": false
+}

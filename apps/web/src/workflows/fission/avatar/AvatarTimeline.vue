@@ -10,7 +10,9 @@ const props = defineProps<{
   canUndo: boolean;
   canRedo: boolean;
   generated: boolean;
-  busy: boolean;
+  busy?: boolean;
+  readOnly?: boolean;
+  unavailable?: string;
 }>();
 const emit = defineEmits<{
   select: [track: Track, id: string, additive: boolean];
@@ -26,6 +28,7 @@ const emit = defineEmits<{
 }>();
 const zoom = ref(42);
 const px = computed(() => zoom.value);
+const editingDisabled = computed(() => props.busy || props.readOnly);
 const width = computed(() => Math.max(30, props.duration + 3) * px.value);
 const rows = [
   { key: 'video' as const, name: '视频轨', icon: Video },
@@ -42,7 +45,7 @@ let drag: {
   moved: boolean;
 } | null = null;
 function begin(event: PointerEvent, track: Track, clip: Clip, mode = 'move') {
-  if (event.button !== 0 || props.busy) return;
+  if (event.button !== 0 || editingDisabled.value) return;
   emit('select', track, clip.id, event.ctrlKey || event.metaKey || event.shiftKey);
   const element = event.currentTarget as HTMLElement;
   element.setPointerCapture(event.pointerId);
@@ -81,7 +84,7 @@ function end() {
 }
 const marquee = ref<{ start: number; end: number; base: string[] } | null>(null);
 function startMarquee(event: PointerEvent, track: Track) {
-  if (track !== 'subtitle' || props.busy || event.button !== 0) return;
+  if (track !== 'subtitle' || editingDisabled.value || event.button !== 0) return;
   const element = event.currentTarget as HTMLElement;
   const x = event.clientX - element.getBoundingClientRect().left;
   element.setPointerCapture(event.pointerId);
@@ -118,31 +121,41 @@ function seek(event: MouseEvent) {
 onBeforeUnmount(end);
 </script>
 <template>
-  <section class="fas-timeline-panel" aria-label="时间轴编辑">
+  <section class="fas-timeline-panel" :aria-label="readOnly ? '时间轴预览' : '时间轴编辑'">
     <div class="fas-timeline-toolbar">
-      <strong class="avatar-timeline-label">时间轴编辑</strong
-      ><button title="撤销" aria-label="撤销" :disabled="!canUndo || busy" @click="emit('undo')">
+      <strong class="avatar-timeline-label">{{ readOnly ? '时间轴预览' : '时间轴编辑' }}</strong
+      ><button
+        title="撤销"
+        aria-label="撤销"
+        :disabled="!canUndo || editingDisabled"
+        @click="emit('undo')"
+      >
         <Undo2 :size="14" /></button
-      ><button title="重做" aria-label="重做" :disabled="!canRedo || busy" @click="emit('redo')">
+      ><button
+        title="重做"
+        aria-label="重做"
+        :disabled="!canRedo || editingDisabled"
+        @click="emit('redo')"
+      >
         <Redo2 :size="14" /></button
       ><button
         title="删除"
         aria-label="删除"
         class="danger"
-        :disabled="!selection.length || busy"
+        :disabled="!selection.length || editingDisabled"
         @click="emit('remove')"
       >
         <Trash2 :size="14" /></button
-      ><i /><button :disabled="!generated || busy" @click="emit('subtitles')">
+      ><i /><button :disabled="!generated || editingDisabled" @click="emit('subtitles')">
         <Captions :size="13" />生成同步字幕</button
       ><button
         title="分割字幕"
         aria-label="分割字幕"
-        :disabled="selection.length !== 1 || busy"
+        :disabled="selection.length !== 1 || editingDisabled"
         @click="emit('split')"
       >
         <Scissors :size="13" /></button
-      ><span class="fas-timeline-hint"
+      ><span v-if="!unavailable && !readOnly" class="fas-timeline-hint"
         >拖框多选字幕 · Ctrl/⌘+B 分割 · 拖动片段移动 · 两侧控制点拉伸</span
       ><label class="avatar-zoom"
         >−<input
@@ -151,6 +164,7 @@ onBeforeUnmount(end);
           min="20"
           max="80"
           aria-label="时间轴缩放"
+          :disabled="!!unavailable"
         />+</label
       >
     </div>
@@ -194,14 +208,14 @@ onBeforeUnmount(end);
             <div
               v-for="clip in tracks[row.key]"
               :key="clip.id"
-              role="button"
-              tabindex="0"
+              :role="readOnly ? undefined : 'button'"
+              :tabindex="readOnly ? undefined : 0"
               :aria-label="`${row.name} ${clip.title}`"
-              :aria-pressed="selection.includes(clip.id)"
+              :aria-pressed="readOnly ? undefined : selection.includes(clip.id)"
               class="fas-clip"
               :class="[row.key, { selected: selection.includes(clip.id) }]"
               :style="{ left: `${clip.start * px}px`, width: `${clip.duration * px}px` }"
-              @keydown.enter="emit('select', row.key, clip.id, false)"
+              @keydown.enter="!editingDisabled && emit('select', row.key, clip.id, false)"
               @pointerdown.stop="begin($event, row.key, clip)"
               @pointermove="move"
               @pointerup="end"
@@ -211,11 +225,13 @@ onBeforeUnmount(end);
               ><span>{{ clip.text }}</span
               ><em>{{ clip.duration.toFixed(1) }}s</em
               ><i
+                v-if="!readOnly"
                 class="avatar-trim left"
                 @pointerdown.stop="begin($event, row.key, clip, 'left')"
                 @pointermove="move"
                 @pointerup="end"
               /><i
+                v-if="!readOnly"
                 class="avatar-trim right"
                 @pointerdown.stop="begin($event, row.key, clip, 'right')"
                 @pointermove="move"
@@ -226,8 +242,11 @@ onBeforeUnmount(end);
         </div>
         <div class="avatar-playhead" :style="{ left: `${96 + playhead * px}px` }" />
         <div v-if="!generated" class="fas-timeline-empty">
-          <b>生成数字人口播视频后，将自动建立视频轨与口播音频轨</b
-          ><span>同步字幕需要在视频生成完成后单独生成。</span>
+          <b v-if="unavailable">{{ unavailable }}</b>
+          <template v-else>
+            <b>生成数字人口播视频后，将自动建立视频轨与口播音频轨</b>
+            <span>同步字幕需要在视频生成完成后单独生成。</span>
+          </template>
         </div>
       </div>
     </div>

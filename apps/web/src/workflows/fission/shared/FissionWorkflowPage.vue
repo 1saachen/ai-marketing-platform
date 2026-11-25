@@ -1,10 +1,16 @@
 <script setup lang="ts">
+import {
+  AVATAR_COMPOSITION_NODE,
+  AVATAR_OUTPUT_NODE,
+  AVATAR_SYNC_NODE,
+  FISSION_AVATAR_NODES,
+} from '@ai-marketing/contracts';
 import { GitBranch, Replace, UserRound } from '@lucide/vue';
 import { computed, defineAsyncComponent, inject, nextTick, ref, watch } from 'vue';
 import { projectContextKey } from '../../../platform/project/project-context';
 import LocalReplaceRealWorkspace from '../local-replace/LocalReplaceRealWorkspace.vue';
 import FissionCloneWorkspace from '../clone/FissionCloneWorkspace.vue';
-import AvatarWorkspace from '../avatar/AvatarWorkspace.vue';
+import AvatarRealWorkspace from '../avatar/AvatarRealWorkspace.vue';
 const props = withDefaults(
   defineProps<{
     projectId?: string;
@@ -20,8 +26,11 @@ const props = withDefaults(
   },
 );
 const savedModule = localStorage.getItem('ai-marketing.fission.active-module');
-const localReplacePreview = import.meta.env.DEV && props.preview;
-const LocalReplaceMockWorkspace = localReplacePreview
+const developmentPreview = import.meta.env.DEV && props.preview;
+const AvatarMockWorkspace = developmentPreview
+  ? defineAsyncComponent(() => import('../avatar/AvatarWorkspace.vue'))
+  : null;
+const LocalReplaceMockWorkspace = developmentPreview
   ? defineAsyncComponent(() => import('../local-replace/LocalReplaceWorkspace.vue'))
   : null;
 const projectContext = inject(projectContextKey, null);
@@ -31,7 +40,8 @@ const active = ref(
 );
 watch(active, (value) => localStorage.setItem('ai-marketing.fission.active-module', value));
 const cloneWorkspace = ref<InstanceType<typeof FissionCloneWorkspace>>();
-const avatarWorkspace = ref<InstanceType<typeof AvatarWorkspace>>();
+const avatarWorkspace = ref<InstanceType<typeof AvatarRealWorkspace>>();
+const avatarPreview = ref<{ flushPendingEdits: () => Promise<boolean> }>();
 const workspace = ref<{
   flushPendingEdits: () => Promise<boolean> | boolean;
   workflowRunId?: string;
@@ -43,7 +53,7 @@ const activeWorkspace = computed(() =>
   active.value === 'clone'
     ? cloneWorkspace.value
     : active.value === 'avatar'
-      ? avatarWorkspace.value
+      ? (avatarWorkspace.value ?? avatarPreview.value)
       : workspace.value,
 );
 const flushPendingEdits = async () => {
@@ -78,7 +88,7 @@ defineExpose({
       ? (cloneWorkspace.value?.workflowRunId ?? '')
       : active.value === 'replace'
         ? (workspace.value?.workflowRunId ?? '')
-        : '',
+        : (avatarWorkspace.value?.workflowRunId ?? ''),
   ),
   cloneDraftRevision: computed(() =>
     active.value === 'clone' ? (cloneWorkspace.value?.cloneDraftRevision ?? null) : null,
@@ -89,7 +99,24 @@ defineExpose({
   localReplaceDraftRevision: computed(() =>
     active.value === 'replace' ? (workspace.value?.draftRevision ?? null) : null,
   ),
+  avatarDraftRevision: computed(() =>
+    active.value === 'avatar' ? (avatarWorkspace.value?.draftRevision ?? null) : null,
+  ),
+  avatarCompositionDraftRevision: computed(() =>
+    active.value === 'avatar' ? (avatarWorkspace.value?.compositionDraftRevision ?? null) : null,
+  ),
   resumeWorkflowNode: async (nodeId: string) => {
+    if (
+      nodeId === FISSION_AVATAR_NODES.binding ||
+      nodeId === FISSION_AVATAR_NODES.script ||
+      nodeId === AVATAR_SYNC_NODE ||
+      nodeId === AVATAR_COMPOSITION_NODE ||
+      nodeId === AVATAR_OUTPUT_NODE
+    ) {
+      if (!(await selectModule('avatar'))) return false;
+      await nextTick();
+      return avatarWorkspace.value?.resumeWorkflowNode(nodeId) ?? false;
+    }
     if (!nodeId.startsWith('CLONE_') || !(await selectModule('clone'))) return false;
     await nextTick();
     return cloneWorkspace.value?.resumeWorkflowNode(nodeId) ?? false;
@@ -149,13 +176,20 @@ defineExpose({
       :project-id="projectId"
       :project-name="projectName"
     />
-    <AvatarWorkspace
+    <component
+      :is="AvatarMockWorkspace"
+      v-else-if="active === 'avatar' && AvatarMockWorkspace"
+      ref="avatarPreview"
+      :project-id="projectId"
+      :project-name="projectName"
+      preview
+    />
+    <AvatarRealWorkspace
       v-else-if="active === 'avatar'"
       ref="avatarWorkspace"
       :key="projectId || 'avatar-preview'"
       :project-id="projectId"
       :project-name="projectName"
-      :preview="preview"
     />
     <section v-else class="fission-placeholder">
       <GitBranch :size="36" />

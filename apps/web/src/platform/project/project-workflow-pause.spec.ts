@@ -93,6 +93,27 @@ describe('project workflow pause precondition', () => {
     });
   });
 
+  it('sends the avatar draft revision observed after flushing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const node = {
+      workflowRunId: 'run-avatar',
+      avatarDraftRevision: 3,
+      avatarCompositionDraftRevision: 7,
+      async flushPendingEdits() {
+        this.avatarDraftRevision++;
+        this.avatarCompositionDraftRevision++;
+        return true;
+      },
+    };
+    await flushAndPauseWorkflowRun('project-a', node);
+    expect(fetchMock.mock.calls[0]?.[0]).toContain('/workflow-runs/run-avatar/pause');
+    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)).toEqual({
+      expectedAvatarDraftRevision: 4,
+      expectedAvatarCompositionDraftRevision: 8,
+    });
+  });
+
   it('does not send pause before a failed flush or without a real Run', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);

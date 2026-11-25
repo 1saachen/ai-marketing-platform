@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-render-completion.schema.json",
+  "type": "object",
+  "properties": {
+    "audioDurationMs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30000
+    },
+    "videoDurationMs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30000
+    },
+    "audioLagMs": {
+      "type": "integer",
+      "minimum": -100,
+      "maximum": 100
+    },
+    "minimumAudioCorrelationPermille": {
+      "type": "integer",
+      "minimum": 980,
+      "maximum": 1000
+    }
+  },
+  "required": [
+    "audioDurationMs",
+    "videoDurationMs",
+    "audioLagMs",
+    "minimumAudioCorrelationPermille"
+  ],
+  "additionalProperties": false
+}

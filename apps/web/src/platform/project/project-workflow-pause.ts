@@ -6,6 +6,8 @@ export type PausableWorkflowNode = {
   cloneDraftRevision?: number | null;
   cloneDraftRevisions?: Record<string, number> | null;
   localReplaceDraftRevision?: number | null;
+  avatarDraftRevision?: number | null;
+  avatarCompositionDraftRevision?: number | null;
 };
 
 /** Read the pause precondition after every pending draft write has completed. */
@@ -17,6 +19,8 @@ export async function flushAndPauseWorkflowRun(projectId: string, node: Pausable
   const revision = node.cloneDraftRevision;
   const revisions = node.cloneDraftRevisions;
   const localRevision = node.localReplaceDraftRevision;
+  const avatarRevision = node.avatarDraftRevision;
+  const avatarCompositionRevision = node.avatarCompositionDraftRevision;
   await pauseWorkflowRun(
     projectId,
     workflowRunId,
@@ -26,6 +30,13 @@ export async function flushAndPauseWorkflowRun(projectId: string, node: Pausable
         ? { expectedCloneDraftRevision: revision }
         : typeof localRevision === 'number'
           ? { expectedLocalReplaceDraftRevision: localRevision }
-          : undefined,
+          : typeof avatarRevision === 'number'
+            ? {
+                expectedAvatarDraftRevision: avatarRevision,
+                ...(typeof avatarCompositionRevision === 'number' && {
+                  expectedAvatarCompositionDraftRevision: avatarCompositionRevision,
+                }),
+              }
+            : undefined,
   );
 }

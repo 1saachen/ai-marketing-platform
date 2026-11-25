@@ -11,9 +11,12 @@ import {
 import { CUSTOMIZED_SOURCE_ARTIFACT_KEY } from '@ai-marketing/contracts';
 import { sharedCustomizedBrief } from './customized-shared-brief';
 import {
+  AVATAR_COMPOSITION_NODE,
+  AVATAR_OUTPUT_NODE,
   EFFECT_WORKFLOW_BRANCH_NODES,
   EFFECT_WORKFLOW_EDITABLE_NODES,
   EFFECT_TEMPLATE_CURRENT_PATH_NODE_ID,
+  FISSION_AVATAR_DRAFT_NODE,
 } from '@ai-marketing/contracts';
 import type {
   CustomizedInformationMode,
@@ -36,6 +39,7 @@ import {
   lockCloneRun,
   validateCloneInputUploads,
 } from './fission-clone-scope';
+import { lockAvatarRun } from './fission-avatar-scope';
 import { LOCAL_REPLACE_DRAFT_NODE, lockLocalReplaceRun } from './fission-local-replace-scope';
 import { validateCloneG2DraftInTransaction } from '../../workflows/fission/clone/clone-draft-scope';
 import { Prisma, type WorkflowNodeState } from '../../generated/prisma/client';
@@ -862,6 +866,8 @@ export class WorkflowWorkingRepository {
 
   async activateNode(projectId: string, workflowRunId: string, nodeId: string) {
     const existing = await this.findRun(projectId, workflowRunId);
+    if (existing?.workflowSpace === 'FISSION_AVATAR' || nodeId.startsWith('AVATAR_'))
+      throw new ApiHttpException('请在数字人口播工作台切换节点', 400, 'VALIDATION_ERROR');
     if (existing?.workflowSpace === 'FISSION_LOCAL_REPLACE' || nodeId.startsWith('LOCAL_REPLACE_'))
       throw new ApiHttpException('请在局部替换工作台切换节点', 400, 'VALIDATION_ERROR');
     if (existing?.workflowSpace === 'FISSION_CLONE' || nodeId.startsWith('CLONE_')) {
@@ -901,6 +907,8 @@ export class WorkflowWorkingRepository {
         where: { id: workflowRunId, projectId, status: { in: [...openRunStatuses] } },
       });
       if (!run) throw new Error('WORKFLOW_RUN_NOT_FOUND');
+      if (run.workflowSpace === 'FISSION_AVATAR' || nodeId.startsWith('AVATAR_'))
+        throw new ApiHttpException('请在数字人口播工作台保存草稿', 400, 'VALIDATION_ERROR');
       if (run.workflowSpace === 'FISSION_LOCAL_REPLACE' || nodeId.startsWith('LOCAL_REPLACE_'))
         throw new ApiHttpException('请在局部替换工作台保存草稿', 400, 'VALIDATION_ERROR');
       const isClone = run.workflowSpace === 'FISSION_CLONE' || nodeId.startsWith('CLONE_');
@@ -1561,6 +1569,30 @@ export class WorkflowWorkingRepository {
 
   async pauseRun(projectId: string, workflowRunId: string, input: WorkflowPauseRunRequest = {}) {
     const run = await this.findRun(projectId, workflowRunId);
+    if (run?.workflowSpace === 'FISSION_AVATAR')
+      return this.prisma.$transaction(async (tx) => {
+        const ids = { projectId, workflowRunId };
+        await lockAvatarRun(tx, ids);
+        const drafts = await tx.workflowNodeState.findMany({
+          where: { ...ids, nodeId: { in: [FISSION_AVATAR_DRAFT_NODE, AVATAR_COMPOSITION_NODE] } },
+          select: { nodeId: true, revision: true },
+        });
+        const draft = drafts.find((row) => row.nodeId === FISSION_AVATAR_DRAFT_NODE);
+        const composition = drafts.find((row) => row.nodeId === AVATAR_COMPOSITION_NODE);
+        if (!draft || input?.expectedAvatarDraftRevision !== draft.revision)
+          throw new ApiHttpException('数字人口播草稿已变化，请刷新后再退出', 409, 'CONFLICT');
+        if (composition && input?.expectedAvatarCompositionDraftRevision !== composition.revision)
+          throw new ApiHttpException('背景与字幕草稿已变化，请刷新后再退出', 409, 'CONFLICT');
+        return tx.workflowRun.updateMany({
+          where: {
+            projectId,
+            id: workflowRunId,
+            activeKey: 'ACTIVE',
+            status: { in: [...openRunStatuses] },
+          },
+          data: { status: 'PAUSED', lastActiveAt: new Date() },
+        });
+      });
     if (run?.workflowSpace === 'FISSION_LOCAL_REPLACE')
       return this.prisma.$transaction(async (tx) => {
         const ids = { projectId, workflowRunId };
@@ -1700,11 +1732,14 @@ export class WorkflowWorkingRepository {
       where: { id: workflowRunId, projectId, status: { in: [...openRunStatuses] } },
     });
     if (!run) throw new Error('WORKFLOW_RUN_NOT_FOUND');
-    const captureEffectRevision =
+    const captureArtifactRevision =
       (run.workflow === 'EFFECT' && run.workflowSpace === 'EFFECT') ||
       (run.workflow === 'CUSTOMIZED' &&
         run.workflowSpace === 'CUSTOMIZED_PROJECT' &&
-        nodeId === 'STORYBOARD');
+        nodeId === 'STORYBOARD') ||
+      (run.workflow === 'FISSION' &&
+        run.workflowSpace === 'FISSION_AVATAR' &&
+        nodeId === AVATAR_OUTPUT_NODE);
     const unique = { projectId, workflowRunId, nodeId, artifactKey };
     const previous = await transaction.workingArtifact.findUnique({
       where: { projectId_workflowRunId_nodeId_artifactKey: unique },
@@ -1776,7 +1811,7 @@ export class WorkflowWorkingRepository {
         data: { projectId, workflowRunId, nodeId, artifactKey, ...data },
       });
     }
-    if (previous && captureEffectRevision)
+    if (previous && captureArtifactRevision)
       await this.persistArtifactRevisionSnapshotInTransaction(
         transaction,
         projectId,
@@ -1877,7 +1912,7 @@ export class WorkflowWorkingRepository {
       where: { id: baseRecord.id },
       include: workingArtifactInclude,
     });
-    if (captureEffectRevision)
+    if (captureArtifactRevision)
       await this.persistArtifactRevisionSnapshotInTransaction(
         transaction,
         projectId,
