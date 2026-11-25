@@ -5,15 +5,21 @@ import {
   type AvatarAssetRef,
 } from '@ai-marketing/contracts';
 import type { Asset, Prisma } from '../../generated/prisma/client';
-import { AVATAR_WORKFLOW_SCOPE, findCurrentAvatarGrant } from './fission-avatar-scope';
+import {
+  AVATAR_WORKFLOW_SCOPE,
+  findCurrentAvatarGrant,
+  isAvatarNativeVoiceReference,
+} from './fission-avatar-scope';
 
 type FrozenAsset = AvatarAssetRef & { authorizationId: string; versionId: string };
 
 export type AvatarRenderOrigin = {
   character: FrozenAsset;
-  voice: FrozenAsset;
   background: (AvatarAssetRef & { versionId: string }) | null;
-};
+} & (
+  | { voice: FrozenAsset; mode?: undefined }
+  | { voice: null; mode: 'NATIVE'; nativeVoice?: FrozenAsset }
+);
 
 export const AVATAR_BACKGROUND_MIMES = ['image/jpeg', 'image/png'];
 
@@ -63,16 +69,22 @@ export async function avatarRenderOriginAuthorized(
   projectId: string,
   origin: AvatarRenderOrigin,
 ) {
+  const voiceRef = origin.mode === 'NATIVE' ? origin.nativeVoice : origin.voice;
   const [character, voice, background] = await Promise.all([
     findCurrentAvatarGrant(tx, projectId, origin.character),
-    findCurrentAvatarGrant(tx, projectId, origin.voice),
+    voiceRef ? findCurrentAvatarGrant(tx, projectId, voiceRef) : null,
     origin.background ? findAvatarBackground(tx, projectId, origin.background) : null,
   ]);
   return (
     character?.id === origin.character.authorizationId &&
     character.version.id === origin.character.versionId &&
-    voice?.id === origin.voice.authorizationId &&
-    voice.version.id === origin.voice.versionId &&
+    (origin.mode !== 'NATIVE' || origin.voice === null) &&
+    (voiceRef
+      ? !!voice &&
+        voice.id === voiceRef.authorizationId &&
+        voice.version.id === voiceRef.versionId &&
+        (origin.mode !== 'NATIVE' || isAvatarNativeVoiceReference(voice))
+      : origin.mode === 'NATIVE') &&
     (!origin.background || background?.id === origin.background.versionId)
   );
 }

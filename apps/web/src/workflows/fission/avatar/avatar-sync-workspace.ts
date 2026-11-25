@@ -23,7 +23,31 @@ export function avatarSegmentProgress(task: AvatarSyncTask | null | undefined) {
   return complete;
 }
 
-type SyncInput = Omit<AvatarSyncCreateRequest, 'idempotencyKey'>;
+type WithoutIdempotencyKey<T> = T extends AvatarSyncCreateRequest
+  ? Omit<T, 'idempotencyKey'>
+  : never;
+type SyncInput = WithoutIdempotencyKey<AvatarSyncCreateRequest>;
+export type AvatarSyncMode = 'SHORT' | NonNullable<AvatarSyncCreateRequest['mode']>;
+
+export function avatarSyncAvailability(
+  workspace: AvatarSyncWorkspace | null | undefined,
+  mode: AvatarSyncMode,
+) {
+  if (mode === 'NATIVE') return workspace?.native;
+  if (mode === 'SEGMENTED') return workspace?.long;
+  return workspace;
+}
+
+export function avatarSyncMode(
+  workspace: AvatarSyncWorkspace | null,
+  selected: AvatarSyncMode | null,
+): AvatarSyncMode {
+  const task = workspace?.task;
+  if (task && isAvatarSyncActive(task)) return task.mode ?? 'SHORT';
+  return (
+    selected ?? (task ? (task.mode ?? 'SHORT') : workspace?.native?.enabled ? 'NATIVE' : 'SHORT')
+  );
+}
 type Scope = {
   projectId: string;
   runId: string;
@@ -151,7 +175,7 @@ export function createAvatarSyncWorkspace(api = avatarSyncApi) {
       if (!data || scope !== current) return null;
       if (isAvatarSyncActive(data.task)) return data;
       const segmented = input.mode === 'SEGMENTED';
-      const availability = segmented ? data.long : data;
+      const availability = avatarSyncAvailability(data, input.mode ?? 'SHORT');
       if (!availability?.enabled || !availability.canGenerate) {
         error.value =
           availability?.blockedReason ??

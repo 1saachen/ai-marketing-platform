@@ -1,7 +1,10 @@
 import {
   AVATAR_LONG_LIMITS,
+  AVATAR_NATIVE_LIMITS,
+  AVATAR_NATIVE_RENDER_LIMITS,
   AVATAR_RENDER_LIMITS,
   isAvatarLongRenderCompletion,
+  isAvatarNativeRenderCompletion,
   type AvatarCaptionCue,
   type AvatarRenderCompletion,
 } from '@ai-marketing/contracts';
@@ -45,6 +48,13 @@ export async function inspectAvatarRenderResult(
     Math.round(Number(value) * 1000),
   );
   const [videoStart, audioStart, videoMs, audioMs] = pts;
+  const native = isAvatarNativeRenderCompletion(result);
+  // The probe reports decimal seconds and the Worker reports rounded milliseconds.
+  const durationToleranceMs = native ? AVATAR_NATIVE_RENDER_LIMITS.durationToleranceMs + 1 : 40;
+  const trackToleranceMs = native
+    ? AVATAR_NATIVE_LIMITS.durationToleranceMs + durationToleranceMs
+    : AVATAR_RENDER_LIMITS.maxReviewOffsetMs;
+  const startToleranceMs = native ? trackToleranceMs : 50;
   const limit = isAvatarLongRenderCompletion(result)
     ? AVATAR_LONG_LIMITS.maxDurationMs
     : AVATAR_RENDER_LIMITS.maxDurationMs;
@@ -54,17 +64,22 @@ export async function inspectAvatarRenderResult(
     audioStart === undefined ||
     videoMs === undefined ||
     audioMs === undefined ||
-    Math.abs(videoStart) > 50 ||
-    Math.abs(audioStart) > 50 ||
+    Math.abs(videoStart) > startToleranceMs ||
+    Math.abs(audioStart) > startToleranceMs ||
     videoMs < 1 ||
     audioMs < 1 ||
-    videoMs > limit + 40 ||
-    audioMs > limit + 40 ||
-    Math.abs(videoMs - result.videoDurationMs) > 40 ||
-    Math.abs(audioMs - result.audioDurationMs) > 40 ||
-    Math.abs(videoMs - expectedDurationMs) > AVATAR_RENDER_LIMITS.maxReviewOffsetMs ||
-    Math.abs(videoStart - audioStart) > AVATAR_RENDER_LIMITS.maxReviewOffsetMs ||
-    Math.abs(videoStart + videoMs - (audioStart + audioMs)) > AVATAR_RENDER_LIMITS.maxReviewOffsetMs
+    videoMs > limit + durationToleranceMs ||
+    audioMs > limit + durationToleranceMs ||
+    Math.abs(videoMs - result.videoDurationMs) > durationToleranceMs ||
+    Math.abs(audioMs - result.audioDurationMs) > durationToleranceMs ||
+    Math.abs(videoMs - expectedDurationMs) > (native ? durationToleranceMs : trackToleranceMs) ||
+    Math.abs(videoStart - audioStart) > trackToleranceMs
   )
     throw new Error('Invalid render timing');
+  // Native input admission bounds per-track lengths separately from the start offset.
+  // The receipt establishes that the render preserves both on the confirmed source.
+  const trackDifferenceMs = native
+    ? Math.abs(videoMs - audioMs)
+    : Math.abs(videoStart + videoMs - (audioStart + audioMs));
+  if (trackDifferenceMs > trackToleranceMs) throw new Error('Invalid render track length');
 }

@@ -40,6 +40,35 @@ function fakeApi() {
 }
 
 describe('avatar workspace', () => {
+  it('refreshes approved shapes without overwriting draft edits or confirmed sources', async () => {
+    const api = fakeApi();
+    const server = {
+      ...workspace('project-one', 7),
+      characters: [
+        {
+          assetId: 'approved-shape',
+          version: 2,
+          authorizationId: 'active-grant',
+          name: '已授权形象图',
+          previewKind: 'IMAGE',
+          previewUrl: '/api/approved-shape',
+        },
+      ],
+    } satisfies AvatarWorkspaceData;
+    api.read.mockResolvedValueOnce(reply(server));
+    const state = createAvatarWorkspace(api);
+    await state.open('project-one');
+    state.edit({ scriptText: '正在编辑的提示词' });
+
+    expect(await state.refreshCharacters()).toBe(true);
+    expect(state.workspace.value?.characters).toEqual(server.characters);
+    expect(state.workspace.value?.draft.revision).toBe(0);
+    expect(state.draft.value?.scriptText).toBe('正在编辑的提示词');
+    expect(state.dirty.value).toBe(true);
+    expect(api.save).not.toHaveBeenCalled();
+    state.dispose();
+  });
+
   it('ignores a late workspace response from a previous project', async () => {
     const api = fakeApi();
     const delayed = deferred<ReturnType<typeof reply>>();

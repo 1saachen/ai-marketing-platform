@@ -20,6 +20,7 @@ export type AvatarAssetRef = { assetId: string; version: number };
 export type AvatarDraftData = {
   character: AvatarAssetRef | null;
   voice: AvatarAssetRef | null;
+  nativeVoice?: AvatarAssetRef | null;
   scriptText: string;
   scriptSource: AvatarScriptSource;
 };
@@ -31,6 +32,7 @@ export type AvatarWorkspaceAsset = AvatarAssetRef & {
   authorizationId: string;
   previewKind: 'IMAGE' | 'VIDEO' | 'AUDIO' | null;
   previewUrl: string | null;
+  nativeReferenceAvailable?: boolean;
 };
 export type AvatarBindingContent = { character: AvatarAssetRef; authorizationId: string };
 export type AvatarScriptContent = {
@@ -56,12 +58,16 @@ const assetRef = object({
   assetId: { type: 'string', pattern: CLONE_UUID_PATTERN },
   version: integer(1, maxPersistedInteger),
 });
-const draftSchema = object({
-  character: nullable(assetRef),
-  voice: nullable(assetRef),
-  scriptText: text(AVATAR_SCRIPT_MAX_LENGTH),
-  scriptSource: enumeration(...SCRIPT_SOURCES),
-});
+const draftSchema = {
+  ...object({
+    character: nullable(assetRef),
+    voice: nullable(assetRef),
+    nativeVoice: nullable(assetRef),
+    scriptText: text(AVATAR_SCRIPT_MAX_LENGTH),
+    scriptSource: enumeration(...SCRIPT_SOURCES),
+  }),
+  required: ['character', 'voice', 'scriptText', 'scriptSource'],
+};
 const saveSchema = object({
   expectedRevision: integer(0, maxPersistedInteger),
   draft: draftSchema,

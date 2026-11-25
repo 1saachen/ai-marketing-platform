@@ -12,6 +12,7 @@ import {
   AVATAR_LONG_LIMITS,
   AVATAR_SYNC_LIMITS,
   AVATAR_SYNC_NODE,
+  parseAvatarNativeCompletion,
   parseAvatarLongSyncCompletion,
   parseAvatarSyncCompletion,
   parseAvatarSyncCreateRequest,
@@ -84,7 +85,7 @@ async function hashFile(path: string) {
   return hash.digest('hex');
 }
 
-function parseResultMetadata(metadata: unknown, segmented: boolean) {
+function parseResultMetadata(metadata: unknown, segmented: boolean, native: boolean) {
   const limit = segmented ? AVATAR_LONG_LIMITS.maxMetadataBytes : 128 * 1024;
   if (typeof metadata !== 'string' || Buffer.byteLength(metadata) > limit)
     throw new ApiHttpException('同步结果缺少有效校验记录', 422, 'VALIDATION_ERROR');
@@ -94,9 +95,9 @@ function parseResultMetadata(metadata: unknown, segmented: boolean) {
   } catch {
     throw new ApiHttpException('同步结果校验记录无效', 422, 'VALIDATION_ERROR');
   }
-  return segmented
-    ? avatarSyncBody(parseAvatarLongSyncCompletion, data)
-    : avatarSyncBody(parseAvatarSyncCompletion, data);
+  if (native) return avatarSyncBody(parseAvatarNativeCompletion, data);
+  if (segmented) return avatarSyncBody(parseAvatarLongSyncCompletion, data);
+  return avatarSyncBody(parseAvatarSyncCompletion, data);
 }
 
 @Injectable()
@@ -134,6 +135,14 @@ export class AvatarSyncService implements OnModuleInit, OnModuleDestroy {
     return this.config.get<boolean>('FISSION_AVATAR_CONTINUITY_ENABLED') === true;
   }
 
+  private nativeCreationEnabled() {
+    return (
+      this.workspaceEnabled() &&
+      this.config.get<boolean>('FISSION_AVATAR_NATIVE_ENABLED') === true &&
+      !!avatarWorkerToken(this.config)
+    );
+  }
+
   onModuleInit() {
     // Keep recovering already-queued work when only the new-generation flag is closed.
     if (!this.workspaceEnabled() || !avatarWorkerToken(this.config)) return;
@@ -169,34 +178,41 @@ export class AvatarSyncService implements OnModuleInit, OnModuleDestroy {
       this.taskCreationEnabled(),
       this.longCreationEnabled(),
       this.continuityEnabled(),
+      this.nativeCreationEnabled(),
     );
   }
 
   create(ids: AvatarSyncScope, body: unknown) {
     this.assertWorkspaceEnabled();
-    if (!this.taskCreationEnabled())
+    const nativeEnabled = this.nativeCreationEnabled();
+    const shortEnabled = this.taskCreationEnabled();
+    if (!shortEnabled && !nativeEnabled)
       throw new ApiHttpException('数字人口播生成暂未启用', 503, 'INTERNAL_ERROR');
     const request = avatarSyncBody(parseAvatarSyncCreateRequest, body);
     return this.repository.create(
       ids,
       request,
       this.longCreationEnabled(),
-      this.taskCreationEnabled(),
+      shortEnabled,
       this.continuityEnabled(),
+      nativeEnabled,
     );
   }
 
   action(ids: AvatarSyncScope, taskId: string, action: 'cancel' | 'retry') {
     this.assertWorkspaceEnabled();
-    if (action === 'retry' && !this.taskCreationEnabled())
+    const nativeEnabled = this.nativeCreationEnabled();
+    const shortEnabled = this.taskCreationEnabled();
+    if (action === 'retry' && !shortEnabled && !nativeEnabled)
       throw new ApiHttpException('数字人口播生成暂未启用', 503, 'INTERNAL_ERROR');
     return this.repository.action(
       ids,
       taskId,
       action,
-      this.taskCreationEnabled(),
+      shortEnabled,
       this.longCreationEnabled(),
       this.continuityEnabled(),
+      nativeEnabled,
     );
   }
 
@@ -220,17 +236,29 @@ export class AvatarSyncService implements OnModuleInit, OnModuleDestroy {
       mimeType: file.mimeType,
       originalFileName: file.originalFileName,
       partial: !!range,
+      native: file.native,
     };
   }
 
-  async source(ids: AvatarSyncScope, taskId: string, token: string) {
-    const source = await this.repository.character(ids, taskId, token);
+  async source(
+    ids: AvatarSyncScope,
+    taskId: string,
+    token: string,
+    role: 'character' | 'reference-audio' = 'character',
+  ) {
+    const source = await (role === 'character'
+      ? this.repository.character(ids, taskId, token)
+      : this.repository.referenceAudio(ids, taskId, token));
     const bytes = await this.storage.open(source.storageKey);
     if (bytes.sizeBytes !== source.sizeBytes || bytes.contentLength !== source.sizeBytes) {
       bytes.stream.destroy();
-      throw new ApiHttpException('冻结形象文件大小已变化', 422, 'VALIDATION_ERROR');
+      throw new ApiHttpException(
+        role === 'character' ? '冻结形象文件大小已变化' : '冻结音色文件大小已变化',
+        422,
+        'VALIDATION_ERROR',
+      );
     }
-    return bytes;
+    return { ...bytes, mimeType: source.mimeType };
   }
 
   async segmentSource(
@@ -273,7 +301,7 @@ export class AvatarSyncService implements OnModuleInit, OnModuleDestroy {
       'video',
       admission.segmented,
     );
-    const proof = parseResultMetadata(metadata, admission.segmented);
+    const proof = parseResultMetadata(metadata, admission.segmented, admission.native);
     const [audioSha, videoSha] = await Promise.all([hashFile(audio.path), hashFile(video.path)]);
     const fingerprint = workflowStateHash({ proof, audioSha, videoSha });
     if (admission.resultFingerprint) {
@@ -301,6 +329,8 @@ export class AvatarSyncService implements OnModuleInit, OnModuleDestroy {
       sha256: string,
     ): Promise<FileObjectInput> => {
       const format = media[role];
+      const originalFileName =
+        admission.native && role === 'video' ? '数字人口播生成原片.mp4' : format.name;
       const stored = await this.storage.put({
         projectId: ids.projectId,
         stream: createReadStream(file.path),
@@ -311,7 +341,7 @@ export class AvatarSyncService implements OnModuleInit, OnModuleDestroy {
           workflow: 'FISSION',
           lifecycle: 'staging',
           category: '数字人口播',
-          originalFileName: format.name,
+          originalFileName,
         },
       });
       stagingKeys.push(stored.key);
@@ -319,7 +349,7 @@ export class AvatarSyncService implements OnModuleInit, OnModuleDestroy {
         throw new ApiHttpException('同步媒体保存不完整', 503, 'STORAGE_WRITE_FAILED');
       return {
         nodeId: AVATAR_SYNC_NODE,
-        originalFileName: format.name,
+        originalFileName,
         mimeType: format.mime,
         sizeBytes: stored.sizeBytes,
         storageKey: stored.key,
@@ -330,18 +360,21 @@ export class AvatarSyncService implements OnModuleInit, OnModuleDestroy {
       const sourceAudio = await put('audio', audio, audioSha);
       const syncVideo = await put('video', video, videoSha);
       const stored = { audio: sourceAudio, video: syncVideo };
-      bound =
-        ordinal === undefined
-          ? await this.repository.complete(ids, taskId, token, proof, stored, fingerprint)
-          : await this.repository.completeSegment(
-              ids,
-              taskId,
-              token,
-              ordinal,
-              proof,
-              stored,
-              fingerprint,
-            );
+      if (ordinal === undefined) {
+        bound = await this.repository.complete(ids, taskId, token, proof, stored, fingerprint);
+      } else {
+        if ('schemaVersion' in proof)
+          throw new ApiHttpException('分段媒体校验记录无效', 422, 'VALIDATION_ERROR');
+        bound = await this.repository.completeSegment(
+          ids,
+          taskId,
+          token,
+          ordinal,
+          proof,
+          stored,
+          fingerprint,
+        );
+      }
       return { accepted: true };
     } finally {
       if (!bound) {

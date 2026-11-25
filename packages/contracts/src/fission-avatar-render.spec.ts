@@ -2,15 +2,20 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  AVATAR_NATIVE_RENDER_LIMITS as NATIVE_LIMITS,
   AVATAR_RENDER_LIMITS as LIMITS,
+  FISSION_AVATAR_NATIVE_RENDER_COMPLETION_SCHEMA,
+  FISSION_AVATAR_NATIVE_RENDER_WORKER_INPUT_SCHEMA,
   FISSION_AVATAR_RENDER_COMPLETION_SCHEMA,
   FISSION_AVATAR_RENDER_WORKER_INPUT_SCHEMA,
   avatarRenderReviewPasses,
+  isAvatarNativeRenderCompletion,
   parseAvatarCompositionConfirmRequest,
   parseAvatarCompositionDraftRequest,
   parseAvatarCompositionSettings,
   parseAvatarRenderCompletion,
   parseAvatarRenderCreateRequest,
+  parseAvatarRenderFailure,
   parseAvatarRenderReview,
   parseAvatarRenderWorkerInput,
   type AvatarCompositionSettings,
@@ -41,15 +46,34 @@ const assessment = {
   confidencePermille: LIMITS.minReviewConfidencePermille,
   maxAbsOffsetMs: LIMITS.maxReviewOffsetMs,
 };
+const nativeInput = {
+  ...input,
+  schemaVersion: 3,
+  audioDurationMs: NATIVE_LIMITS.maxDurationMs,
+  videoDurationMs: NATIVE_LIMITS.maxDurationMs,
+  sourceVideoSha256: assessment.sha256,
+};
+const nativeCompletion = {
+  schemaVersion: 3,
+  audioDurationMs: NATIVE_LIMITS.maxDurationMs,
+  videoDurationMs: NATIVE_LIMITS.maxDurationMs + NATIVE_LIMITS.durationToleranceMs,
+  sourceVideoSha256: nativeInput.sourceVideoSha256,
+  outputVideoSha256: 'b'.repeat(64),
+  videoFrameCount: 720,
+  audioPacketCount: 1396,
+  maxTimelineDriftUs: NATIVE_LIMITS.maxTimelineDriftUs,
+};
 
 describe('avatar render contracts', () => {
-  it.each([FISSION_AVATAR_RENDER_WORKER_INPUT_SCHEMA, FISSION_AVATAR_RENDER_COMPLETION_SCHEMA])(
-    'publishes the schema read by the Worker ($id)',
-    (schema) => {
-      const raw = readFileSync(resolve(__dirname, '..', 'schemas', schema.$id!), 'utf8');
-      expect(JSON.parse(raw)).toEqual(schema);
-    },
-  );
+  it.each([
+    FISSION_AVATAR_RENDER_WORKER_INPUT_SCHEMA,
+    FISSION_AVATAR_RENDER_COMPLETION_SCHEMA,
+    FISSION_AVATAR_NATIVE_RENDER_WORKER_INPUT_SCHEMA,
+    FISSION_AVATAR_NATIVE_RENDER_COMPLETION_SCHEMA,
+  ])('publishes the schema read by the Worker ($id)', (schema) => {
+    const raw = readFileSync(resolve(__dirname, '..', 'schemas', schema.$id!), 'utf8');
+    expect(JSON.parse(raw)).toEqual(schema);
+  });
 
   it('keeps edit, confirm and render inputs separate', () => {
     const draft = parseAvatarCompositionDraftRequest({ expectedRevision: 0, sync: ref, settings });
@@ -63,6 +87,27 @@ describe('avatar render contracts', () => {
       composition: ref,
     });
     expect(() => parseAvatarRenderCreateRequest({ idempotencyKey: id, settings })).toThrow();
+  });
+
+  it('accepts an explicit revisioned native source alongside a composition', () => {
+    const request = {
+      idempotencyKey: id,
+      composition: ref,
+      nativeSourceAccepted: {
+        artifactId: '22222222-2222-4222-8222-222222222222',
+        revision: 2,
+      },
+    };
+    expect(parseAvatarRenderCreateRequest(request)).toEqual(request);
+    expect(() =>
+      parseAvatarRenderCreateRequest({ ...request, nativeSourceAccepted: true }),
+    ).toThrow();
+    expect(() =>
+      parseAvatarRenderCreateRequest({
+        ...request,
+        nativeSourceAccepted: { artifactId: id },
+      }),
+    ).toThrow();
   });
 
   it.each([
@@ -112,9 +157,50 @@ describe('avatar render contracts', () => {
       minimumAudioCorrelationPermille: 980,
     };
     expect(parseAvatarRenderCompletion(completion)).toEqual(completion);
+    expect(isAvatarNativeRenderCompletion(parseAvatarRenderCompletion(completion))).toBe(false);
     expect(() => parseAvatarRenderCompletion({ ...completion, videoDurationMs: 1101 })).toThrow();
     expect(() => parseAvatarRenderCompletion({ ...completion, audioLagMs: 101 })).toThrow();
     expect(() => parseAvatarRenderCompletion({ ...completion, review: assessment })).toThrow();
+  });
+
+  it('requires the frozen source fingerprint and native clip duration for schema v3', () => {
+    expect(parseAvatarRenderWorkerInput(nativeInput)).toMatchObject({
+      schemaVersion: 3,
+      sourceVideoSha256: nativeInput.sourceVideoSha256,
+      settings: { background: { color: '#BBCCDD' } },
+    });
+    expect(() =>
+      parseAvatarRenderWorkerInput({ ...nativeInput, sourceVideoSha256: null }),
+    ).toThrow();
+    expect(() => parseAvatarRenderWorkerInput({ ...nativeInput, schemaVersion: 1 })).toThrow();
+    expect(() => parseAvatarRenderWorkerInput({ ...input, schemaVersion: 3 })).toThrow();
+    expect(() =>
+      parseAvatarRenderWorkerInput({
+        ...nativeInput,
+        audioDurationMs: NATIVE_LIMITS.minDurationMs - 1,
+      }),
+    ).toThrow();
+  });
+
+  it('accepts only bounded original audio and frame timeline evidence for schema v3', () => {
+    const parsed = parseAvatarRenderCompletion(nativeCompletion);
+    expect(parsed).toEqual(nativeCompletion);
+    expect(isAvatarNativeRenderCompletion(parsed)).toBe(true);
+    const failure = { code: 'NATIVE_TIMELINE_INVALID', retryable: false };
+    expect(parseAvatarRenderFailure(failure)).toEqual(failure);
+  });
+
+  it.each([
+    { outputVideoSha256: undefined },
+    { sourceVideoSha256: 'A'.repeat(64) },
+    { videoFrameCount: 0 },
+    { audioPacketCount: NATIVE_LIMITS.maxAudioPacketCount + 1 },
+    { maxTimelineDriftUs: NATIVE_LIMITS.maxTimelineDriftUs + 1 },
+    { videoDurationMs: NATIVE_LIMITS.maxDurationMs + NATIVE_LIMITS.durationToleranceMs + 1 },
+    { schemaVersion: 2 },
+    { review: assessment },
+  ])('rejects invalid or mixed native evidence (%j)', (member) => {
+    expect(() => parseAvatarRenderCompletion({ ...nativeCompletion, ...member })).toThrow();
   });
 
   it('checks the candidate hash and every independent review threshold', () => {

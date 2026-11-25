@@ -19,7 +19,11 @@ type RenderScope = {
   readOrdinal: number;
   pollTimer?: ReturnType<typeof setTimeout>;
   saveTimer?: ReturnType<typeof setTimeout>;
-  startAttempt?: { composition: AvatarArtifactRef; key: string };
+  startAttempt?: {
+    composition: AvatarArtifactRef;
+    nativeSourceAccepted: AvatarArtifactRef | undefined;
+    key: string;
+  };
 };
 
 export const sameAvatarRevision = (
@@ -367,19 +371,39 @@ export function createAvatarRenderWorkspace(api = avatarRenderApi) {
     });
   }
 
-  function generate() {
+  function generate(acceptedSource?: AvatarArtifactRef) {
     const confirmed = projection.value?.composition;
     if (!alreadyConfirmed.value || !confirmed || !projection.value?.canRender || active.value)
       return Promise.resolve(false);
+    const source = projection.value.source;
+    let nativeSourceAccepted: AvatarArtifactRef | undefined;
+    if (source?.mode === 'NATIVE') {
+      if (!sameAvatarRevision(source, acceptedSource)) return Promise.resolve(false);
+      nativeSourceAccepted = { artifactId: source.artifactId, revision: source.revision };
+    } else if (acceptedSource) {
+      return Promise.resolve(false);
+    }
     const composition = { artifactId: confirmed.artifactId, revision: confirmed.revision };
     return runAction(async (current) => {
-      if (!sameAvatarRevision(current.startAttempt?.composition, composition))
-        current.startAttempt = { composition, key: crypto.randomUUID() };
-      if (!current.startAttempt) return false;
+      let attempt = current.startAttempt;
+      const previousAcceptance = attempt?.nativeSourceAccepted;
+      if (
+        !attempt ||
+        !sameAvatarRevision(attempt.composition, composition) ||
+        ((previousAcceptance || nativeSourceAccepted) &&
+          !sameAvatarRevision(previousAcceptance, nativeSourceAccepted))
+      ) {
+        attempt = { composition, nativeSourceAccepted, key: crypto.randomUUID() };
+        current.startAttempt = attempt;
+      }
       const { data } = await api.create(
         current.projectId,
         current.runId,
-        { composition, idempotencyKey: current.startAttempt.key },
+        {
+          composition,
+          idempotencyKey: attempt.key,
+          ...(nativeSourceAccepted ? { nativeSourceAccepted } : {}),
+        },
         current.controller.signal,
       );
       if (scope !== current) return false;

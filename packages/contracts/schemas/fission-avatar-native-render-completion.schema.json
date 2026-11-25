@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-native-render-completion.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "audioDurationMs": {
+      "type": "integer",
+      "minimum": 3898,
+      "maximum": 30002
+    },
+    "videoDurationMs": {
+      "type": "integer",
+      "minimum": 3898,
+      "maximum": 30002
+    },
+    "sourceVideoSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "outputVideoSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "videoFrameCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1810
+    },
+    "audioPacketCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 6144
+    },
+    "maxTimelineDriftUs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2000
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "audioDurationMs",
+    "videoDurationMs",
+    "sourceVideoSha256",
+    "outputVideoSha256",
+    "videoFrameCount",
+    "audioPacketCount",
+    "maxTimelineDriftUs"
+  ],
+  "additionalProperties": false
+}

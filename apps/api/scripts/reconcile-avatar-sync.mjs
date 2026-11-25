@@ -5,9 +5,9 @@ const uuid = /^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i
 const providerTask = /^amk-tool-lip-sync-[A-Za-z0-9_-]{1,120}$/;
 const pictureTask = /^cgt-[A-Za-z0-9_-]{1,120}$/;
 const usage =
-  '用法：node scripts/reconcile-avatar-sync.mjs --project UUID --run UUID --task UUID [--ordinal 段序] [--picture] --client-token UUID --provider-task ID --confirm-provider-match';
+  '用法：node scripts/reconcile-avatar-sync.mjs --project UUID --run UUID --task UUID [--ordinal 段序] [--picture | --native] --client-token UUID --provider-task ID --confirm-provider-match';
 
-async function reconcile(client, ids, acceptedId, ordinal, picture) {
+async function reconcile(client, ids, acceptedId, ordinal, picture, native) {
   await client.query('BEGIN');
   await client.query("SET LOCAL TIME ZONE 'UTC'");
   const project = await client.query(
@@ -18,6 +18,8 @@ async function reconcile(client, ids, acceptedId, ordinal, picture) {
   const segmented = ordinal !== undefined;
   const startedColumn = picture ? 'pictureStarted' : 'lipSyncStarted';
   const taskColumn = picture ? 'pictureTaskId' : 'lipSyncTaskId';
+  const singleStartedColumn = native ? 'nativeStarted' : 'lipSyncStarted';
+  const singleTaskColumn = native ? 'nativeTaskId' : 'lipSyncTaskId';
   const result = segmented
     ? await client.query(
         `SELECT t."status", t."errorCode", s."${startedColumn}" AS "started", s."${taskColumn}" AS "providerTaskId"
@@ -33,15 +35,15 @@ async function reconcile(client, ids, acceptedId, ordinal, picture) {
         [...ids, ordinal, ...(picture ? [acceptedId] : [])],
       )
     : await client.query(
-        `SELECT t."status", t."errorCode", t."lipSyncStarted" AS "started", t."lipSyncTaskId" AS "providerTaskId"
+        `SELECT t."status", t."errorCode", t."${singleStartedColumn}" AS "started", t."${singleTaskColumn}" AS "providerTaskId"
      FROM "fission_avatar_sync_tasks" t
      JOIN "workflow_runs" r ON r."projectId" = t."projectId" AND r."id" = t."workflowRunId"
      WHERE t."projectId" = $1::uuid AND t."workflowRunId" = $2::uuid
-       AND t."id" = $3::uuid AND t."lipSyncClientToken" = $4::uuid AND t."executionKind" = 'SHORT'
+       AND t."id" = $3::uuid AND t."lipSyncClientToken" = $4::uuid AND t."executionKind" = $5
        AND r."workflow" = 'FISSION' AND r."workflowSpace" = 'FISSION_AVATAR'
        AND r."activeKey" = 'ACTIVE' AND r."status" IN ('ACTIVE', 'PAUSED')
      FOR UPDATE OF t`,
-        ids,
+        [...ids, native ? 'NATIVE' : 'SHORT'],
       );
   const task = result.rows[0];
   if (!task) return null;
@@ -56,9 +58,12 @@ async function reconcile(client, ids, acceptedId, ordinal, picture) {
     task.providerTaskId !== null
   )
     return null;
+  const arkReceipt = picture || native;
+  if (arkReceipt)
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [acceptedId]);
   const assigned = await client.query(
-    `SELECT 1 FROM "fission_avatar_sync_segments" WHERE "${taskColumn}" = $1
-     ${picture ? '' : 'UNION ALL SELECT 1 FROM "fission_avatar_sync_tasks" WHERE "lipSyncTaskId" = $1'}`,
+    `SELECT 1 FROM "fission_avatar_sync_segments" WHERE "${arkReceipt ? 'pictureTaskId' : 'lipSyncTaskId'}" = $1
+     UNION ALL SELECT 1 FROM "fission_avatar_sync_tasks" WHERE "${arkReceipt ? 'nativeTaskId' : 'lipSyncTaskId'}" = $1`,
     [acceptedId],
   );
   if (assigned.rowCount)
@@ -79,8 +84,8 @@ async function reconcile(client, ids, acceptedId, ordinal, picture) {
   } else
     await client.query(
       `UPDATE "fission_avatar_sync_tasks"
-     SET "lipSyncTaskId" = $5, "errorCode" = 'INTERNAL_API_FAILED',
-         "retryable" = true, "updatedAt" = clock_timestamp()
+     SET "${singleTaskColumn}" = $5, "errorCode" = 'INTERNAL_API_FAILED',
+         "retryable" = ("attemptCount" < 3), "updatedAt" = clock_timestamp()
      WHERE "projectId" = $1::uuid AND "workflowRunId" = $2::uuid
        AND "id" = $3::uuid AND "lipSyncClientToken" = $4::uuid`,
       [...ids, acceptedId],
@@ -100,16 +105,19 @@ async function main() {
       'provider-task': { type: 'string' },
       'confirm-provider-match': { type: 'boolean' },
       picture: { type: 'boolean' },
+      native: { type: 'boolean' },
     },
   });
   const ids = [values.project, values.run, values.task, values['client-token']];
   const acceptedId = values['provider-task'];
   const ordinal = values.ordinal !== undefined ? Number(values.ordinal) : undefined;
   const picture = values.picture === true;
+  const native = values.native === true;
   if (
     !ids.every((value) => uuid.test(value ?? '')) ||
-    !(picture ? pictureTask : providerTask).test(acceptedId ?? '') ||
+    !(picture || native ? pictureTask : providerTask).test(acceptedId ?? '') ||
     (picture && ordinal === undefined) ||
+    (native && (picture || ordinal !== undefined)) ||
     (values.ordinal !== undefined && !/^(?:[1-9]|1[0-2])$/.test(values.ordinal)) ||
     !values['confirm-provider-match']
   ) {
@@ -125,7 +133,7 @@ async function main() {
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
   try {
     await client.connect();
-    const message = await reconcile(client, ids, acceptedId, ordinal, picture);
+    const message = await reconcile(client, ids, acceptedId, ordinal, picture, native);
     if (message) {
       console.log(message);
       return;

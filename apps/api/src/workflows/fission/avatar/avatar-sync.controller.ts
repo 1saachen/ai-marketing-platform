@@ -28,6 +28,7 @@ import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import {
   AVATAR_LONG_LIMITS,
   AVATAR_SYNC_LIMITS,
+  parseAvatarNativeCheckpoint,
   parseAvatarSyncCheckpoint,
   parseAvatarSyncFailure,
   parseAvatarSyncHeartbeat,
@@ -107,6 +108,7 @@ export class AvatarSyncController {
     @Param('artifactId', uuid()) artifactId: string,
     @Param('role') role: string,
     @Query('revision', new ParseIntPipe({ optional: true })) revision: number | undefined,
+    @Query('download') download: string | undefined,
     @Headers('range') range: string | undefined,
     @Res() response: ServerResponse,
   ) {
@@ -131,7 +133,10 @@ export class AvatarSyncController {
     response.setHeader('content-length', String(content.contentLength));
     response.setHeader(
       'content-disposition',
-      fileContentDisposition('inline', content.originalFileName),
+      fileContentDisposition(
+        download === '1' && content.native && role === 'video' ? 'attachment' : 'inline',
+        content.originalFileName,
+      ),
     );
     response.setHeader('accept-ranges', 'bytes');
     response.setHeader('x-content-type-options', 'nosniff');
@@ -245,10 +250,48 @@ export class AvatarSyncWorkerController {
     @Res() response: ServerResponse,
   ) {
     const file = await this.service.source({ projectId, workflowRunId }, taskId, token);
-    response.setHeader('content-type', 'video/mp4');
+    response.setHeader('content-type', file.mimeType);
     response.setHeader('content-length', file.contentLength);
     response.setHeader('cache-control', 'private, no-store');
     await pipeline(file.stream, response);
+  }
+
+  @Get('files/reference-audio')
+  @RawResponse()
+  async referenceAudio(
+    @Param('projectId', uuid()) projectId: string,
+    @Param('runId', uuid()) workflowRunId: string,
+    @Param('taskId', uuid()) taskId: string,
+    @Headers('x-attempt-token') token: string,
+    @Res() response: ServerResponse,
+  ) {
+    const file = await this.service.source(
+      { projectId, workflowRunId },
+      taskId,
+      token,
+      'reference-audio',
+    );
+    response.setHeader('content-type', file.mimeType);
+    response.setHeader('content-length', file.contentLength);
+    response.setHeader('cache-control', 'private, no-store');
+    await pipeline(file.stream, response);
+  }
+
+  @Post('native/checkpoint')
+  @HttpCode(200)
+  nativeCheckpoint(
+    @Param('projectId', uuid()) projectId: string,
+    @Param('runId', uuid()) workflowRunId: string,
+    @Param('taskId', uuid()) taskId: string,
+    @Headers('x-attempt-token') token: string,
+    @Body() body: unknown,
+  ) {
+    return this.repository.nativeCheckpoint(
+      { projectId, workflowRunId },
+      taskId,
+      token,
+      avatarSyncBody(parseAvatarNativeCheckpoint, body),
+    );
   }
 
   @Put('result')

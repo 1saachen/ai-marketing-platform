@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-native-checkpoint.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "NATIVE_STARTED"
+        }
+      },
+      "required": ["kind"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "NATIVE_ACCEPTED"
+        },
+        "providerTaskId": {
+          "type": "string",
+          "pattern": "^cgt-[A-Za-z0-9_-]{1,120}$"
+        }
+      },
+      "required": ["kind", "providerTaskId"],
+      "additionalProperties": false
+    }
+  ]
+}

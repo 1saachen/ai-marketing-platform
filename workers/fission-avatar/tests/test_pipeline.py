@@ -218,9 +218,17 @@ async def test_rejects_invalid_claim_snapshot(media_tools: None) -> None:
     assert api.failure == {"code": "INVALID_TASK", "retryable": False}
 
 
-@pytest.mark.parametrize("checkpoint_route", ["checkpoint", "segments/2/checkpoint"])
+@pytest.mark.parametrize(
+    "checkpoint_route,kind",
+    [
+        ("checkpoint", "TTS_SUBMIT"),
+        ("segments/2/checkpoint", "TTS_SUBMIT"),
+        ("native/checkpoint", "NATIVE_STARTED"),
+    ],
+)
 async def test_reservation_transport_failure_is_not_retried(
     checkpoint_route: str,
+    kind: str,
 ) -> None:
     from uuid import UUID
 
@@ -249,7 +257,7 @@ async def test_reservation_transport_failure_is_not_retried(
     api.token = ATTEMPT
     try:
         with pytest.raises(InternalApiError, match="unavailable"):
-            await api.call("POST", checkpoint_route, {"kind": "TTS_SUBMIT"})
+            await api.call("POST", checkpoint_route, {"kind": kind})
     finally:
         await api.close()
     assert count == 1

@@ -1,3 +1,4 @@
+import type { AvatarNativeCompletion } from './fission-avatar-native';
 import { CLONE_UUID_PATTERN } from './fission-clone';
 import {
   array,
@@ -55,7 +56,8 @@ export type AvatarLongSyncCompletion = AvatarSyncCompletion & {
   schemaVersion: 2;
   seamTimesMs: number[];
 };
-export type AvatarSyncMedia = AvatarSyncCompletion | AvatarLongSyncCompletion;
+export type AvatarSyncMedia =
+  AvatarSyncCompletion | AvatarLongSyncCompletion | AvatarNativeCompletion;
 export type AvatarSpeechSegment = {
   ordinal: number;
   sourceStart: number;

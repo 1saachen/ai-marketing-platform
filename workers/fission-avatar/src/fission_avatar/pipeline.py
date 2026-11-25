@@ -65,11 +65,13 @@ class ProviderPort(Protocol):
     ) -> None: ...
 
 
-@lru_cache(maxsize=12)
+@lru_cache(maxsize=15)
 def validator(
     name: Schema,
     *,
-    step: Literal["sync", "render", "long-sync", "long-render", "tail-chain"] = "sync",
+    step: Literal[
+        "sync", "render", "long-sync", "long-render", "tail-chain", "native", "native-render"
+    ] = "sync",
 ) -> Draft202012Validator:
     configured = os.getenv("FISSION_AVATAR_CONTRACTS_DIR")
     directory = (

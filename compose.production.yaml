@@ -626,6 +626,36 @@ services:
       options:
         max-size: 10m
         max-file: '3'
+  fission-avatar-native-worker:
+    profiles: ['fission-avatar-native']
+    image: richi-marketing-fission-avatar-native-worker:${RELEASE_TAG:-current}
+    build:
+      context: .
+      dockerfile: workers/fission-avatar/Dockerfile
+    environment:
+      INTERNAL_API_BASE_URL: http://api:3000/api
+      FISSION_AVATAR_WORKER_MODE: native-sync
+      FISSION_AVATAR_SYNC_WORKER_TOKEN: ${FISSION_AVATAR_SYNC_WORKER_TOKEN:-}
+      FISSION_AVATAR_NATIVE_TIMEOUT_SECONDS: ${FISSION_AVATAR_NATIVE_TIMEOUT_SECONDS:-900}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      RABBITMQ_URL: ${RABBITMQ_URL:?required}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=384m,mode=1777
+    cpus: '1.0'
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   fission-avatar-render-worker:
     profiles: ['fission-avatar-render']
     image: richi-marketing-fission-avatar-render-worker:${RELEASE_TAG:-current}

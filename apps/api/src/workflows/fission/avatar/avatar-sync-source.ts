@@ -1,4 +1,7 @@
 import {
+  AVATAR_NATIVE_LIMITS,
+  AVATAR_NATIVE_MODEL,
+  AVATAR_NATIVE_PORTRAIT_ID_PATTERN,
   AVATAR_SYNC_LIMITS,
   AVATAR_SYNC_PRESET_SPEAKER_PATTERN,
   AVATAR_TAIL_CHAIN_MODEL,
@@ -9,35 +12,59 @@ import {
   type AvatarArtifactRef,
   type AvatarAssetRef,
   type AvatarBindingContent,
+  type AvatarNativeWorkerInput,
   type AvatarScriptContent,
   parseAvatarDraft,
 } from '@ai-marketing/contracts';
 import type { Prisma } from '../../../generated/prisma/client';
-import { findCurrentAvatarGrant } from '../../../platform/workflow/fission-avatar-scope';
+import {
+  findCurrentAvatarGrant,
+  isAvatarNativeVoiceReference,
+  nativeVoiceReferenceMimeType,
+} from '../../../platform/workflow/fission-avatar-scope';
 import { sameAvatarAssetRef } from './avatar.repository';
 
 export type AvatarSyncScope = { projectId: string; workflowRunId: string };
 type ArtifactOrigin = AvatarArtifactRef & { contentHash: string };
 type AuthorizedAsset = AvatarAssetRef & { authorizationId: string; versionId: string };
 type CharacterOrigin = AuthorizedAsset & { sizeBytes: number; storageKey: string };
+type NativeReferenceAudio = NonNullable<AvatarNativeWorkerInput['referenceAudio']> & {
+  storageKey: string;
+};
+type NativeReferenceSelection =
+  | { nativeVoice?: undefined; referenceAudio?: undefined }
+  | { nativeVoice: AuthorizedAsset; referenceAudio: NativeReferenceAudio };
 type TailChainSource = { sourceTaskId: string; model: typeof AVATAR_TAIL_CHAIN_MODEL };
-export type AvatarSyncSources = {
+type BaseSources = {
   binding: ArtifactOrigin;
   script: ArtifactOrigin;
   character: CharacterOrigin;
-  voice: AuthorizedAsset;
   scriptText: string;
+};
+export type LegacyAvatarSyncSources = BaseSources & {
+  voice: AuthorizedAsset;
   voiceSpeaker: string;
   tailChain?: TailChainSource;
+  mode?: undefined;
 };
+export type NativeAvatarSyncSources = BaseSources & {
+  voice: null;
+  mode: 'NATIVE';
+  tailChain?: undefined;
+  native: Pick<AvatarNativeWorkerInput, 'model' | 'durationSeconds' | 'image'>;
+} & NativeReferenceSelection;
+export type AvatarSyncSources = LegacyAvatarSyncSources | NativeAvatarSyncSources;
 
-export type AvatarSyncOrigin = Pick<AvatarSyncSources, 'binding' | 'script' | 'voice'> & {
+export type AvatarSyncOrigin = Pick<BaseSources, 'binding' | 'script'> & {
   character: AuthorizedAsset;
-  tailChain?: TailChainSource;
-};
+} & (
+    | { voice: AuthorizedAsset; mode?: undefined; tailChain?: TailChainSource }
+    | { voice: null; mode: 'NATIVE'; tailChain?: undefined; nativeVoice?: AuthorizedAsset }
+  );
 
 const presetSpeaker = new RegExp(AVATAR_SYNC_PRESET_SPEAKER_PATTERN);
 const seedanceTaskId = new RegExp(AVATAR_TAIL_CHAIN_TASK_ID_PATTERN);
+const seedancePortraitId = new RegExp(AVATAR_NATIVE_PORTRAIT_ID_PATTERN);
 
 export function sameAvatarArtifactRef(left: AvatarArtifactRef | null, right: AvatarArtifactRef) {
   return left?.artifactId === right.artifactId && left?.revision === right.revision;
@@ -101,6 +128,92 @@ export async function readAvatarSyncSelection(tx: Prisma.TransactionClient, ids:
   };
 }
 
+export async function prepareAvatarNativeSources(
+  tx: Prisma.TransactionClient,
+  ids: AvatarSyncScope,
+  selection: Awaited<ReturnType<typeof readAvatarSyncSelection>>,
+  durationSeconds: number = AVATAR_NATIVE_LIMITS.maxDurationSeconds,
+): Promise<
+  { source: NativeAvatarSyncSources; blockedReason: null } | { source: null; blockedReason: string }
+> {
+  const { draft, binding, script, bindingContent, scriptContent } = selection;
+  if (
+    !draft ||
+    !binding ||
+    !bindingContent ||
+    !sameAvatarAssetRef(draft.character, bindingContent.character)
+  )
+    return { source: null, blockedReason: '请先确认已授权的图片形象' };
+  if (!script || !scriptContent || draft.scriptText !== scriptContent.text)
+    return { source: null, blockedReason: '请先确认当前生成提示词' };
+  if (Array.from(scriptContent.text).length > AVATAR_NATIVE_LIMITS.maxPromptCharacters)
+    return {
+      source: null,
+      blockedReason: `生成提示词最多 ${AVATAR_NATIVE_LIMITS.maxPromptCharacters} 字`,
+    };
+
+  const [character, voiceReference] = await Promise.all([
+    findCurrentAvatarGrant(tx, ids.projectId, bindingContent.character),
+    draft.nativeVoice ? findCurrentAvatarGrant(tx, ids.projectId, draft.nativeVoice) : null,
+  ]);
+  if (
+    !character ||
+    character.id !== bindingContent.authorizationId ||
+    !['AVATAR_REFERENCE', 'DIGITAL_HUMAN_CHARACTER'].includes(character.version.asset.type) ||
+    !character.version.asset.hasFile ||
+    !character.version.storageKey
+  )
+    return { source: null, blockedReason: '请使用当前项目的已授权图片形象' };
+
+  const { mimeType, sizeBytes, storageKey } = character.version;
+  if (
+    (mimeType !== 'image/png' && mimeType !== 'image/jpeg') ||
+    sizeBytes < 1 ||
+    sizeBytes > AVATAR_NATIVE_LIMITS.maxImageBytes
+  )
+    return { source: null, blockedReason: '原生生成支持 8 MiB 以内的 JPEG 或 PNG 形象' };
+  const portraitId = character.seedancePortraitAssetId;
+  if (portraitId && !seedancePortraitId.test(portraitId))
+    return { source: null, blockedReason: '所选形象的方舟肖像登记无效' };
+
+  let reference: NativeReferenceSelection = {};
+  if (draft.nativeVoice) {
+    const voiceMime =
+      voiceReference && nativeVoiceReferenceMimeType(voiceReference.version.mimeType);
+    if (!voiceReference || !voiceMime || !isAvatarNativeVoiceReference(voiceReference))
+      return { source: null, blockedReason: '请选择当前项目中已授权用于 Seedance 的参考音色' };
+    reference = {
+      nativeVoice: assetOrigin(voiceReference),
+      referenceAudio: {
+        mimeType: voiceMime,
+        sizeBytes: voiceReference.version.sizeBytes,
+        storageKey: voiceReference.version.storageKey,
+        sha256: null,
+      },
+    };
+  }
+
+  return {
+    source: {
+      binding,
+      script,
+      character: { ...assetOrigin(character), sizeBytes, storageKey },
+      scriptText: scriptContent.text,
+      mode: 'NATIVE',
+      voice: null,
+      ...reference,
+      native: {
+        model: AVATAR_NATIVE_MODEL,
+        durationSeconds,
+        image: portraitId
+          ? { kind: 'PORTRAIT', assetId: portraitId }
+          : { kind: 'BYTES', mimeType, sizeBytes, sha256: null },
+      },
+    },
+    blockedReason: null,
+  };
+}
+
 export async function prepareAvatarSyncSources(
   tx: Prisma.TransactionClient,
   ids: AvatarSyncScope,
@@ -108,7 +221,7 @@ export async function prepareAvatarSyncSources(
   maxScriptCharacters: number = AVATAR_SYNC_LIMITS.maxScriptCharacters,
   continuity = false,
 ): Promise<
-  { source: AvatarSyncSources; blockedReason: null } | { source: null; blockedReason: string }
+  { source: LegacyAvatarSyncSources; blockedReason: null } | { source: null; blockedReason: string }
 > {
   const { draft, binding, script, bindingContent, scriptContent } = selection;
   if (
@@ -173,12 +286,32 @@ export async function prepareAvatarSyncSources(
 export async function avatarSyncGrantsValid(
   tx: Prisma.TransactionClient,
   projectId: string,
-  frozen: AvatarSyncOrigin,
+  frozen: AvatarSyncOrigin | AvatarSyncSources,
 ) {
   const character = await findCurrentAvatarGrant(tx, projectId, frozen.character);
+  if (!isMatchingGrant(character, frozen.character)) return false;
+  if (frozen.mode === 'NATIVE') {
+    if (frozen.voice !== null) return false;
+    const hasSnapshot = 'native' in frozen;
+    if (!frozen.nativeVoice) return !hasSnapshot || !frozen.referenceAudio;
+    const reference = await findCurrentAvatarGrant(tx, projectId, frozen.nativeVoice);
+    if (
+      !reference ||
+      !isMatchingGrant(reference, frozen.nativeVoice) ||
+      !isAvatarNativeVoiceReference(reference)
+    )
+      return false;
+    if (!hasSnapshot) return true;
+    const file = frozen.referenceAudio;
+    return (
+      !!file &&
+      file.storageKey === reference.version.storageKey &&
+      file.sizeBytes === reference.version.sizeBytes &&
+      file.mimeType === nativeVoiceReferenceMimeType(reference.version.mimeType)
+    );
+  }
   const voice = await findCurrentAvatarGrant(tx, projectId, frozen.voice);
   return (
-    isMatchingGrant(character, frozen.character) &&
     isMatchingGrant(voice, frozen.voice) &&
     (!frozen.tailChain || character?.seedanceSourceTaskId === frozen.tailChain.sourceTaskId)
   );
@@ -187,7 +320,7 @@ export async function avatarSyncGrantsValid(
 export async function isAvatarSyncCurrent(
   tx: Prisma.TransactionClient,
   ids: AvatarSyncScope,
-  frozen: AvatarSyncOrigin,
+  frozen: AvatarSyncOrigin | AvatarSyncSources,
   selection?: Awaited<ReturnType<typeof readAvatarSyncSelection>>,
 ) {
   const latest = selection ?? (await readAvatarSyncSelection(tx, ids));
@@ -196,7 +329,9 @@ export async function isAvatarSyncCurrent(
     sameAvatarArtifactRef(latest.script, frozen.script) &&
     latest.binding?.contentHash === frozen.binding.contentHash &&
     latest.script?.contentHash === frozen.script.contentHash &&
-    sameAvatarAssetRef(latest.draft?.voice ?? null, frozen.voice) &&
+    (frozen.mode === 'NATIVE'
+      ? sameAvatarAssetRef(latest.draft?.nativeVoice ?? null, frozen.nativeVoice ?? null)
+      : sameAvatarAssetRef(latest.draft?.voice ?? null, frozen.voice)) &&
     (await avatarSyncGrantsValid(tx, ids.projectId, frozen))
   );
 }

@@ -22,8 +22,10 @@ import {
   AVATAR_CHARACTER_TYPES,
   currentAvatarGrantWhere,
   findCurrentAvatarGrant,
+  isAvatarNativeVoiceReference,
   lockAvatarProject,
   lockAvatarRun,
+  nativeVoiceReferenceMimeType,
 } from '../../../platform/workflow/fission-avatar-scope';
 import { WorkflowWorkingRepository } from '../../../platform/workflow/workflow-working.repository';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
@@ -38,7 +40,8 @@ function previewKind(grant: Grant): AvatarWorkspaceAsset['previewKind'] {
   const { version } = grant;
   if (!version.asset.hasFile || !version.storageKey || version.sizeBytes <= 0) return null;
   if (version.asset.type === 'VOICE_PROFILE')
-    return ['audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/ogg'].includes(version.mimeType)
+    return nativeVoiceReferenceMimeType(version.mimeType) ||
+      ['audio/mp4', 'audio/ogg'].includes(version.mimeType)
       ? 'AUDIO'
       : null;
   if (version.mimeType === 'video/mp4') return 'VIDEO';
@@ -74,6 +77,7 @@ function presentAsset(ids: Scope, grant: Grant): AvatarWorkspaceAsset {
     previewUrl: kind
       ? `/api/projects/${ids.projectId}/workflow-runs/${ids.workflowRunId}/fission-avatar/assets/${grant.assetId}/versions/${grant.assetVersion}/content`
       : null,
+    ...(isAvatarNativeVoiceReference(grant) ? { nativeReferenceAvailable: true } : {}),
   };
 }
 
@@ -212,11 +216,21 @@ export class AvatarRepository {
     return this.db.$transaction(async (tx) => {
       const draft = await this.editableDraft(tx, ids, request.expectedRevision);
       const previous = parseAvatarDraft(draft.state);
-      const next = request.draft;
+      const { nativeVoice = previous.nativeVoice, ...common } = request.draft;
+      const next = nativeVoice ? { ...common, nativeVoice } : common;
       for (const kind of ['character', 'voice'] as const) {
         const asset = next[kind];
         if (asset && !sameAvatarAssetRef(asset, previous[kind]))
           await this.grant(tx, ids.projectId, asset, kind);
+      }
+      if (nativeVoice && !sameAvatarAssetRef(nativeVoice, previous.nativeVoice ?? null)) {
+        const grant = await this.grant(tx, ids.projectId, nativeVoice, 'voice');
+        if (!isAvatarNativeVoiceReference(grant))
+          throw new ApiHttpException(
+            '音色版本缺少方舟参考授权或格式不支持',
+            422,
+            'VALIDATION_ERROR',
+          );
       }
       const contentHash = workflowStateHash(next);
       if (contentHash !== draft.contentHash) {

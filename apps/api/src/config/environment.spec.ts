@@ -49,6 +49,7 @@ describe('validateEnvironment', () => {
     expect(validateEnvironment(validEnvironment).FISSION_AVATAR_SYNC_ENABLED).toBe(false);
     expect(validateEnvironment(validEnvironment).FISSION_AVATAR_RENDER_ENABLED).toBe(false);
     expect(validateEnvironment(validEnvironment).FISSION_AVATAR_CONTINUITY_ENABLED).toBe(false);
+    expect(validateEnvironment(validEnvironment).FISSION_AVATAR_NATIVE_ENABLED).toBe(false);
     expect(
       validateEnvironment({
         ...validEnvironment,

@@ -841,6 +841,8 @@ model FissionAvatarSyncTask {
   lipSyncClientToken  String      @unique(map: "avatar_sync_lip_operation_key") @db.Uuid
   lipSyncStarted      Boolean     @default(false)
   lipSyncTaskId       String?     @unique(map: "avatar_sync_provider_task_key") @db.VarChar(160)
+  nativeStarted       Boolean     @default(false)
+  nativeTaskId        String?     @unique(map: "avatar_sync_native_provider_key") @db.VarChar(160)
   errorCode           String?     @db.VarChar(48)
   retryable           Boolean     @default(false)
   resultFingerprint   String?     @db.Char(64)
@@ -919,6 +921,8 @@ model FissionAvatarAssetGrant {
   evidenceReference    String       @db.VarChar(240)
   doubaoSpeaker        String?      @db.VarChar(120)
   seedanceSourceTaskId  String?      @db.VarChar(160)
+  seedancePortraitAssetId String?    @db.VarChar(160)
+  seedanceVoiceReference Boolean     @default(false)
   grantedAt            DateTime     @default(now())
   expiresAt            DateTime?
   revokedAt            DateTime?

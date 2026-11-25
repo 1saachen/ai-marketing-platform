@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AvatarSyncTask, AvatarSyncWorkspace } from '@ai-marketing/contracts';
 import type { avatarSyncApi } from './avatar.api';
-import { avatarSegmentProgress, createAvatarSyncWorkspace } from './avatar-sync-workspace';
+import {
+  avatarSegmentProgress,
+  avatarSyncMode,
+  createAvatarSyncWorkspace,
+} from './avatar-sync-workspace';
 
 const reply = (data: AvatarSyncWorkspace) => ({ success: true, data });
 
@@ -58,6 +62,56 @@ const inputs = {
   binding: { artifactId: 'binding', revision: 1 },
   script: { artifactId: 'script', revision: 3 },
 };
+
+describe('native avatar generation', () => {
+  const native = { enabled: true, canGenerate: true, blockedReason: null };
+
+  it('defaults new sessions to native and restores the current task mode', () => {
+    const available = { ...projection(), native };
+    expect(avatarSyncMode(available, null)).toBe('NATIVE');
+    expect(avatarSyncMode(available, 'SHORT')).toBe('SHORT');
+    expect(avatarSyncMode({ ...available, task: task('RUNNING') }, 'NATIVE')).toBe('SHORT');
+    expect(
+      avatarSyncMode({ ...available, task: { ...task('SUCCEEDED'), mode: 'NATIVE' } }, null),
+    ).toBe('NATIVE');
+  });
+
+  it('sends the confirmed inputs and duration with native capability alone', async () => {
+    const api = fakeApi();
+    api.read.mockResolvedValue(
+      reply({ ...projection(), enabled: false, canGenerate: false, native }),
+    );
+    const state = createAvatarSyncWorkspace(api);
+    state.setScope('project', 'run');
+    expect(
+      await state.generate(async () => ({ ...inputs, mode: 'NATIVE', durationSeconds: 30 })),
+    ).toBe(true);
+    expect(api.create.mock.calls[0]?.[2]).toMatchObject({
+      ...inputs,
+      mode: 'NATIVE',
+      durationSeconds: 30,
+    });
+    state.dispose();
+  });
+
+  it('honors a revoked native source before submitting even when short generation is available', async () => {
+    const api = fakeApi();
+    api.read.mockResolvedValue(
+      reply({
+        ...projection(),
+        native: { ...native, canGenerate: false, blockedReason: '形象图片授权已失效' },
+      }),
+    );
+    const state = createAvatarSyncWorkspace(api);
+    state.setScope('project', 'run');
+    expect(
+      await state.generate(async () => ({ ...inputs, mode: 'NATIVE', durationSeconds: 4 })),
+    ).toBe(false);
+    expect(api.create).not.toHaveBeenCalled();
+    expect(state.error.value).toBe('形象图片授权已失效');
+    state.dispose();
+  });
+});
 
 describe('segmented avatar synchronization', () => {
   it('projects server segment progress, failures and completion without selecting a new task', () => {

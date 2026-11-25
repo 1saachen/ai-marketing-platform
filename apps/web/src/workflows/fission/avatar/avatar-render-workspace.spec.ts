@@ -135,6 +135,30 @@ describe('avatar render workspace', () => {
     state.dispose();
   });
 
+  it('submits native render only with exact source acceptance and reuses its idempotency key', async () => {
+    const { api, set } = fakeApi();
+    const state = createAvatarRenderWorkspace(api);
+    const accepted = { artifactId: currentSource.artifactId, revision: currentSource.revision };
+    set({
+      ...projection(),
+      source: { ...currentSource, mode: 'NATIVE', captions: [] },
+    });
+    state.setScope('project', 'run');
+    await Promise.resolve();
+    expect(await state.confirm()).toBe(true);
+    expect(await state.generate()).toBe(false);
+    expect(await state.generate({ ...accepted, revision: 2 })).toBe(false);
+    expect(api.create).not.toHaveBeenCalled();
+
+    api.create.mockRejectedValueOnce(new Error('response unavailable'));
+    expect(await state.generate(accepted)).toBe(false);
+    expect(await state.generate(accepted)).toBe(true);
+    const request = api.create.mock.calls[0]?.[2];
+    expect(request?.nativeSourceAccepted).toEqual(accepted);
+    expect(api.create.mock.calls[1]?.[2]).toEqual(request);
+    state.dispose();
+  });
+
   it('keeps old caption edits bound to their exact source until current timing is applied', async () => {
     const { api, set } = fakeApi();
     const state = createAvatarRenderWorkspace(api);

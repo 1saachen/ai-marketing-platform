@@ -5,6 +5,8 @@ import { promisify } from 'node:util';
 import { ConfigService } from '@nestjs/config';
 import {
   AVATAR_LONG_SYNC_QUEUE,
+  AVATAR_NATIVE_MODEL,
+  AVATAR_NATIVE_SYNC_QUEUE,
   AVATAR_OUTPUT_NODE,
   AVATAR_RENDER_QUEUE,
   AVATAR_SYNC_NODE,
@@ -81,11 +83,12 @@ describe.skipIf(!enabled)('Avatar isolated database', () => {
     projectId: string,
     type: typeof characterType | typeof voiceType,
     workflowSpace: 'FISSION_AVATAR' | 'FISSION_CLONE' = 'FISSION_AVATAR',
+    image = false,
   ) {
     const isVoice = type === voiceType;
     const file = {
-      originalFileName: isVoice ? 'fixture.wav' : 'fixture.mp4',
-      mimeType: isVoice ? 'audio/wav' : 'video/mp4',
+      originalFileName: isVoice ? 'fixture.wav' : image ? 'fixture.png' : 'fixture.mp4',
+      mimeType: isVoice ? 'audio/wav' : image ? 'image/png' : 'video/mp4',
       sizeBytes: 512,
       storageKey: `avatar-test-fixtures/${randomUUID()}`,
     };
@@ -379,6 +382,268 @@ describe.skipIf(!enabled)('Avatar isolated database', () => {
       },
     };
   }
+
+  it('generates a scoped native result without a voice, reconciling the original Ark receipt', async () => {
+    const { ids, initial } = await setup();
+    const character = await asset(ids.projectId, characterType, 'FISSION_AVATAR', true);
+    const characterGrant = await grant(ids.projectId, character);
+    const draft = await repository.saveDraft(ids, {
+      expectedRevision: initial.draft.revision,
+      draft: { ...emptyAvatarDraft(), character, scriptText: '固定机位，人物说：“你好。”' },
+    });
+    await repository.confirmBinding(ids, draft.draft.revision);
+    const confirmed = await repository.confirmScript(ids, draft.draft.revision);
+    const request = {
+      mode: 'NATIVE' as const,
+      durationSeconds: 30,
+      binding: confirmed.binding!,
+      script: confirmed.script!,
+      expectedDraftRevision: confirmed.draft.revision,
+      idempotencyKey: randomUUID(),
+    };
+    await expect(sync.create(ids, request)).rejects.toThrow('暂未启用');
+    expect(await sync.workspace(ids, false, false, false, true)).toMatchObject({
+      enabled: false,
+      native: { enabled: true, canGenerate: true },
+    });
+    const options = [false, false, false, true] as const;
+    const id = (await sync.create(ids, request, ...options)).task!.id;
+    expect((await sync.create(ids, request, ...options)).task?.id).toBe(id);
+    await expect(sync.create(ids, { ...request, durationSeconds: 29 }, ...options)).rejects.toThrow(
+      '其他口播输入',
+    );
+    expect(
+      await db.jobOutbox.count({
+        where: { ...{ projectId: ids.projectId }, routingKey: AVATAR_NATIVE_SYNC_QUEUE },
+      }),
+    ).toBe(1);
+    await expect(sync.claim((await setup()).ids, id)).rejects.toThrow('任务不存在');
+    const first = await sync.claim(ids, id);
+    if (first.status !== 'CLAIMED' || first.input.schemaVersion !== 4)
+      throw new Error('Unable to claim native task');
+    expect(first.input).toMatchObject({
+      model: AVATAR_NATIVE_MODEL,
+      durationSeconds: 30,
+      image: { kind: 'BYTES', mimeType: 'image/png', sizeBytes: 512, sha256: null },
+      nativeStarted: false,
+      nativeTaskId: null,
+    });
+    expect(await sync.character(ids, id, first.attemptToken)).toMatchObject({
+      mimeType: 'image/png',
+    });
+    await expect(
+      sync.checkpoint(ids, id, first.attemptToken, { kind: 'TTS_SUBMIT' }),
+    ).rejects.toThrow('模式不匹配');
+    const start = { kind: 'NATIVE_STARTED' as const };
+    await expect(sync.nativeCheckpoint(ids, id, first.attemptToken, start)).resolves.toEqual({
+      allowed: true,
+    });
+    await expect(sync.nativeCheckpoint(ids, id, first.attemptToken, start)).resolves.toEqual({
+      allowed: false,
+    });
+    await sync.fail(ids, id, first.attemptToken, {
+      code: 'PROVIDER_CREATION_UNKNOWN',
+      retryable: false,
+    });
+    await expect(
+      sync.create(ids, { ...request, idempotencyKey: randomUUID() }, ...options),
+    ).rejects.toThrow('需要核对');
+    const savedTask = await db.fissionAvatarSyncTask.findUniqueOrThrow({ where: { id } });
+    const providerTaskId = `cgt-${randomUUID()}`;
+    await runNode(
+      process.execPath,
+      [
+        resolve(__dirname, '../../../../scripts/reconcile-avatar-sync.mjs'),
+        '--project',
+        ids.projectId,
+        '--run',
+        ids.workflowRunId,
+        '--task',
+        id,
+        '--client-token',
+        savedTask.lipSyncClientToken,
+        '--provider-task',
+        providerTaskId,
+        '--native',
+        '--confirm-provider-match',
+      ],
+      { timeout: 8000 },
+    );
+    await sync.action(ids, id, 'retry', ...options);
+    const resumed = await sync.claim(ids, id);
+    if (resumed.status !== 'CLAIMED' || resumed.input.schemaVersion !== 4)
+      throw new Error('Unable to resume native task');
+    expect(resumed.input.nativeTaskId).toBe(providerTaskId);
+    const accepted = { kind: 'NATIVE_ACCEPTED' as const, providerTaskId };
+    await expect(sync.nativeCheckpoint(ids, id, first.attemptToken, accepted)).rejects.toThrow(
+      '租约已失效',
+    );
+    await expect(sync.nativeCheckpoint(ids, id, resumed.attemptToken, accepted)).resolves.toEqual({
+      allowed: true,
+    });
+    const proof = {
+      schemaVersion: 4 as const,
+      audioDurationMs: 30_000,
+      videoDurationMs: 30_000,
+      wordTimings: [] as [],
+    };
+    await expect(
+      sync.complete(
+        ids,
+        id,
+        resumed.attemptToken,
+        { ...proof, videoDurationMs: 29_500, audioDurationMs: 29_500 },
+        files(),
+        'c'.repeat(64),
+      ),
+    ).rejects.toThrow('与所选规格不符');
+    await expect(
+      sync.complete(ids, id, resumed.attemptToken, proof, files(), 'd'.repeat(64)),
+    ).resolves.toBe(true);
+    const { result } = await sync.workspace(ids, false, false, false, true);
+    expect(result).toMatchObject({
+      mode: 'NATIVE',
+      durationMs: 30_000,
+      wordTimings: [],
+      stale: false,
+    });
+    await expect(sync.output(ids, result!.artifactId, 'video')).resolves.toMatchObject({
+      mimeType: 'video/mp4',
+    });
+    expect((await render.workspace(ids, true)).source).toMatchObject({
+      mode: 'NATIVE',
+      captions: [],
+      durationMs: 30_000,
+    });
+    const syncRef = { artifactId: result!.artifactId, revision: result!.revision };
+    const compositionDraft = await render.saveDraft(
+      ids,
+      {
+        expectedRevision: 0,
+        sync: syncRef,
+        settings: {
+          background: { kind: 'SOLID', color: '#243A35' },
+          insetPercent: 8,
+          captionMode: 'OFF',
+          captions: [],
+        },
+      },
+      true,
+    );
+    const { composition } = await render.confirm(ids, compositionDraft.draft!.revision, true);
+    const create = {
+      idempotencyKey: randomUUID(),
+      composition: { artifactId: composition!.artifactId, revision: composition!.revision },
+    };
+    await expect(render.create(ids, create, true)).rejects.toThrow('当前版本的生成原片');
+    await expect(
+      render.create(ids, { ...create, nativeSourceAccepted: { ...syncRef, revision: 2 } }, true),
+    ).rejects.toThrow('当前版本的生成原片');
+    const acceptedCreate = { ...create, nativeSourceAccepted: syncRef };
+    const renderId = (await render.create(ids, acceptedCreate, true)).task!.id;
+    expect((await render.create(ids, acceptedCreate, true)).task?.id).toBe(renderId);
+    await expect(render.create(ids, create, true)).rejects.toThrow('其他方案版本或原片确认');
+    const renderClaim = await render.claim(ids, renderId);
+    if (renderClaim.status !== 'CLAIMED' || renderClaim.input.schemaVersion !== 3)
+      throw new Error('Unable to claim accepted native render');
+    const renderProof = {
+      schemaVersion: 3 as const,
+      audioDurationMs: 30_000,
+      videoDurationMs: 30_000,
+      sourceVideoSha256: renderClaim.input.sourceVideoSha256,
+      outputVideoSha256: 'e'.repeat(64),
+      videoFrameCount: 720,
+      audioPacketCount: 1408,
+      maxTimelineDriftUs: 0,
+    };
+    const staged = () => ({
+      video: {
+        ...files().video,
+        nodeId: AVATAR_OUTPUT_NODE,
+        sha256: renderProof.outputVideoSha256,
+      },
+    });
+    await expect(
+      render.complete(ids, renderId, randomUUID(), renderProof, staged(), 'e'.repeat(64)),
+    ).rejects.toThrow('租约');
+    await expect(
+      render.complete(
+        ids,
+        renderId,
+        renderClaim.attemptToken,
+        { ...renderProof, sourceVideoSha256: 'f'.repeat(64) },
+        staged(),
+        'e'.repeat(64),
+      ),
+    ).rejects.toThrow('摘要');
+    await expect(render.output(ids, 1, 'video')).rejects.toThrow('不可用');
+    const completion = await render.complete(
+      ids,
+      renderId,
+      renderClaim.attemptToken,
+      renderProof,
+      staged(),
+      'e'.repeat(64),
+    );
+    expect(completion).toBe(true);
+    await expect(
+      render.complete(
+        ids,
+        renderId,
+        renderClaim.attemptToken,
+        renderProof,
+        staged(),
+        'e'.repeat(64),
+      ),
+    ).resolves.toBe(false);
+    const published = await render.workspace(ids, true);
+    expect(published).toMatchObject({
+      task: { status: 'SUCCEEDED', phase: 'COMPLETE' },
+      output: { revision: 1, stale: false, videoUrl: expect.stringContaining('/outputs/1/video') },
+    });
+    const output = await db.workingArtifact.findUniqueOrThrow({
+      where: { id: published.output!.artifactId },
+    });
+    expect(output.payload).toMatchObject({
+      nativeValidation: { acceptedSource: syncRef, timeline: renderProof },
+    });
+    expect(await db.fissionAvatarRenderTask.findUnique({ where: { id: renderId } })).toMatchObject({
+      review: null,
+      candidate: null,
+    });
+    await expect(render.output(ids, 1, 'video')).resolves.toMatchObject({
+      sha256: renderProof.outputVideoSha256,
+    });
+    const [archived, replayed] = await Promise.all([
+      render.archive(ids, 1),
+      render.archive(ids, 1),
+    ]);
+    expect(archived).toEqual(replayed);
+
+    const rerender = (
+      await render.create(ids, { ...acceptedCreate, idempotencyKey: randomUUID() }, true)
+    ).task!;
+    const secondClaim = await render.claim(ids, rerender.id);
+    if (secondClaim.status !== 'CLAIMED') throw new Error('Unable to claim repeat render');
+    await render.complete(
+      ids,
+      rerender.id,
+      secondClaim.attemptToken,
+      renderProof,
+      staged(),
+      'e'.repeat(64),
+    );
+    expect((await render.workspace(ids, true)).output?.revision).toBe(1);
+    await expect(render.archive(ids, 1)).resolves.toEqual(archived);
+
+    await db.fissionAvatarAssetGrant.update({
+      where: { id: characterGrant.id },
+      data: { revokedAt: new Date() },
+    });
+    await expect(sync.output(ids, result!.artifactId, 'video')).rejects.toThrow('不可用');
+    await expect(render.output(ids, 1, 'video')).rejects.toThrow('不可用');
+    await expect(render.archive(ids, 1)).rejects.toThrow('不可用');
+  }, 30_000);
 
   it('gates generation on explicit provider grants and atomically deduplicates task plus outbox', async () => {
     const { ids, request, voiceGrant } = await readySync();
@@ -1003,6 +1268,9 @@ describe.skipIf(!enabled)('Avatar isolated database', () => {
       stale: false,
     });
     const create = { composition: ref, idempotencyKey: randomUUID() };
+    await expect(
+      render.create(ids, { ...create, nativeSourceAccepted: syncRef }, true),
+    ).rejects.toThrow('不支持原生原片确认');
     const [first, repeated] = await Promise.all([
       render.create(ids, create, true),
       render.create(ids, create, true),

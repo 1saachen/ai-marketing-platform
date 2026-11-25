@@ -11,6 +11,7 @@ import {
   avatarRenderReviewPasses,
   isAvatarLongRenderCompletion,
   isAvatarLongSyncMedia,
+  isAvatarNativeRenderCompletion,
   parseAvatarCompositionSettings,
   type AvatarArtifactRef,
   type AvatarCompositionDraft,
@@ -29,6 +30,7 @@ import { ApiHttpException } from '../../../common/api-http-exception';
 import { PrismaService } from '../../../database/prisma.service';
 import {
   Prisma,
+  type FileObject,
   type FissionAvatarRenderTask,
   type WorkflowRun,
 } from '../../../generated/prisma/client';
@@ -53,6 +55,7 @@ import {
   artifactRef,
   captionDuration,
   compositionSources,
+  matchesAvatarNativeRenderProof,
   outputAuthorized,
   publicOrigin,
   publicRef,
@@ -72,6 +75,7 @@ const JOB_TYPE = 'FISSION_AVATAR_RENDER';
 const runningStatuses = ['QUEUED', 'RUNNING'];
 const messages: Record<string, string> = {
   MEDIA_INVALID: '成片未通过音视频或字幕校验',
+  NATIVE_TIMELINE_INVALID: '成片未能保留原片音轨和音画时间关系',
   RENDER_FAILED: '成片渲染失败，可按任务状态重试',
   INTERNAL_API_FAILED: '成片保存暂未完成',
   INVALID_TASK: '渲染输入无效',
@@ -84,6 +88,7 @@ export type RenderFileRole = 'video' | 'subtitles';
 export type RenderInputRole = 'video' | 'audio' | 'background';
 type Candidate = { media: AvatarRenderCompletion; video: string; subtitles: string | null };
 type ReviewRecord = { measurement: AvatarRenderReview; passed: boolean; reviewedAt: string };
+type Publication = { review: ReviewRecord } | { resultFingerprint: string };
 
 function json(value: unknown) {
   return value as Prisma.InputJsonValue;
@@ -125,7 +130,18 @@ function replayableResult(task: FissionAvatarRenderTask, token: string) {
 }
 
 function matchingFrozen(frozen: RenderSnapshot, current: RenderSnapshot | null) {
-  return !!current && workflowStateHash(frozen) === workflowStateHash(current);
+  if (!current) return false;
+  const { nativeSourceAccepted, ...source } = frozen;
+  return (
+    (!nativeSourceAccepted ||
+      (current.origin.mode === 'NATIVE' &&
+        sameAvatarArtifactRef(nativeSourceAccepted, current.sync))) &&
+    workflowStateHash(source) === workflowStateHash(current)
+  );
+}
+
+function sameNativeAcceptance(left?: AvatarArtifactRef, right?: AvatarArtifactRef) {
+  return right ? sameAvatarArtifactRef(left ?? null, right) : left === undefined;
 }
 
 function publicTask(
@@ -296,6 +312,7 @@ export class AvatarRenderRepository {
             ...publicRef(source.sync),
             durationMs: captionDuration(source),
             captions: suggestedCaptions(source),
+            ...(source.origin.mode === 'NATIVE' ? { mode: 'NATIVE' as const } : {}),
             ...(isAvatarLongSyncMedia(source.media)
               ? { seamTimesMs: source.media.seamTimesMs }
               : {}),
@@ -496,24 +513,45 @@ export class AvatarRenderRepository {
         },
       });
       if (existing) {
-        if (!sameAvatarArtifactRef(snapshot(existing).composition, request.composition))
-          conflict('渲染操作已用于其他方案版本');
+        const frozen = snapshot(existing);
+        if (
+          !sameAvatarArtifactRef(frozen.composition, request.composition) ||
+          !sameNativeAcceptance(frozen.nativeSourceAccepted, request.nativeSourceAccepted)
+        )
+          conflict('渲染操作已用于其他方案版本或原片确认');
         return this.read(tx, ids, run, enabled, longEnabled);
       }
       const input = await this.current(tx, ids);
       if (!input || !sameAvatarArtifactRef(input.composition, request.composition))
         conflict('请先确认当前背景与字幕方案');
       if (isAvatarLongSyncMedia(input.media) && !longEnabled) conflict('长片成片渲染暂未启用');
+      if (input.origin.mode === 'NATIVE') {
+        if (
+          !request.nativeSourceAccepted ||
+          !sameAvatarArtifactRef(input.sync, request.nativeSourceAccepted)
+        )
+          conflict('请先确认当前版本的生成原片');
+        if (!input.video.sha256) conflict('生成原片缺少媒体校验摘要');
+      } else if (request.nativeSourceAccepted) {
+        conflict('当前口播素材不支持原生原片确认');
+      }
       const active = await this.active(tx, ids);
       if (active) {
-        if (matchingFrozen(snapshot(active), input))
+        const frozen = snapshot(active);
+        if (matchingFrozen(frozen, input)) {
+          if (!sameNativeAcceptance(frozen.nativeSourceAccepted, request.nativeSourceAccepted))
+            conflict('请先结束当前成片任务，再确认原片并重新渲染');
           return this.read(tx, ids, run, enabled, longEnabled);
+        }
         await this.finish(tx, active, 'FAILED', 'SOURCE_STALE');
       }
+      const frozen: RenderSnapshot = request.nativeSourceAccepted
+        ? { ...input, nativeSourceAccepted: publicRef(input.sync) }
+        : input;
       const task = await tx.fissionAvatarRenderTask.create({
-        data: { ...ids, idempotencyKey: request.idempotencyKey, inputSnapshot: json(input) },
+        data: { ...ids, idempotencyKey: request.idempotencyKey, inputSnapshot: json(frozen) },
       });
-      await this.enqueue(tx, ids, task.id, input);
+      await this.enqueue(tx, ids, task.id, frozen);
       return this.read(tx, ids, run, enabled, longEnabled);
     });
   }
@@ -630,6 +668,11 @@ export class AvatarRenderRepository {
         await this.finish(tx, task, 'FAILED', 'SOURCE_STALE');
         return { status: 'INACTIVE' };
       }
+      const sourceVideoSha256 = frozen.nativeSourceAccepted ? frozen.video.sha256 : null;
+      if (frozen.nativeSourceAccepted && !sourceVideoSha256) {
+        await this.finish(tx, task, 'FAILED', 'NATIVE_TIMELINE_INVALID');
+        return { status: 'INACTIVE' };
+      }
       const attemptToken = randomUUID();
       await tx.fissionAvatarRenderTask.update({
         where: { id },
@@ -646,9 +689,11 @@ export class AvatarRenderRepository {
         status: 'CLAIMED',
         attemptToken,
         input: {
-          ...(isAvatarLongSyncMedia(frozen.media)
-            ? { schemaVersion: 2 as const, seamTimesMs: frozen.media.seamTimesMs }
-            : { schemaVersion: 1 as const }),
+          ...(sourceVideoSha256
+            ? { schemaVersion: 3 as const, sourceVideoSha256 }
+            : isAvatarLongSyncMedia(frozen.media)
+              ? { schemaVersion: 2 as const, seamTimesMs: frozen.media.seamTimesMs }
+              : { schemaVersion: 1 as const }),
           settings: frozen.settings,
           videoSizeBytes: frozen.video.sizeBytes,
           audioSizeBytes: frozen.audio.sizeBytes,
@@ -800,12 +845,15 @@ export class AvatarRenderRepository {
         if (task.resultFingerprint !== fingerprint) conflict('已提交其他渲染候选文件');
         return false;
       }
+      const frozen = snapshot(task);
       if (
         !runnable(run) ||
         !activeLease(task, token) ||
-        !matchingFrozen(snapshot(task), await this.current(tx, ids))
+        !matchingFrozen(frozen, await this.current(tx, ids))
       )
         conflict('渲染租约、输入或授权已变化');
+      if (!matchesAvatarNativeRenderProof(frozen, media, staged.video.sha256))
+        conflict('原片或成片摘要与音画校验记录不一致');
       const video = await this.working.upsertFileObjectInTransaction(
         tx,
         ids.projectId,
@@ -820,6 +868,17 @@ export class AvatarRenderRepository {
             staged.subtitles,
           )
         : null;
+      const candidate = {
+        media,
+        video: video.id,
+        subtitles: subtitles?.id ?? null,
+      } satisfies Candidate;
+      if (isAvatarNativeRenderCompletion(media)) {
+        await this.publish(tx, task, frozen, candidate, video, subtitles, {
+          resultFingerprint: fingerprint,
+        });
+        return true;
+      }
       await tx.fissionAvatarRenderTask.update({
         where: { id },
         data: {
@@ -827,11 +886,7 @@ export class AvatarRenderRepository {
           phase: 'REVIEW',
           progress: Math.max(task.progress, 95),
           leaseExpiresAt: new Date(Date.now() + REVIEW_SOURCE_RECHECK_MS),
-          candidate: json({
-            media,
-            video: video.id,
-            subtitles: subtitles?.id ?? null,
-          } satisfies Candidate),
+          candidate: json(candidate),
           resultFingerprint: fingerprint,
         },
       });
@@ -926,57 +981,80 @@ export class AvatarRenderRepository {
         );
         return { accepted: true, passed: false };
       }
-      const previous = await renderArtifact(tx, ids, 'output');
-      const files = [video, ...(subtitles ? [subtitles] : [])].map((file, sortOrder) => ({
-        fileObjectId: file.id,
-        role: sortOrder === 0 ? 'video' : 'subtitles',
-        sortOrder,
-        originalFileName: file.originalFileName,
-        mimeType: file.mimeType,
-        sha256: file.sha256,
-      }));
-      const [committed] = await this.working.commitValidatedArtifactsInTransaction(
-        tx,
-        ids.projectId,
-        ids.workflowRunId,
-        AVATAR_OUTPUT_NODE,
-        [
-          {
-            artifactKey: AVATAR_OUTPUT_ARTIFACT_KEY,
-            input: {
-              kind: 'FILE',
-              name: '数字人口播成片',
-              directory: 'FINAL_VIDEOS',
-              type: 'FINAL_VIDEO',
-              ...(previous ? { expectedRevision: previous.revision } : {}),
-              payload: {
-                origin: publicOrigin(frozen),
-                composition: frozen.composition,
-                sync: frozen.sync,
-                durationMs: candidate.media.videoDurationMs,
-              } satisfies OutputPayload,
-              files,
-              dependencies: [
-                artifactDependency('composition', frozen.composition),
-                artifactDependency('sync', frozen.sync),
-              ],
-            },
-          },
-        ],
-      );
-      if (committed?.unchanged) await this.dropCandidate(tx, ids, candidate);
-      await tx.fissionAvatarRenderTask.update({
-        where: { id },
-        data: {
-          status: 'SUCCEEDED',
-          phase: 'COMPLETE',
-          progress: 100,
-          candidate: Prisma.DbNull,
-          review: json(review),
-          leaseExpiresAt: null,
-        },
-      });
+      await this.publish(tx, task, frozen, candidate, video, subtitles, { review });
       return { accepted: true, passed: true };
+    });
+  }
+
+  private async publish(
+    tx: Prisma.TransactionClient,
+    task: FissionAvatarRenderTask,
+    frozen: RenderSnapshot,
+    candidate: Candidate,
+    video: FileObject,
+    subtitles: FileObject | null,
+    publication: Publication,
+  ) {
+    const ids = { projectId: task.projectId, workflowRunId: task.workflowRunId };
+    const previous = await renderArtifact(tx, ids, 'output');
+    const files = [video, ...(subtitles ? [subtitles] : [])].map((file, sortOrder) => ({
+      fileObjectId: file.id,
+      role: sortOrder === 0 ? 'video' : 'subtitles',
+      sortOrder,
+      originalFileName: file.originalFileName,
+      mimeType: file.mimeType,
+      sha256: file.sha256,
+    }));
+    const [committed] = await this.working.commitValidatedArtifactsInTransaction(
+      tx,
+      ids.projectId,
+      ids.workflowRunId,
+      AVATAR_OUTPUT_NODE,
+      [
+        {
+          artifactKey: AVATAR_OUTPUT_ARTIFACT_KEY,
+          input: {
+            kind: 'FILE',
+            name: '数字人口播成片',
+            directory: 'FINAL_VIDEOS',
+            type: 'FINAL_VIDEO',
+            ...(previous ? { expectedRevision: previous.revision } : {}),
+            payload: {
+              origin: publicOrigin(frozen),
+              composition: frozen.composition,
+              sync: frozen.sync,
+              durationMs: candidate.media.videoDurationMs,
+              ...(frozen.nativeSourceAccepted && isAvatarNativeRenderCompletion(candidate.media)
+                ? {
+                    nativeValidation: {
+                      acceptedSource: frozen.nativeSourceAccepted,
+                      timeline: candidate.media,
+                    },
+                  }
+                : {}),
+            } satisfies OutputPayload,
+            files,
+            dependencies: [
+              artifactDependency('composition', frozen.composition),
+              artifactDependency('sync', frozen.sync),
+            ],
+          },
+        },
+      ],
+    );
+    if (committed?.unchanged) await this.dropCandidate(tx, ids, candidate);
+    await tx.fissionAvatarRenderTask.update({
+      where: { id: task.id },
+      data: {
+        status: 'SUCCEEDED',
+        phase: 'COMPLETE',
+        progress: 100,
+        candidate: Prisma.DbNull,
+        ...('review' in publication
+          ? { review: json(publication.review) }
+          : { resultFingerprint: publication.resultFingerprint }),
+        leaseExpiresAt: null,
+      },
     });
   }
 

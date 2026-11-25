@@ -33,6 +33,7 @@ export type EnvironmentVariables = {
   FISSION_AVATAR_RENDER_ENABLED: boolean;
   FISSION_AVATAR_LONG_ENABLED: boolean;
   FISSION_AVATAR_CONTINUITY_ENABLED: boolean;
+  FISSION_AVATAR_NATIVE_ENABLED: boolean;
   FISSION_AVATAR_RENDER_REVIEW_TOKEN: string | undefined;
   FISSION_AVATAR_RENDER_REVIEW_METHOD: string | undefined;
   FISSION_AVATAR_FFPROBE_PATH: string | undefined;
@@ -247,6 +248,11 @@ export const validateEnvironment = (raw: Record<string, unknown>): EnvironmentVa
     FISSION_AVATAR_CONTINUITY_ENABLED: parseBoolean(
       raw.FISSION_AVATAR_CONTINUITY_ENABLED,
       'FISSION_AVATAR_CONTINUITY_ENABLED',
+      false,
+    ),
+    FISSION_AVATAR_NATIVE_ENABLED: parseBoolean(
+      raw.FISSION_AVATAR_NATIVE_ENABLED,
+      'FISSION_AVATAR_NATIVE_ENABLED',
       false,
     ),
     FISSION_AVATAR_RENDER_REVIEW_TOKEN: optionalString(raw.FISSION_AVATAR_RENDER_REVIEW_TOKEN),

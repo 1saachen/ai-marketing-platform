@@ -140,6 +140,13 @@ docker compose --profile fission-avatar build fission-avatar-worker
 
 启动该消费者会处理真实队列。启用前核对已授权的项目素材、账号与调用范围。需要停止接收新任务时关闭生成开关，并用当前版本核对活动任务与待对账记录。 [同步 Worker](../../workers/fission-avatar/README.md)
 
+形象图原生口播使用加法迁移 `20261125110000_fission_avatar_native_sync`、默认关闭的 `FISSION_AVATAR_NATIVE_ENABLED` 和 `fission-avatar-native` profile。消费者读取 `ARK_API_KEY`、`ARK_BASE_URL` 及共用的 `FISSION_AVATAR_SYNC_WORKER_TOKEN`。原生执行时限由 `FISSION_AVATAR_NATIVE_TIMEOUT_SECONDS` 设置，默认 900 秒。开通前核对方舟模型权限及已授权的形象版本。 [原生 Worker 与授权](../../apps/api/src/workflows/fission/avatar/README.md)
+
+```powershell
+docker compose --profile fission-avatar-native config --quiet
+docker compose --profile fission-avatar-native build fission-avatar-native-worker
+```
+
 G3 使用 `20261124120000_fission_avatar_render` 迁移、默认关闭的 `FISSION_AVATAR_RENDER_ENABLED` 和 `fission-avatar-render` profile。渲染消费者与 API 共用 `FISSION_AVATAR_SYNC_WORKER_TOKEN`，使用本地 FFmpeg，最长运行时间由 `FISSION_AVATAR_RENDER_TIMEOUT_SECONDS` 设置。纯合成消费者无需供应商密钥。
 
 ```powershell
@@ -147,7 +154,9 @@ docker compose --profile fission-avatar-render config --quiet
 docker compose --profile fission-avatar-render build fission-avatar-render-worker
 ```
 
-配置独立的 `FISSION_AVATAR_RENDER_REVIEW_TOKEN` 和已校准方法的 `FISSION_AVATAR_RENDER_REVIEW_METHOD` 后，授权评审人员可读取候选并提交与其 SHA-256 匹配的测量报告。未配置方法或报告未达到门槛时，候选成片不会发布。 [候选读取与报告提交](../../scripts/fission-avatar/README.md#g3-成片评审)
+原生口播渲染随任务确认当前原片版本。Worker 复用原片内封装的音轨，检查视频帧与音频包的时间线和文件摘要，验证通过后发布成片。G3 需要可用的 FFmpeg、FFprobe 和中文字体，默认字体文件为 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`。
+
+配音后改口型、分段任务及之前的待评审候选使用独立口型报告。配置 `FISSION_AVATAR_RENDER_REVIEW_TOKEN` 和已校准方法的 `FISSION_AVATAR_RENDER_REVIEW_METHOD` 后，授权评审人员可读取候选并提交与其 SHA-256 匹配的测量报告。该路线未配置方法或报告未达到门槛时保留待评审状态。 [候选读取与报告提交](../../scripts/fission-avatar/README.md#g3-成片评审)
 
 G4 长片采用 `20261124130000_fission_avatar_segmented_sync` 迁移、默认关闭的 `FISSION_AVATAR_LONG_ENABLED` 和 `fission-avatar-long` profile。工作台生成及成片操作分别还需要对应的 G2、G3 开关。长片同步使用相同的内部 Worker 凭据和两种供应商密钥，长片渲染使用本地 FFmpeg。隔离联调使用测试供应商替身，实拍试点前校准口型评审及核对供应商调用授权。 [长片隔离联调](../workflows/fission/avatar/evidence/2026-11-24-G4工作台长片链路验证.md)
 

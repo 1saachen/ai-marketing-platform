@@ -17,6 +17,7 @@ import {
 import {
   AVATAR_COMPOSITION_NODE,
   AVATAR_LONG_LIMITS,
+  AVATAR_NATIVE_LIMITS,
   AVATAR_OUTPUT_NODE,
   AVATAR_RENDER_LIMITS,
   AVATAR_SCRIPT_MAX_LENGTH,
@@ -29,6 +30,7 @@ import {
 import { WorkflowRunProgress } from '@ai-marketing/ui';
 import { apiUrl, safeApiErrorMessage } from '../../../api/http-client';
 import { importAsset } from '../../../platform/asset/api/asset.api';
+import { requestActionConfirmation } from '../../../shared/composables/action-confirmation';
 import AvatarCompositionPanel from './AvatarCompositionPanel.vue';
 import AvatarStudioLayout from './AvatarStudioLayout.vue';
 import AvatarTimeline from './AvatarTimeline.vue';
@@ -38,7 +40,13 @@ import {
   isAvatarLongRenderSource,
   sameAvatarRevision,
 } from './avatar-render-workspace';
-import { avatarSegmentProgress, createAvatarSyncWorkspace } from './avatar-sync-workspace';
+import {
+  avatarSegmentProgress,
+  avatarSyncAvailability,
+  avatarSyncMode,
+  createAvatarSyncWorkspace,
+  type AvatarSyncMode,
+} from './avatar-sync-workspace';
 import { createAvatarWorkspace, sameAvatarAsset } from './avatar-workspace';
 
 const props = defineProps<{ projectId: string; projectName: string }>();
@@ -55,6 +63,7 @@ const {
   refreshError: syncRefreshError,
 } = sync;
 const render = createAvatarRenderWorkspace();
+const confirmingNativeRender = ref(false);
 const {
   projection: renderProjection,
   editable: compositionDraft,
@@ -70,21 +79,47 @@ const {
   refreshError: renderRefreshError,
 } = render;
 const tool = ref<AvatarTool>('avatar');
-const syncMode = ref<'SHORT' | 'SEGMENTED'>('SHORT');
+const selectedSyncMode = ref<AvatarSyncMode | null>(null);
+const syncMode = computed<AvatarSyncMode>({
+  get: () => avatarSyncMode(syncProjection.value, selectedSyncMode.value),
+  set: (mode) => (selectedSyncMode.value = mode),
+});
+const nativeMode = computed(() => syncMode.value === 'NATIVE');
+const nativeDuration = ref<number>(AVATAR_NATIVE_LIMITS.maxDurationSeconds);
+const nativeDurations = Array.from(
+  { length: AVATAR_NATIVE_LIMITS.maxDurationSeconds - AVATAR_NATIVE_LIMITS.minDurationSeconds + 1 },
+  (_, index) => AVATAR_NATIVE_LIMITS.minDurationSeconds + index,
+);
+const editorLabel = computed(() => (nativeMode.value ? '生成提示词' : '口播文案'));
+const editorLimit = computed(() =>
+  nativeMode.value ? AVATAR_NATIVE_LIMITS.maxPromptCharacters : AVATAR_SCRIPT_MAX_LENGTH,
+);
+const editorLength = computed(() => Array.from(draft.value?.scriptText.trim() ?? '').length);
 const query = ref('');
 const page = ref(1);
 const importError = ref('');
 let importAttempt = 0;
 const editor = ref<HTMLTextAreaElement>();
 const scriptUploadInput = ref<HTMLInputElement>();
+const characterUploadInput = ref<HTMLInputElement>();
+const characterImporting = ref(false);
+const characterRefreshing = ref(false);
+const characterImportFeedback = ref('');
+let characterImport: AbortController | undefined;
+let characterRefreshAttempt = 0;
 const previewChoice = ref<'video' | 'audio' | 'character' | 'output'>('video');
 const backgroundImporting = ref(false);
 const backgroundImportFeedback = ref('');
 let backgroundImport: AbortController | undefined;
 const player = ref<HTMLMediaElement>();
 const playhead = ref(0);
+const eligibleCharacters = computed(() =>
+  (workspace.value?.characters ?? []).filter(
+    (asset) => !nativeMode.value || asset.previewKind === 'IMAGE',
+  ),
+);
 const visibleCharacters = computed(() =>
-  (workspace.value?.characters ?? []).filter((character) =>
+  eligibleCharacters.value.filter((character) =>
     character.name.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase()),
   ),
 );
@@ -98,8 +133,16 @@ const character = computed(() =>
     sameAvatarAsset(asset, draft.value?.character ?? null),
   ),
 );
+const eligibleVoices = computed(() =>
+  (workspace.value?.voices ?? []).filter(
+    (asset) => !nativeMode.value || asset.nativeReferenceAvailable,
+  ),
+);
+const voiceSelection = computed(() =>
+  nativeMode.value ? draft.value?.nativeVoice : draft.value?.voice,
+);
 const voice = computed(() =>
-  workspace.value?.voices.find((asset) => sameAvatarAsset(asset, draft.value?.voice ?? null)),
+  eligibleVoices.value.find((asset) => sameAvatarAsset(asset, voiceSelection.value)),
 );
 const characterConfirmed = computed(
   () =>
@@ -125,10 +168,11 @@ const status = computed(() => {
   return workspace.value?.draft.revision ? '草稿已保存' : '等待选择形象';
 });
 const syncTask = computed(() => syncProjection.value?.task);
-const segmentedTask = computed(() => syncTask.value?.mode === 'SEGMENTED');
 const showSyncMode = computed(
   () =>
-    !!syncProjection.value?.long?.enabled || segmentedTask.value || syncMode.value === 'SEGMENTED',
+    !!syncProjection.value?.long?.enabled ||
+    !!syncProjection.value?.native?.enabled ||
+    syncMode.value !== 'SHORT',
 );
 const segmentProgress = computed(() => avatarSegmentProgress(syncTask.value));
 const longModeLabel = `长片（${AVATAR_LONG_LIMITS.minDurationMs / 1000}–${AVATAR_LONG_LIMITS.maxDurationMs / 1000} 秒）`;
@@ -139,6 +183,9 @@ const syncResult = computed(() =>
   sync.sourceVerified.value ? syncProjection.value?.result : null,
 );
 const videoUrl = computed(() => syncResult.value?.videoUrl);
+const nativeVideoUrl = computed(() =>
+  syncResult.value?.mode === 'NATIVE' ? videoUrl.value : null,
+);
 const audioUrl = computed(() => syncResult.value?.audioUrl);
 const hasResultMedia = computed(() => !!videoUrl.value || !!audioUrl.value);
 const output = computed(() => renderProjection.value?.output);
@@ -192,13 +239,46 @@ const renderBlock = computed(() => {
     return renderProjection.value?.blockedReason ?? '当前无法渲染。';
   return '';
 });
+async function startRender() {
+  if (renderBlock.value || renderActive.value || renderActing.value || confirmingNativeRender.value)
+    return;
+  const current = renderProjection.value;
+  const source = current?.source;
+  if (source?.mode !== 'NATIVE') {
+    await render.generate();
+    return;
+  }
+  confirmingNativeRender.value = true;
+  try {
+    const confirmed = await requestActionConfirmation({
+      title: '确认原片音画效果',
+      description: '请确认已预览原片，声音和人物口型符合预期。合成会保留原片的音画关系。',
+      confirmLabel: '确认并渲染',
+      cancelLabel: '返回预览',
+    });
+    const latest = renderProjection.value;
+    if (
+      confirmed &&
+      latest?.projectId === current?.projectId &&
+      latest?.workflowRunId === current?.workflowRunId &&
+      sameAvatarRevision(latest?.source, source) &&
+      sameAvatarRevision(latest?.composition, current?.composition)
+    )
+      await render.generate(source);
+  } finally {
+    confirmingNativeRender.value = false;
+  }
+}
 const renderStatus = computed(() => {
   if (renderTask.value?.stale) return '此渲染任务使用的方案已更新。';
   if (renderTask.value?.status === 'AWAITING_REVIEW') return '编码完成，等待口型同步核验。';
   if (renderTask.value && renderTask.value.status !== 'SUCCEEDED') return renderTask.value.message;
   if (output.value?.stale) return '上一版成片可用，当前方案待重新渲染。';
   if (output.value && !outputUrl.value) return '当前授权下无法访问已发布成片。';
-  return outputUrl.value ? '成片已通过同步核验。' : renderBlock.value || '合成方案已确认。';
+  if (outputUrl.value) return '成片可下载和归档。';
+  if (nativeVideoUrl.value)
+    return syncResult.value?.stale ? '上一版原片可用。' : '生成原片可预览和下载。';
+  return renderBlock.value || '合成方案已确认。';
 });
 const preview = computed(() => {
   if (previewChoice.value === 'output' && outputUrl.value) return 'output';
@@ -264,17 +344,25 @@ const resultTracks = computed(() => {
 const generateBlock = computed(() => {
   if (syncLoading.value) return '正在读取口播任务状态…';
   const segmented = syncMode.value === 'SEGMENTED';
-  const availability = segmented ? syncProjection.value?.long : syncProjection.value;
+  const availability = avatarSyncAvailability(syncProjection.value, syncMode.value);
   if (!availability?.enabled)
     return availability?.blockedReason ?? (segmented ? '口播长片暂未开放。' : '口播生成暂未开放。');
   if (!characterConfirmed.value) return '请先采用已授权的数字人形象。';
-  if (!scriptConfirmed.value) return '请先确认口播文案。';
-  const maxCharacters = segmented
-    ? maxLongScriptCharacters
-    : AVATAR_SYNC_LIMITS.maxScriptCharacters;
-  if (Array.from(draft.value?.scriptText.trim() ?? '').length > maxCharacters)
-    return `口播${segmented ? '长片' : '短片'}最多支持 ${maxCharacters} 字。`;
-  if (!voice.value) return '请选择项目音色。';
+  if (nativeMode.value && character.value?.previewKind !== 'IMAGE')
+    return '请选择已授权的形象图片。';
+  if (!scriptConfirmed.value) return `请先确认${editorLabel.value}。`;
+  if (nativeMode.value && editorLength.value > AVATAR_NATIVE_LIMITS.maxPromptCharacters)
+    return `提示词最多支持 ${AVATAR_NATIVE_LIMITS.maxPromptCharacters} 字。`;
+  if (nativeMode.value && draft.value?.nativeVoice && !voice.value)
+    return '参考音色已不可用，请重新选择或切换为模型自动配音。';
+  if (!nativeMode.value) {
+    const maxCharacters = segmented
+      ? maxLongScriptCharacters
+      : AVATAR_SYNC_LIMITS.maxScriptCharacters;
+    if (editorLength.value > maxCharacters)
+      return `口播${segmented ? '长片' : '短片'}最多支持 ${maxCharacters} 字。`;
+    if (!voice.value) return '请选择项目音色。';
+  }
   if (!dirty.value && !sync.sourceVerified.value) return '正在核对口播素材。';
   if (!dirty.value && !availability.canGenerate)
     return availability.blockedReason ?? `当前素材无法生成口播${segmented ? '长片' : '视频'}。`;
@@ -299,6 +387,11 @@ const downloadMedia = (url: string) =>
   `${protectedMedia(url)}${url.includes('?') ? '&' : '?'}download=1`;
 
 watch(query, () => (page.value = 1));
+watch(syncMode, () => {
+  importAttempt++;
+  importError.value = '';
+  page.value = 1;
+});
 watch(pageCount, (count) => (page.value = Math.min(count, page.value)));
 watch(
   () => props.projectId,
@@ -319,7 +412,13 @@ watch(
   () => [workspace.value?.projectId ?? '', workspace.value?.workflowRunId ?? ''] as const,
   ([projectId, runId], [previousProjectId, previousRunId]) => {
     if (projectId === previousProjectId && runId === previousRunId) return;
-    syncMode.value = 'SHORT';
+    selectedSyncMode.value = null;
+    nativeDuration.value = AVATAR_NATIVE_LIMITS.maxDurationSeconds;
+    characterImport?.abort();
+    characterRefreshAttempt++;
+    characterImporting.value = false;
+    characterRefreshing.value = false;
+    characterImportFeedback.value = '';
     sync.setScope(projectId, runId);
     render.setScope(projectId, runId);
   },
@@ -335,11 +434,18 @@ watch(
       workspace.value.script?.revision,
       workspace.value.draft.data.voice?.assetId,
       workspace.value.draft.data.voice?.version,
+      workspace.value.draft.data.nativeVoice?.assetId,
+      workspace.value.draft.data.nativeVoice?.version,
       workspace.value.characters.find((item) =>
         sameAvatarAsset(item, workspace.value?.binding?.content.character ?? null),
       )?.authorizationId,
       workspace.value.voices.find((item) =>
         sameAvatarAsset(item, workspace.value?.draft.data.voice ?? null),
+      )?.authorizationId,
+      workspace.value.voices.find(
+        (item) =>
+          item.nativeReferenceAvailable &&
+          sameAvatarAsset(item, workspace.value?.draft.data.nativeVoice),
       )?.authorizationId,
     ].join('|'),
   (value, previous) => {
@@ -356,13 +462,6 @@ watch(
     void render.refresh();
   },
 );
-watch(
-  () =>
-    syncTask.value && `${syncTask.value.id}:${syncTask.value.mode ?? 'SHORT'}:${syncActive.value}`,
-  (identity) => {
-    if (identity) syncMode.value = segmentedTask.value ? 'SEGMENTED' : 'SHORT';
-  },
-);
 watch([preview, videoUrl, audioUrl, outputUrl], () => (playhead.value = 0));
 
 function chooseTool(next: AvatarTool) {
@@ -370,6 +469,78 @@ function chooseTool(next: AvatarTool) {
   if (next === 'background' || next === 'subtitle') {
     previewChoice.value = 'video';
     void render.refresh();
+  }
+}
+
+async function uploadCharacter(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  const current = workspace.value;
+  if (
+    !file ||
+    input !== characterUploadInput.value ||
+    !current ||
+    !nativeMode.value ||
+    characterImporting.value
+  )
+    return;
+  if (
+    !['image/png', 'image/jpeg'].includes(file.type) ||
+    file.size < 1 ||
+    file.size > AVATAR_NATIVE_LIMITS.maxImageBytes
+  ) {
+    characterImportFeedback.value = `请选择 ${AVATAR_NATIVE_LIMITS.maxImageBytes / 1048576} MiB 以内的 PNG 或 JPEG 形象图片。`;
+    return;
+  }
+  const request = new AbortController();
+  characterImport = request;
+  characterImporting.value = true;
+  characterImportFeedback.value = '';
+  try {
+    await importAsset(
+      current.projectId,
+      file,
+      {
+        name: file.name.slice(0, 120),
+        directory: 'VISUAL_ASSETS',
+        type: 'AVATAR_REFERENCE',
+        tags: [],
+        storageWorkflow: 'FISSION',
+        workflowSpace: 'FISSION_AVATAR',
+      },
+      request.signal,
+    );
+    if (!request.signal.aborted)
+      characterImportFeedback.value = '形象图已上传到项目资产，授权后可刷新形象列表。';
+  } catch (reason) {
+    if (!request.signal.aborted)
+      characterImportFeedback.value = safeApiErrorMessage(reason, '形象图上传失败，请重试。');
+  } finally {
+    if (!request.signal.aborted) characterImporting.value = false;
+  }
+}
+
+async function refreshCharacters() {
+  const current = workspace.value;
+  if (!current || characterRefreshing.value) return;
+  const attempt = ++characterRefreshAttempt;
+  characterRefreshing.value = true;
+  const stillCurrent = () =>
+    attempt === characterRefreshAttempt &&
+    workspace.value?.projectId === current.projectId &&
+    workspace.value.workflowRunId === current.workflowRunId;
+  try {
+    const updated = await store.refreshCharacters();
+    if (stillCurrent())
+      characterImportFeedback.value = updated
+        ? '已刷新授权形象列表。'
+        : '暂未更新形象列表，请再试一次。';
+  } catch (reason) {
+    if (stillCurrent())
+      characterImportFeedback.value = safeApiErrorMessage(reason, '形象列表刷新失败，请重试。');
+  } finally {
+    if (stillCurrent()) characterRefreshing.value = false;
   }
 }
 
@@ -427,9 +598,16 @@ async function uploadBackground(file: File) {
 }
 
 function generate() {
-  if (generateBlock.value || confirming.value || conflict.value || backgroundImporting.value)
+  if (
+    generateBlock.value ||
+    confirming.value ||
+    conflict.value ||
+    backgroundImporting.value ||
+    characterImporting.value
+  )
     return;
-  const segmented = syncMode.value === 'SEGMENTED';
+  const mode = syncMode.value;
+  const durationSeconds = nativeDuration.value;
   void sync.generate(async () => {
     if (compositionDirty.value && !(await render.flushPendingEdits())) return null;
     if (!(await store.flushPendingEdits())) return null;
@@ -437,12 +615,14 @@ function generate() {
     if (!current?.binding || !current.script || !characterConfirmed.value || !scriptConfirmed.value)
       return null;
     const { binding, script } = current;
-    return {
+    const source = {
       expectedDraftRevision: current.draft.revision,
       binding: { artifactId: binding.artifactId, revision: binding.revision },
       script: { artifactId: script.artifactId, revision: script.revision },
-      ...(segmented && { mode: 'SEGMENTED' as const }),
     };
+    if (mode === 'NATIVE') return { ...source, mode, durationSeconds };
+    if (mode === 'SEGMENTED') return { ...source, mode };
+    return source;
   });
 }
 
@@ -456,7 +636,7 @@ function seekResult(time: number) {
   if (player.value && player.value.readyState > 0) player.value.currentTime = time;
 }
 
-function selectAsset(kind: 'character' | 'voice', asset: AvatarAssetRef) {
+function selectAsset(kind: 'character' | 'voice' | 'nativeVoice', asset: AvatarAssetRef) {
   store.edit({ [kind]: { assetId: asset.assetId, version: asset.version } });
 }
 
@@ -473,8 +653,8 @@ async function importScript(event: Event) {
   if (!file || !workspace.value || syncActing.value) return;
   const attempt = ++importAttempt;
   importError.value = '';
-  if (!file.name.toLowerCase().endsWith('.txt') || file.size > AVATAR_SCRIPT_MAX_LENGTH * 4 + 3) {
-    importError.value = '请选择符合文案长度限制的 UTF-8 TXT 文件。';
+  if (!file.name.toLowerCase().endsWith('.txt') || file.size > editorLimit.value * 4 + 3) {
+    importError.value = `请选择符合${editorLabel.value}长度限制的 UTF-8 TXT 文件。`;
     return;
   }
   try {
@@ -485,15 +665,16 @@ async function importScript(event: Event) {
     if (
       !scriptText.trim() ||
       scriptText.length > AVATAR_SCRIPT_MAX_LENGTH ||
+      (nativeMode.value && Array.from(scriptText.trim()).length > editorLimit.value) ||
       scriptText.includes('\0')
     ) {
-      importError.value = `文案须为 1–${AVATAR_SCRIPT_MAX_LENGTH.toLocaleString()} 字的纯文本。`;
+      importError.value = `${editorLabel.value}须为 1–${editorLimit.value.toLocaleString()} 字的纯文本。`;
       return;
     }
     store.edit({ scriptText, scriptSource: 'TXT' });
   } catch {
     if (attempt === importAttempt)
-      importError.value = '无法读取文案，请使用 UTF-8 编码的 TXT 文件。';
+      importError.value = `无法读取${editorLabel.value}，请使用 UTF-8 编码的 TXT 文件。`;
   }
 }
 
@@ -504,7 +685,13 @@ async function openEditor() {
 }
 
 function beforeUnload(event: BeforeUnloadEvent) {
-  if (!dirty.value && !compositionDirty.value && !backgroundImporting.value) return;
+  if (
+    !dirty.value &&
+    !compositionDirty.value &&
+    !backgroundImporting.value &&
+    !characterImporting.value
+  )
+    return;
   event.preventDefault();
   event.returnValue = '';
 }
@@ -512,6 +699,8 @@ onMounted(() => window.addEventListener('beforeunload', beforeUnload));
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', beforeUnload);
   importAttempt++;
+  characterImport?.abort();
+  characterRefreshAttempt++;
   backgroundImport?.abort();
   store.dispose();
   sync.dispose();
@@ -519,7 +708,7 @@ onBeforeUnmount(() => {
 });
 defineExpose({
   async flushPendingEdits() {
-    if (backgroundImporting.value) return false;
+    if (backgroundImporting.value || characterImporting.value) return false;
     await sync.waitForAction();
     return (await render.flushPendingEdits()) && store.flushPendingEdits();
   },
@@ -577,7 +766,11 @@ defineExpose({
         </div>
         <div class="fas-output-name">
           <b>{{ character?.name ?? '未选择数字人' }}</b>
-          <small
+          <small v-if="nativeMode"
+            >原生有声视频 ·
+            {{ voice?.name ?? (voiceSelection ? '音色不可用' : '模型自动配音') }}</small
+          >
+          <small v-else
             >{{ voice?.name ?? '未选择音色'
             }}<template v-if="duration"> · 预计 {{ duration }} 秒</template></small
           >
@@ -587,7 +780,7 @@ defineExpose({
         </div>
         <div class="fas-top-spacer" />
         <button class="fas-btn" :disabled="confirming || syncActing" @click="openEditor">
-          编辑口播文案
+          编辑{{ editorLabel }}
         </button>
         <button
           class="fas-btn primary"
@@ -597,28 +790,54 @@ defineExpose({
             syncActing ||
             confirming ||
             conflict ||
-            backgroundImporting
+            backgroundImporting ||
+            characterImporting
           "
           :title="generateBlock || undefined"
           @click="generate"
         >
           <Sparkles :size="14" />{{
-            syncMode === 'SEGMENTED' ? '生成数字人口播长片' : '生成数字人口播视频'
+            nativeMode
+              ? '生成有声视频'
+              : syncMode === 'SEGMENTED'
+                ? '生成数字人口播长片'
+                : '生成数字人口播视频'
           }}
         </button>
       </template>
 
       <template #status>
         <div class="avatar-sync-status">
-          <label v-if="showSyncMode" class="avatar-sync-mode">
-            口播时长
-            <select v-model="syncMode" :disabled="syncActive || syncActing">
-              <option value="SHORT">{{ shortModeLabel }}</option>
-              <option value="SEGMENTED" :disabled="!syncProjection?.long?.enabled">
-                {{ longModeLabel }}
-              </option>
-            </select>
-          </label>
+          <div v-if="showSyncMode" class="avatar-sync-mode">
+            <label>
+              生成方式
+              <select v-model="syncMode" :disabled="syncActive || syncActing">
+                <option
+                  v-if="
+                    syncProjection?.native?.enabled || syncTask?.mode === 'NATIVE' || nativeMode
+                  "
+                  value="NATIVE"
+                  :disabled="!syncProjection?.native?.enabled"
+                >
+                  形象图生成有声视频
+                </option>
+                <option value="SHORT" :disabled="!syncProjection?.enabled">
+                  {{ shortModeLabel }}
+                </option>
+                <option value="SEGMENTED" :disabled="!syncProjection?.long?.enabled">
+                  {{ longModeLabel }}
+                </option>
+              </select>
+            </label>
+            <label v-if="nativeMode && !syncActive">
+              生成时长
+              <select v-model.number="nativeDuration" :disabled="syncActing || confirming">
+                <option v-for="seconds in nativeDurations" :key="seconds" :value="seconds">
+                  {{ seconds }} 秒
+                </option>
+              </select>
+            </label>
+          </div>
           <WorkflowRunProgress
             v-if="syncTask"
             action-label=""
@@ -692,9 +911,9 @@ defineExpose({
         <AvatarToolTabs
           :active="tool"
           :busy="confirming || syncActing"
-          :unavailable="
-            renderProjection?.enabled ? {} : { background: '待开放', subtitle: '待开放' }
-          "
+          :unavailable="{
+            ...(!renderProjection?.enabled && { background: '待开放', subtitle: '待开放' }),
+          }"
           @choose="chooseTool"
         />
       </template>
@@ -703,7 +922,7 @@ defineExpose({
         <template v-if="tool === 'avatar'">
           <div class="fas-panel-head">
             <div>
-              <b>项目数字人资产</b><small>{{ workspace.characters.length }} 个已授权版本</small>
+              <b>项目数字人资产</b><small>{{ eligibleCharacters.length }} 个已授权版本</small>
             </div>
           </div>
           <label class="fas-search">
@@ -713,6 +932,34 @@ defineExpose({
               placeholder="按名称搜索数字人"
             />
           </label>
+          <template v-if="nativeMode">
+            <input
+              ref="characterUploadInput"
+              type="file"
+              accept="image/png,image/jpeg"
+              hidden
+              @change="uploadCharacter"
+            />
+            <button
+              type="button"
+              class="fas-wide-import"
+              :disabled="characterImporting || confirming || syncActing"
+              @click="characterUploadInput?.click()"
+            >
+              <Upload :size="14" />{{ characterImporting ? '正在上传形象图…' : '上传形象图' }}
+            </button>
+            <button
+              type="button"
+              class="fas-btn avatar-refresh-characters"
+              :disabled="characterImporting || characterRefreshing || confirming || syncActing"
+              @click="refreshCharacters"
+            >
+              {{ characterRefreshing ? '正在刷新授权…' : '刷新授权列表' }}
+            </button>
+            <p v-if="characterImportFeedback" class="fas-copy-note" role="status">
+              {{ characterImportFeedback }}
+            </p>
+          </template>
           <div class="fas-avatar-list">
             <button
               v-for="item in pageCharacters"
@@ -741,9 +988,11 @@ defineExpose({
           </div>
           <p v-if="!pageCharacters.length" class="fas-empty">
             {{
-              workspace.characters.length
+              eligibleCharacters.length
                 ? '没有匹配的数字人资产。'
-                : '当前项目暂无已授权的数字人版本。'
+                : nativeMode
+                  ? '当前项目暂无已授权的形象图片。'
+                  : '当前项目暂无已授权的数字人版本。'
             }}
           </p>
           <div v-if="pageCount > 1" class="fas-pager">
@@ -759,27 +1008,49 @@ defineExpose({
         <template v-else-if="tool === 'voice'">
           <div class="fas-panel-head">
             <div>
-              <b>项目音色</b><small>{{ workspace.voices.length }} 个已授权版本</small>
+              <b>{{ nativeMode ? '参考项目音色' : '项目音色' }}</b
+              ><small>{{ eligibleVoices.length }} 个已授权版本</small>
             </div>
           </div>
           <div class="fas-choice-list">
             <button
-              v-for="item in workspace.voices"
+              v-if="nativeMode"
+              type="button"
+              :class="{ selected: !voiceSelection }"
+              :aria-pressed="!voiceSelection"
+              :disabled="confirming || syncActing || syncActive"
+              @click="store.edit({ nativeVoice: null })"
+            >
+              <i><Sparkles :size="16" /></i>
+              <span><b>模型自动配音</b></span>
+              <em><Check v-if="!voiceSelection" :size="14" /></em>
+            </button>
+            <button
+              v-for="item in eligibleVoices"
               :key="`${item.assetId}:${item.version}`"
-              :class="{ selected: sameAvatarAsset(draft.voice, item) }"
-              :aria-pressed="sameAvatarAsset(draft.voice, item)"
-              :disabled="confirming || syncActing"
-              @click="selectAsset('voice', item)"
+              type="button"
+              :class="{ selected: sameAvatarAsset(voiceSelection, item) }"
+              :aria-pressed="sameAvatarAsset(voiceSelection, item)"
+              :disabled="confirming || syncActing || (nativeMode && syncActive)"
+              @click="selectAsset(nativeMode ? 'nativeVoice' : 'voice', item)"
             >
               <i><AudioLines :size="16" /></i>
               <span
                 ><b>{{ item.name }}</b
                 ><small>项目资产 · v{{ item.version }}</small></span
               >
-              <em><Check v-if="sameAvatarAsset(draft.voice, item)" :size="14" /></em>
+              <em><Check v-if="sameAvatarAsset(voiceSelection, item)" :size="14" /></em>
             </button>
           </div>
-          <p v-if="!workspace.voices.length" class="fas-empty">当前项目暂无已授权的音色版本。</p>
+          <p v-if="!eligibleVoices.length" class="fas-empty">
+            {{ nativeMode ? '当前项目暂无可用的参考音色。' : '当前项目暂无已授权的音色版本。' }}
+          </p>
+          <p v-if="nativeMode" class="fas-copy-note">
+            支持 {{ AVATAR_NATIVE_LIMITS.minReferenceAudioSeconds }}–{{
+              AVATAR_NATIVE_LIMITS.maxReferenceAudioSeconds
+            }}
+            秒的 MP3 或 WAV。
+          </p>
         </template>
         <template v-else-if="compositionTool">
           <AvatarCompositionPanel
@@ -805,9 +1076,9 @@ defineExpose({
         <template v-else>
           <div class="fas-panel-head">
             <div>
-              <b>口播文案</b>
+              <b>{{ editorLabel }}</b>
               <small
-                >{{ draft.scriptText.length }} 字<template v-if="duration">
+                >{{ editorLength }} 字<template v-if="duration && !nativeMode">
                   · 预计 {{ duration }} 秒</template
                 ></small
               >
@@ -816,11 +1087,11 @@ defineExpose({
           <textarea
             ref="editor"
             :value="draft.scriptText"
-            :maxlength="AVATAR_SCRIPT_MAX_LENGTH"
+            :maxlength="editorLimit"
             :disabled="confirming || syncActing"
             class="fas-copy-editor"
-            aria-label="口播文案"
-            placeholder="请输入数字人口播文案…"
+            :aria-label="editorLabel"
+            :placeholder="nativeMode ? '描述场景、人物动作和要说的台词…' : '请输入数字人口播文案…'"
             @input="updateScript"
             @blur="store.flushPendingEdits"
           />
@@ -838,7 +1109,7 @@ defineExpose({
             :disabled="confirming || syncActing"
             @click="scriptUploadInput?.click()"
           >
-            <Upload :size="14" />导入口播文案 TXT
+            <Upload :size="14" />导入{{ editorLabel }} TXT
           </button>
           <p v-if="importError" class="fas-copy-note" role="alert">{{ importError }}</p>
         </template>
@@ -1013,8 +1284,8 @@ defineExpose({
                 ><small>项目授权 · v{{ voice.version }}</small>
               </div>
             </div>
-            <p v-else class="fas-copy-note">
-              {{ draft.voice ? '已选音色版本不可用，请重新选择。' : '请从左侧选择音色。' }}
+            <p v-else-if="!nativeMode || voiceSelection" class="fas-copy-note">
+              {{ voiceSelection ? '已选音色版本不可用，请重新选择。' : '请从左侧选择音色。' }}
             </p>
             <audio
               v-if="voice?.previewUrl && voice.previewKind === 'AUDIO'"
@@ -1026,6 +1297,13 @@ defineExpose({
               preload="none"
             />
             <p v-else-if="voice" class="fas-copy-note">该音色未提供试听文件。</p>
+            <p v-if="nativeMode" class="fas-copy-note">
+              {{
+                voice
+                  ? '模型会参考这段音频的声线，台词以当前文案为准。'
+                  : '选择项目音色可引导模型生成的声线。'
+              }}
+            </p>
           </template>
           <template v-else-if="compositionTool">
             <div v-if="compositionDraft" class="avatar-composition-controls">
@@ -1104,8 +1382,8 @@ defineExpose({
                 !characterConfirmed
                   ? '请先在数字人面板采用已授权形象。'
                   : scriptConfirmed
-                    ? '当前文案已确认。'
-                    : '确认后的文案用于生成口播。'
+                    ? `当前${editorLabel}已确认。`
+                    : `确认后的${editorLabel}用于生成口播。`
               }}
             </p>
             <button
@@ -1113,6 +1391,7 @@ defineExpose({
               :disabled="
                 !characterConfirmed ||
                 !draft.scriptText.trim() ||
+                (nativeMode && editorLength > editorLimit) ||
                 scriptConfirmed ||
                 confirming ||
                 conflict ||
@@ -1121,7 +1400,7 @@ defineExpose({
               "
               @click="confirmInput('script')"
             >
-              {{ scriptConfirmed ? '文案已确认' : '确认口播文案' }}
+              {{ scriptConfirmed ? `${editorLabel}已确认` : `确认${editorLabel}` }}
             </button>
             <details
               v-if="hasResultMedia && syncResult?.wordTimings.length"
@@ -1175,12 +1454,23 @@ defineExpose({
 
       <template #render>
         <div>
-          <i :class="{ rendering: renderActive, completed: !!outputUrl && !renderActive }" />
+          <i
+            :class="{
+              rendering: renderActive,
+              completed: !!(outputUrl || nativeVideoUrl) && !renderActive,
+            }"
+          />
           <span role="status"
             ><b>渲染输出</b><small>{{ renderStatus }}</small></span
           >
         </div>
-        <div v-if="renderTask || outputUrl || renderRefreshError" class="avatar-render-actions">
+        <div
+          v-if="renderTask || outputUrl || nativeVideoUrl || renderRefreshError"
+          class="avatar-render-actions"
+        >
+          <a v-if="nativeVideoUrl" class="fas-btn" :href="downloadMedia(nativeVideoUrl)" download
+            ><Download :size="13" />{{ syncResult?.stale ? '下载上一版原片' : '下载生成原片' }}</a
+          >
           <div
             v-if="renderTask?.status === 'QUEUED' || renderTask?.status === 'RUNNING'"
             class="fas-render-progress"
@@ -1243,11 +1533,12 @@ defineExpose({
             !!renderBlock ||
             renderActive ||
             renderActing ||
+            confirmingNativeRender ||
             compositionConflict ||
             backgroundImporting
           "
           :title="renderBlock || undefined"
-          @click="render.generate"
+          @click="startRender"
         >
           <Video :size="14" />{{ outputUrl ? '重新渲染' : '渲染成片' }}
         </button>
@@ -1447,9 +1738,20 @@ defineExpose({
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  flex-wrap: wrap;
   padding: 3px 10px;
   color: #475569;
   font-size: 11px;
+}
+
+.avatar-sync-mode label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.avatar-refresh-characters {
+  margin: 5px 0;
 }
 
 .avatar-sync-mode select {

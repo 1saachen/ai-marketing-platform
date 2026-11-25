@@ -74,7 +74,7 @@ async function assertProjectInactive(
   // G1 projects can still be deleted on installations that have not added the sync table.
   // Feature flags change admission, not the protection for already-admitted work.
   const [avatarTables] = await tx.$queryRaw<
-    { sync: boolean; render: boolean; segments: boolean; picture: boolean }[]
+    { sync: boolean; render: boolean; segments: boolean; picture: boolean; native: boolean }[]
   >(
     Prisma.sql`SELECT
       to_regclass('fission_avatar_sync_tasks') IS NOT NULL AS "sync",
@@ -82,7 +82,10 @@ async function assertProjectInactive(
       to_regclass('fission_avatar_sync_segments') IS NOT NULL AS "segments",
       EXISTS (SELECT 1 FROM pg_attribute
         WHERE attrelid = to_regclass('fission_avatar_sync_segments')
-          AND attname = 'pictureStarted' AND NOT attisdropped) AS "picture"`,
+          AND attname = 'pictureStarted' AND NOT attisdropped) AS "picture",
+      EXISTS (SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass('fission_avatar_sync_tasks')
+          AND attname = 'nativeStarted' AND NOT attisdropped) AS "native"`,
   );
   const counts = await Promise.all([
     ...(avatarTables?.sync
@@ -92,7 +95,11 @@ async function assertProjectInactive(
               projectId,
               OR: [
                 { status: active.status },
-                avatarSyncReconciliationFilter(!!avatarTables.segments, !!avatarTables.picture),
+                avatarSyncReconciliationFilter(
+                  !!avatarTables.segments,
+                  !!avatarTables.picture,
+                  !!avatarTables.native,
+                ),
               ],
             },
           }),

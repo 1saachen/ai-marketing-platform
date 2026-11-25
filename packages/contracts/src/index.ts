@@ -95,5 +95,6 @@ export * from './fission-local-replace';
 export * from './fission-avatar';
 export * from './fission-avatar-sync';
 export * from './fission-avatar-long-sync';
+export * from './fission-avatar-native';
 export * from './fission-avatar-tail-chain';
 export * from './fission-avatar-render';

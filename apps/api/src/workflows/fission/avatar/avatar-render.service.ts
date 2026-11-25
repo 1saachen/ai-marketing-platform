@@ -32,6 +32,7 @@ import {
   type RenderFileRole,
   type RenderInputRole,
 } from './avatar-render.repository';
+import { matchesAvatarNativeRenderProof } from './avatar-render-source';
 import type { AvatarSyncScope } from './avatar-sync-source';
 import { avatarWorkerToken } from './avatar-sync.service';
 
@@ -287,6 +288,8 @@ export class AvatarRenderService implements OnModuleInit, OnModuleDestroy {
       hashFile(video.path),
       subtitles ? hashFile(subtitles.path) : null,
     ]);
+    if (!matchesAvatarNativeRenderProof(frozen, proof, videoSha))
+      invalidMedia('原片或成片摘要与音画校验记录不一致');
     const fingerprint = workflowStateHash({ proof, videoSha, subtitlesSha });
     if (admission.fingerprint) {
       if (admission.fingerprint !== fingerprint)

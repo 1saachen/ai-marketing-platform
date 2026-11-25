@@ -51,7 +51,7 @@ function duration(
 export async function inspectAvatarSyncResult(
   audioPath: string,
   videoPath: string,
-  result: AvatarSyncCompletion,
+  result: Pick<AvatarSyncCompletion, 'audioDurationMs' | 'videoDurationMs'>,
   ffprobe: string,
   maximumDurationMs: number = AVATAR_SYNC_LIMITS.maxDurationMs,
 ) {

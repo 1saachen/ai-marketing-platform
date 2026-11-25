@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from .api import AvatarApi
 from .health import marker
 from .long_pipeline import process_long_sync_task
+from .native_pipeline import process_native_task
+from .native_provider import NativeVideoProvider
 from .pipeline import ProviderPort, process_task, validator
 from .provider import MEDIAKIT_ORIGIN, TTS_ORIGIN, TaskFailure, VolcProvider
 from .render_pipeline import process_render_task
@@ -24,6 +26,7 @@ QUEUES = {
     "render": "fission.avatar.render.requested",
     "long-sync": "fission.avatar.long-sync.requested",
     "long-render": "fission.avatar.long-render.requested",
+    "native-sync": "fission.avatar.native-sync.requested",
 }
 RENDER_FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 ARK_ORIGIN = "https://ark.cn-beijing.volces.com/api/v3"
@@ -76,6 +79,7 @@ async def handle_message(
     font: Path,
     timeout: int,
     provider: ProviderPort | None = None,
+    native_provider: NativeVideoProvider | None = None,
 ) -> None:
     if mode not in QUEUES:
         raise ValueError("unsupported avatar worker mode")
@@ -92,6 +96,12 @@ async def handle_message(
                 font=font,
                 timeout=timeout,
                 long_form=mode == "long-render",
+            )
+        elif mode == "native-sync":
+            if native_provider is None:
+                raise ValueError("avatar native sync requires Seedance configuration")
+            await process_native_task(
+                api, native_provider, ffmpeg, ffprobe, timeout=timeout
             )
         elif provider is None:
             raise ValueError("avatar sync requires an explicitly configured provider")
@@ -119,9 +129,10 @@ async def consume() -> None:
     mode = os.getenv("FISSION_AVATAR_WORKER_MODE", "sync")
     if mode not in QUEUES:
         raise ValueError(
-            "FISSION_AVATAR_WORKER_MODE must be sync, render, long-sync or long-render"
+            f"FISSION_AVATAR_WORKER_MODE must be one of {', '.join(QUEUES)}"
         )
     provider: VolcProvider | None = None
+    native_provider: NativeVideoProvider | None = None
     font = Path(os.getenv("FISSION_AVATAR_RENDER_FONT_PATH") or RENDER_FONT)
     if mode in {"render", "long-render"}:
         if not which(ffmpeg) or not which(ffprobe):
@@ -140,6 +151,17 @@ async def consume() -> None:
             )
             validator("worker-input", step="render")
             validator("completion", step="render")
+    elif mode == "native-sync":
+        if not which(ffmpeg) or not which(ffprobe):
+            raise ValueError("avatar native sync requires FFmpeg and FFprobe")
+        timeout = _bounded_timeout("FISSION_AVATAR_NATIVE_TIMEOUT_SECONDS", 900, 2400)
+        for name in ("worker-input", "checkpoint", "completion"):
+            validator(name, step="native")
+        native_provider = NativeVideoProvider(
+            os.getenv("ARK_BASE_URL") or ARK_ORIGIN,
+            _required("ARK_API_KEY"),
+            timeout_seconds=timeout,
+        )
     else:
         if mode == "long-sync":
             timeout = _bounded_timeout(
@@ -168,12 +190,13 @@ async def consume() -> None:
             ),
         )
 
+    active_provider = native_provider or provider
     marker().unlink(missing_ok=True)
     try:
         connection = await aio_pika.connect_robust(rabbit_url)
     except BaseException:
-        if provider is not None:
-            await provider.close()
+        if active_provider is not None:
+            await active_provider.close()
         raise
 
     async def health() -> None:
@@ -211,6 +234,7 @@ async def consume() -> None:
                             font=font,
                             timeout=timeout,
                             provider=provider,
+                            native_provider=native_provider,
                         )
                 # The delivery context requeues on errors. Isolate interrupted
                 # attempts and log only their exception type.
@@ -226,8 +250,8 @@ async def consume() -> None:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
         marker().unlink(missing_ok=True)
-        if provider is not None:
-            await provider.close()
+        if active_provider is not None:
+            await active_provider.close()
         await connection.close()
 
 

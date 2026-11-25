@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
+from fractions import Fraction
+from hashlib import sha256
 from pathlib import Path
 from shutil import which
 from typing import Any
@@ -14,6 +17,15 @@ import pytest
 from fission_avatar.api import AvatarApi
 from fission_avatar.main import RENDER_FONT
 from fission_avatar.media import inspect_speech
+from fission_avatar.render_native_media import (
+    AudioPacket,
+    NativeTimeline,
+    NativeTimelineError,
+    Sample,
+    TrackBounds,
+    compare_native_timelines,
+    probe_native_timeline,
+)
 from fission_avatar.render_pipeline import (
     InvalidRenderTask,
     _snapshot,
@@ -101,9 +113,93 @@ async def test_cancelled_render_attempt_does_not_read_sources_or_complete() -> N
     assert paths == ["claim", "heartbeat"]
 
 
-@pytest.mark.parametrize("image_background", [False, True])
+def test_native_timeline_rejects_independent_audio_or_video_shifts() -> None:
+    bounds = TrackBounds(Fraction(0), Fraction(1))
+    first = AudioPacket(Sample(Fraction(0), Fraction(1, 2)), "first", (1024, 0))
+    last = AudioPacket(Sample(Fraction(1, 2), Fraction(1, 2)), "last", None)
+    source = NativeTimeline(
+        bounds, bounds, (Fraction(0), Fraction(1, 2)), (first, last), ("config", "32000", 1)
+    )
+    shift = Fraction(1, 100)
+    shifted_bounds = replace(bounds, start=shift)
+    shifted = replace(
+        source,
+        video=shifted_bounds,
+        audio=shifted_bounds,
+        frame_pts=tuple(pts + shift for pts in source.frame_pts),
+        audio_packets=tuple(
+            replace(packet, timing=replace(packet.timing, pts=packet.timing.pts + shift))
+            for packet in source.audio_packets
+        ),
+    )
+    assert compare_native_timelines(source, shifted) == 0
+    assert compare_native_timelines(
+        source, replace(source, frame_pts=(Fraction(0), Fraction(502, 1000)))
+    ) == 2_000
+    for changed in (
+        replace(source, audio=shifted_bounds, audio_packets=shifted.audio_packets),
+        replace(source, frame_pts=shifted.frame_pts),
+        replace(source, frame_pts=(Fraction(0), Fraction(502001, 1000000))),
+        replace(source, frame_pts=(Fraction(0),)),
+        replace(source, audio_packets=(first, replace(last, sha256="different"))),
+        replace(source, audio_packets=(replace(first, padding=None), last)),
+    ):
+        with pytest.raises(NativeTimelineError):
+            compare_native_timelines(source, changed)
+
+
+async def test_native_render_rejects_another_sources_video_before_encoding() -> None:
+    project, run, task, attempt = (uuid4() for _ in range(4))
+    source = b"another video's bytes"
+    snapshot = _snapshot_fixture()
+    snapshot.update(
+        schemaVersion=3,
+        sourceVideoSha256=sha256(b"approved video bytes").hexdigest(),
+        videoSizeBytes=len(source),
+        audioDurationMs=4000,
+        videoDurationMs=4000,
+    )
+    seen: list[str] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        seen.append(endpoint)
+        if endpoint == "claim":
+            return _ok(
+                {"status": "CLAIMED", "attemptToken": str(attempt), "input": snapshot}
+            )
+        if endpoint == "heartbeat":
+            return _ok({"active": True})
+        if endpoint == "video":
+            return httpx.Response(200, stream=httpx.ByteStream(source))
+        assert endpoint == "fail"
+        assert json.loads(await request.aread()) == {
+            "code": "NATIVE_TIMELINE_INVALID",
+            "retryable": False,
+        }
+        return _ok({})
+
+    api = AvatarApi(
+        "http://avatar.test/api",
+        "token",
+        project,
+        run,
+        task,
+        render=True,
+        transport=httpx.MockTransport(handle),
+    )
+    try:
+        await process_render_task(api, "", "", font=Path(RENDER_FONT))
+    finally:
+        await api.close()
+    assert seen == ["claim", "heartbeat", "video", "heartbeat", "fail"]
+
+
+@pytest.mark.parametrize(
+    ("image_background", "native"), [(False, False), (True, False), (False, True), (True, True)]
+)
 async def test_render_actual_media_with_background_and_literal_subtitles(
-    tmp_path: Path, image_background: bool
+    tmp_path: Path, image_background: bool, native: bool
 ) -> None:
     ffmpeg = os.getenv("FISSION_AVATAR_FFMPEG_PATH") or which("ffmpeg")
     ffprobe = os.getenv("FISSION_AVATAR_FFPROBE_PATH") or which("ffprobe")
@@ -130,42 +226,61 @@ async def test_render_actual_media_with_background_and_literal_subtitles(
         )
         return run.stdout if capture else b""
 
-    ff(
-        "-f",
-        "lavfi",
-        "-i",
-        "aevalsrc=0.2*sin(2*PI*330*t+70*sin(2*PI*1.1*t)):s=24000:d=2",
-        "-c:a",
-        "libmp3lame",
-        str(audio),
-    )
-    ff(
-        "-f",
-        "lavfi",
-        "-i",
-        "color=green:size=320x320:duration=2:rate=30",
-        "-i",
-        str(audio),
-        "-map",
-        "0:v",
-        "-map",
-        "1:a",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        str(video),
-    )
-    expected_files = {"video": video.read_bytes(), "audio": audio.read_bytes()}
     snapshot = _snapshot_fixture()
-    snapshot.update(
-        videoSizeBytes=video.stat().st_size,
-        audioSizeBytes=audio.stat().st_size,
-        audioDurationMs=await inspect_speech(audio, ffmpeg, ffprobe),
-        videoDurationMs=2000,
-    )
+    if native:
+        ff(
+            "-f", "lavfi", "-i", "color=green:size=288x512:duration=4:rate=24",
+            "-f", "lavfi", "-i", "sine=frequency=400:sample_rate=32000:duration=4",
+            "-vf", r"select=not(eq(mod(n\,5)\,1))",
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-enc_time_base:v", "demux", "-fps_mode:v", "passthrough",
+            "-c:a", "aac", str(video),
+        )
+        expected_files = {"video": video.read_bytes()}
+        snapshot.update(
+            schemaVersion=3,
+            sourceVideoSha256=sha256(expected_files["video"]).hexdigest(),
+            videoSizeBytes=video.stat().st_size,
+            audioDurationMs=4000,
+            videoDurationMs=4000,
+        )
+    else:
+        ff(
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=0.2*sin(2*PI*330*t+70*sin(2*PI*1.1*t)):s=24000:d=2",
+            "-c:a",
+            "libmp3lame",
+            str(audio),
+        )
+        ff(
+            "-f",
+            "lavfi",
+            "-i",
+            "color=green:size=320x320:duration=2:rate=30",
+            "-i",
+            str(audio),
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(video),
+        )
+        expected_files = {"video": video.read_bytes(), "audio": audio.read_bytes()}
+        snapshot.update(
+            videoSizeBytes=video.stat().st_size,
+            audioSizeBytes=audio.stat().st_size,
+            audioDurationMs=await inspect_speech(audio, ffmpeg, ffprobe),
+            videoDurationMs=2000,
+        )
     if image_background:
         ff(
             "-f",
@@ -246,6 +361,13 @@ async def test_render_actual_media_with_background_and_literal_subtitles(
     assert reads == list(expected_files)
     assert multipart is not None and expected_srt.encode("utf-8") in multipart
     assert b'name="metadata"' in multipart
+    if native:
+        source, result = await probe_native_timeline(video, ffprobe), await probe_native_timeline(
+            output, ffprobe
+        )
+        assert len(source.frame_pts) < 24 * 4  # this source has variable frame spacing
+        assert compare_native_timelines(source, result) == 0
+        assert sha256(output.read_bytes()).hexdigest().encode() in multipart
 
     frame = ff(
         "-ss",

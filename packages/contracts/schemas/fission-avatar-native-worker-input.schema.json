@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-native-worker-input.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 4
+    },
+    "prompt": {
+      "type": "string",
+      "maxLength": 500,
+      "minLength": 1
+    },
+    "model": {
+      "const": "doubao-seedance-2-5-flash-261115"
+    },
+    "durationSeconds": {
+      "type": "integer",
+      "minimum": 4,
+      "maximum": 30
+    },
+    "image": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "BYTES"
+            },
+            "mimeType": {
+              "type": "string",
+              "enum": [
+                "image/png",
+                "image/jpeg"
+              ]
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8388608
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "mimeType",
+            "sizeBytes",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "PORTRAIT"
+            },
+            "assetId": {
+              "type": "string",
+              "pattern": "^asset-[A-Za-z0-9_-]{1,120}$"
+            }
+          },
+          "required": [
+            "kind",
+            "assetId"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "referenceAudio": {
+      "type": "object",
+      "properties": {
+        "mimeType": {
+          "type": "string",
+          "enum": [
+            "audio/mpeg",
+            "audio/wav"
+          ]
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 15728640
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mimeType",
+        "sizeBytes",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "nativeStarted": {
+      "type": "boolean"
+    },
+    "nativeTaskId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^cgt-[A-Za-z0-9_-]{1,120}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "prompt",
+    "model",
+    "durationSeconds",
+    "image",
+    "nativeStarted",
+    "nativeTaskId"
+  ],
+  "additionalProperties": false
+}

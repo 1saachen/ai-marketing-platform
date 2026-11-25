@@ -1,5 +1,13 @@
 # 数字人口播 Worker
 
+## 原生有声视频模式
+
+`native-sync` 消费 `fission.avatar.native-sync.requested`。任务输入是已授权的形象图、提示词和 4–30 秒的目标时长。Seedance 2.5 Flash 生成 480p 竖屏有声视频。Worker 在发起前记录提交意图，取得受理编号后保存。可重试任务沿用已受理的编号查询，受理不明时进入对账。
+
+Worker 检查 H.264 视频、AAC 音轨、解码和实际时长，从同一视频提取 MP3 供预览。原生成果提供有声 MP4，字级时标为空。用户验收原片后可合成背景和手工字幕。原生模式使用 `ARK_API_KEY`、可选 `ARK_BASE_URL` 和默认 900 秒的 `FISSION_AVATAR_NATIVE_TIMEOUT_SECONDS`。
+
+如选用了项目参考音色，Worker 在登记供应商提交前经内部授权接口读取冻结的 MP3 或 WAV，核对实际格式与 2–30 秒时长。合格文件以 `reference_audio` 与形象及当前提示词一起提交。
+
 ## 唇形驱动模式
 
 此 Worker 处理数字人口播的唇形驱动节点。它消费 `fission.avatar.sync.requested`，向 API 领取限定在项目与 Run 的任务，用豆包合成普通话语音及字级时间标记，再用 MediaKit 生成口型素材。两个外部请求在发送前分别申请提交权限。TTS 使用冻结的操作编号查询已有结果，MediaKit 使用已保存的任务编号轮询。MediaKit 受理状态不明确且缺少任务编号时，停止本次执行。
@@ -11,6 +19,8 @@ Worker 通过 API 在一次有租约保护的回写中提交 MP4、MP3 和时间
 ## 成片渲染模式
 
 设置 `FISSION_AVATAR_WORKER_MODE=render` 后消费 `fission.avatar.render.requested`。渲染从 API 获取冻结的 G2 音轨、视频及可选的 JPEG/PNG 背景。Worker 保留原视频的画面，居中放入 1080×1920 竖屏画布。画布支持纯色和居中裁切的图片，图片宽高各为 2–4096 像素。字幕支持硬嵌、独立 SRT、同时输出或关闭。渲染使用原口播音轨，保留口播时序。
+
+原生 v3 渲染直接复制原片 AAC 音轨，保留视频帧的显示时点。Worker 校验每帧的时间、原音频包内容及时间线，验证通过后提交双文件摘要及时间线证据。该证据描述合成前后的媒体关系。
 
 Worker 校验源素材和编码结果的媒体结构、实际解码和音轨一致性，随后提交待校验的成片及选定的字幕文件。实际唇形事件校验由 API 交付流程处理。
 

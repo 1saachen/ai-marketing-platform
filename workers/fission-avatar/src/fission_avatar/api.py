@@ -53,7 +53,13 @@ class AvatarApi:
             (path == "checkpoint" or path.endswith("/checkpoint"))
             and body is not None
             and body.get("kind")
-            in {"TTS_SUBMIT", "LIP_SYNC_SUBMIT", "TTS_STARTED", "PICTURE_STARTED"}
+            in {
+                "TTS_SUBMIT",
+                "LIP_SYNC_SUBMIT",
+                "TTS_STARTED",
+                "PICTURE_STARTED",
+                "NATIVE_STARTED",
+            }
         )
         attempts = 1 if path == "claim" or is_reservation else 3
         for attempt in range(attempts):

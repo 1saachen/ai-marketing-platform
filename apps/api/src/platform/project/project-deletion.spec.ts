@@ -50,6 +50,7 @@ function fixture(
   avatarRenderMigrated = false,
   avatarSegmentsMigrated = false,
   avatarContinuityMigrated = false,
+  avatarNativeMigrated = false,
 ) {
   const tx: Record<string, any> = {
     $queryRaw: vi.fn().mockImplementation(async (query: { sql?: string }) => {
@@ -60,6 +61,7 @@ function fixture(
             render: avatarRenderMigrated,
             segments: avatarSegmentsMigrated,
             picture: avatarContinuityMigrated,
+            native: avatarNativeMigrated,
           },
         ];
       if (query.sql?.includes('WITH refs')) return [{ key: 'owned-file' }];
@@ -301,6 +303,33 @@ describe('permanent project deletion', () => {
             OR: expect.arrayContaining([
               { segments: { some: { pictureStarted: true, pictureTaskId: null } } },
             ]),
+          }),
+        ],
+      },
+    });
+  });
+
+  it('protects an unresolved native provider submission after the Flash migration', async () => {
+    const { repository, tx } = fixture(
+      'fissionAvatarSyncTask',
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+    );
+    await expect(repository.remove('project-a', 'lease')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROJECT_BUSY' }),
+    });
+    expect(tx.fissionAvatarSyncTask.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-a',
+        OR: [
+          expect.anything(),
+          expect.objectContaining({
+            OR: expect.arrayContaining([{ nativeStarted: true, nativeTaskId: null }]),
           }),
         ],
       },

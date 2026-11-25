@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fission-avatar-native-completion.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 4
+    },
+    "audioDurationMs": {
+      "type": "integer",
+      "minimum": 3900,
+      "maximum": 30000
+    },
+    "videoDurationMs": {
+      "type": "integer",
+      "minimum": 3900,
+      "maximum": 30000
+    },
+    "wordTimings": {
+      "type": "array",
+      "items": {},
+      "minItems": 0,
+      "maxItems": 0
+    }
+  },
+  "required": ["schemaVersion", "audioDurationMs", "videoDurationMs", "wordTimings"],
+  "additionalProperties": false
+}

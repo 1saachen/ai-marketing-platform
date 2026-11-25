@@ -4,6 +4,8 @@ import {
   AVATAR_LONG_LIMITS,
   isAvatarLongSyncMedia,
   AVATAR_LONG_SYNC_QUEUE,
+  AVATAR_NATIVE_SYNC_QUEUE,
+  AVATAR_SYNC_LIMITS,
   AVATAR_SYNC_ACTIVE_PHASES,
   AVATAR_SYNC_ARTIFACT_KEY,
   AVATAR_SYNC_NODE,
@@ -12,6 +14,9 @@ import {
   FISSION_AVATAR_NODES,
   planAvatarLongSegments,
   parseAvatarSyncWorkerInput,
+  parseAvatarNativeWorkerInput,
+  isAvatarNativeSyncMedia,
+  type AvatarNativeCheckpoint,
   type AvatarSyncCheckpoint,
   type AvatarSyncClaim,
   type AvatarSyncCompletion,
@@ -40,6 +45,7 @@ import { workflowStateHash } from '../../../platform/workflow/workflow-state-has
 import {
   avatarSyncGrantsValid,
   isAvatarSyncCurrent,
+  prepareAvatarNativeSources,
   prepareAvatarSyncSources,
   readAvatarSyncSelection,
   sameAvatarArtifactRef,
@@ -106,7 +112,23 @@ function unavailable(message: string): never {
 }
 
 function unknownCreation(task: FissionAvatarSyncTask) {
-  return task.lipSyncStarted && !task.lipSyncTaskId;
+  return (task.lipSyncStarted && !task.lipSyncTaskId) || (task.nativeStarted && !task.nativeTaskId);
+}
+
+async function assertUnusedArkReceipt(tx: Prisma.TransactionClient, providerTaskId: string) {
+  // Native and segmented tasks use separate tables but share the same Ark ID space.
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${providerTaskId}, 0))::text`;
+  const [native, picture] = await Promise.all([
+    tx.fissionAvatarSyncTask.findUnique({
+      where: { nativeTaskId: providerTaskId },
+      select: { id: true },
+    }),
+    tx.fissionAvatarSyncSegment.findUnique({
+      where: { pictureTaskId: providerTaskId },
+      select: { taskId: true },
+    }),
+  ]);
+  if (native || picture) conflict('该供应商任务已绑定其他口播任务');
 }
 
 function runnable(run: WorkflowRun) {
@@ -129,7 +151,15 @@ function ensureLease(task: FissionAvatarSyncTask, token: string) {
 
 function cleanOrigin(source: AvatarSyncSources): AvatarSyncOrigin {
   const { storageKey: _storageKey, sizeBytes: _sizeBytes, ...character } = source.character;
-  return { binding: source.binding, script: source.script, character, voice: source.voice };
+  const base = { binding: source.binding, script: source.script, character };
+  return source.mode === 'NATIVE'
+    ? {
+        ...base,
+        mode: 'NATIVE',
+        voice: null,
+        ...(source.nativeVoice ? { nativeVoice: source.nativeVoice } : {}),
+      }
+    : { ...base, voice: source.voice };
 }
 
 function projectedTask(
@@ -156,9 +186,15 @@ function projectedTask(
               ? '正在生成接续画面'
               : phase === 'VALIDATING'
                 ? '正在校验同步媒体'
-                : phase === 'LIP_SYNC'
-                  ? '正在驱动口型'
-                  : '正在合成语音';
+                : task.executionKind === 'NATIVE'
+                  ? '正在生成有声口播视频'
+                  : phase === 'LIP_SYNC'
+                    ? '正在驱动口型'
+                    : '正在合成语音';
+  const publicMode =
+    task.executionKind === 'NATIVE' || task.executionKind === 'SEGMENTED'
+      ? task.executionKind
+      : undefined;
   return {
     id: task.id,
     status,
@@ -166,7 +202,7 @@ function projectedTask(
     progress: task.progress,
     message,
     stale,
-    ...(isSegmented(task) ? { mode: 'SEGMENTED' as const } : {}),
+    ...(publicMode ? { mode: publicMode } : {}),
     ...(segments ? { segments } : {}),
     canCancel: ACTIVE_STATUSES.includes(status) && !unknown,
     canRetry:
@@ -217,6 +253,7 @@ export class AvatarSyncRepository {
     enabled: boolean,
     longEnabled: boolean,
     continuity: boolean,
+    nativeEnabled: boolean,
   ): Promise<AvatarSyncWorkspace> {
     const selection = await readAvatarSyncSelection(tx, ids);
     const active = await tx.fissionAvatarSyncTask.findFirst({
@@ -249,6 +286,7 @@ export class AvatarSyncRepository {
         audioUrl: url('audio'),
         videoUrl: url('video'),
         wordTimings: granted ? payload.media.wordTimings : [],
+        ...(isAvatarNativeSyncMedia(payload.media) ? { mode: 'NATIVE' as const } : {}),
       };
     }
     const sharedBlocked =
@@ -281,6 +319,9 @@ export class AvatarSyncRepository {
         }
       }
     }
+    const nativeBlocked = !nativeEnabled
+      ? '形象图直出暂未启用'
+      : (sharedBlocked ?? (await prepareAvatarNativeSources(tx, ids, selection)).blockedReason);
     return {
       ...ids,
       enabled,
@@ -289,11 +330,20 @@ export class AvatarSyncRepository {
       ...(longEnabled || segments
         ? { long: { enabled: longEnabled, canGenerate: !longBlocked, blockedReason: longBlocked } }
         : {}),
+      ...(nativeEnabled || latest?.executionKind === 'NATIVE'
+        ? {
+            native: {
+              enabled: nativeEnabled,
+              canGenerate: !nativeBlocked,
+              blockedReason: nativeBlocked,
+            },
+          }
+        : {}),
       task: latest
         ? projectedTask(
             latest,
             !(await isAvatarSyncCurrent(tx, ids, snapshot(latest), selection)),
-            segments ? longEnabled : enabled,
+            latest.executionKind === 'NATIVE' ? nativeEnabled : segments ? longEnabled : enabled,
             !!held && held.id !== latest.id,
             segments ? !!unknownSegment(segments) : unknownCreation(latest),
             segments?.length ? segmentProgress(latest, segments) : undefined,
@@ -304,10 +354,16 @@ export class AvatarSyncRepository {
     };
   }
 
-  workspace(ids: AvatarSyncScope, enabled: boolean, longEnabled = false, continuity = false) {
+  workspace(
+    ids: AvatarSyncScope,
+    enabled: boolean,
+    longEnabled = false,
+    continuity = false,
+    nativeEnabled = false,
+  ) {
     return this.db.$transaction(async (tx) => {
       const run = await lockAvatarRun(tx, ids);
-      return this.read(tx, ids, run, enabled, longEnabled, continuity);
+      return this.read(tx, ids, run, enabled, longEnabled, continuity, nativeEnabled);
     });
   }
 
@@ -315,14 +371,20 @@ export class AvatarSyncRepository {
     tx: Prisma.TransactionClient,
     ids: AvatarSyncScope,
     taskId: string,
-    segmented: boolean,
+    executionKind: string,
   ) {
     const key = { projectId: ids.projectId, jobType: JOB_TYPE, aggregateId: taskId };
+    const routingKey =
+      executionKind === 'NATIVE'
+        ? AVATAR_NATIVE_SYNC_QUEUE
+        : executionKind === 'SEGMENTED'
+          ? AVATAR_LONG_SYNC_QUEUE
+          : AVATAR_SYNC_QUEUE;
     await tx.jobOutbox.upsert({
       where: { projectId_jobType_aggregateId: key },
       create: {
         ...key,
-        routingKey: segmented ? AVATAR_LONG_SYNC_QUEUE : AVATAR_SYNC_QUEUE,
+        routingKey,
         payload: {
           schemaVersion: 1,
           projectId: ids.projectId,
@@ -360,11 +422,13 @@ export class AvatarSyncRepository {
     longEnabled = false,
     shortEnabled = true,
     continuity = false,
+    nativeEnabled = false,
   ) {
     return this.db.$transaction(async (tx) => {
       const run = await lockAvatarRun(tx, ids, true);
+      const executionKind = request.mode ?? 'SHORT';
       const segmented = request.mode === 'SEGMENTED';
-      if (segmented ? !longEnabled : !shortEnabled)
+      if (request.mode === 'NATIVE' ? !nativeEnabled : segmented ? !longEnabled : !shortEnabled)
         throw new ApiHttpException('所选口播生成模式暂未启用', 503, 'INTERNAL_ERROR');
       const prior = await tx.fissionAvatarSyncTask.findUnique({
         where: {
@@ -378,12 +442,15 @@ export class AvatarSyncRepository {
         const frozen = snapshot(prior);
         if (
           prior.draftRevision !== request.expectedDraftRevision ||
-          isSegmented(prior) !== segmented ||
+          prior.executionKind !== executionKind ||
+          (request.mode === 'NATIVE' &&
+            (frozen.mode !== 'NATIVE' ||
+              frozen.native.durationSeconds !== request.durationSeconds)) ||
           !sameAvatarArtifactRef(frozen.binding, request.binding) ||
           !sameAvatarArtifactRef(frozen.script, request.script)
         )
           conflict('请求标识已用于其他口播输入');
-        return this.read(tx, ids, run, shortEnabled, longEnabled, continuity);
+        return this.read(tx, ids, run, shortEnabled, longEnabled, continuity, nativeEnabled);
       }
       await this.ensureNoConcurrent(tx, ids);
       const selection = await readAvatarSyncSelection(tx, ids);
@@ -393,17 +460,20 @@ export class AvatarSyncRepository {
         !sameAvatarArtifactRef(selection.script, request.script)
       )
         conflict('口播输入已更新，请刷新后重试');
-      const prepared = await prepareAvatarSyncSources(
-        tx,
-        ids,
-        selection,
-        segmented ? LONG_SCRIPT_MAX : undefined,
-        segmented && continuity,
-      );
+      const prepared =
+        request.mode === 'NATIVE'
+          ? await prepareAvatarNativeSources(tx, ids, selection, request.durationSeconds)
+          : await prepareAvatarSyncSources(
+              tx,
+              ids,
+              selection,
+              segmented ? LONG_SCRIPT_MAX : undefined,
+              segmented && continuity,
+            );
       if (!prepared.source)
         throw new ApiHttpException(prepared.blockedReason, 422, 'VALIDATION_ERROR');
       let segments: ReturnType<typeof planAvatarLongSegments> | null = null;
-      if (segmented && !prepared.source.tailChain) {
+      if (segmented && prepared.source.mode !== 'NATIVE' && !prepared.source.tailChain) {
         try {
           segments = planAvatarLongSegments(prepared.source.scriptText);
         } catch (error) {
@@ -417,7 +487,7 @@ export class AvatarSyncRepository {
           idempotencyKey: request.idempotencyKey,
           draftRevision: selection.draftRevision,
           inputSnapshot: json(prepared.source),
-          ...(segmented ? { executionKind: 'SEGMENTED' } : {}),
+          executionKind,
           ttsOperationId: randomUUID(),
           lipSyncClientToken: randomUUID(),
         },
@@ -434,8 +504,8 @@ export class AvatarSyncRepository {
           })),
         });
       }
-      await this.enqueue(tx, ids, task.id, segmented);
-      return this.read(tx, ids, run, shortEnabled, longEnabled, continuity);
+      await this.enqueue(tx, ids, task.id, executionKind);
+      return this.read(tx, ids, run, shortEnabled, longEnabled, continuity, nativeEnabled);
     });
   }
 
@@ -452,6 +522,7 @@ export class AvatarSyncRepository {
     enabled: boolean,
     longEnabled = false,
     continuity = false,
+    nativeEnabled = false,
   ) {
     return this.db.$transaction(async (tx) => {
       const run = await lockAvatarRun(tx, ids, action === 'retry');
@@ -460,7 +531,7 @@ export class AvatarSyncRepository {
       const pending = await this.pendingCreation(tx, task);
       if (action === 'cancel') {
         if (task.status === 'CANCELLED')
-          return this.read(tx, ids, run, enabled, longEnabled, continuity);
+          return this.read(tx, ids, run, enabled, longEnabled, continuity, nativeEnabled);
         if (!ACTIVE_STATUSES.includes(task.status)) conflict('当前任务无法取消');
         if (pending) conflict('供应商正在确认创建，请等待受理结果');
         if (segmented) await clearSegmentMedia(tx, ids, task);
@@ -469,10 +540,10 @@ export class AvatarSyncRepository {
           data: { status: 'CANCELLED', attemptToken: null, leaseExpiresAt: null, retryable: false },
         });
       } else {
-        if (segmented ? !longEnabled : !enabled)
+        if (task.executionKind === 'NATIVE' ? !nativeEnabled : segmented ? !longEnabled : !enabled)
           throw new ApiHttpException('所选口播生成模式暂未启用', 503, 'INTERNAL_ERROR');
         if (ACTIVE_STATUSES.includes(task.status))
-          return this.read(tx, ids, run, enabled, longEnabled, continuity);
+          return this.read(tx, ids, run, enabled, longEnabled, continuity, nativeEnabled);
         if (
           task.status !== 'FAILED' ||
           !task.retryable ||
@@ -487,9 +558,9 @@ export class AvatarSyncRepository {
           where: { id: task.id },
           data: { status: 'QUEUED', errorCode: null, retryable: false, leaseExpiresAt: null },
         });
-        await this.enqueue(tx, ids, task.id, segmented);
+        await this.enqueue(tx, ids, task.id, task.executionKind);
       }
-      return this.read(tx, ids, run, enabled, longEnabled, continuity);
+      return this.read(tx, ids, run, enabled, longEnabled, continuity, nativeEnabled);
     });
   }
 
@@ -505,6 +576,7 @@ export class AvatarSyncRepository {
     code: string,
     retryable = false,
     lipSyncStarted = task.lipSyncStarted,
+    nativeStarted = task.nativeStarted,
   ) {
     const canRetry = retryable && task.attemptCount < MAX_ATTEMPTS;
     if (isSegmented(task) && !canRetry && code !== UNKNOWN_CREATION) {
@@ -521,6 +593,7 @@ export class AvatarSyncRepository {
         retryable: canRetry,
         errorCode: code,
         lipSyncStarted,
+        nativeStarted,
         attemptToken: null,
         leaseExpiresAt:
           isSegmented(task) && canRetry ? new Date(Date.now() + SEGMENT_RETRY_RECHECK_MS) : null,
@@ -546,27 +619,48 @@ export class AvatarSyncRepository {
         await this.finishFailed(tx, task, 'SOURCE_STALE');
         return { status: 'INACTIVE' };
       }
-      const input = segments
-        ? source.tailChain
-          ? await tailChainWorkerInput(tx, ids, task, segments, source)
-          : await longWorkerInput(tx, ids, segments, source)
-        : parseAvatarSyncWorkerInput({
-            schemaVersion: 1,
-            scriptText: source.scriptText,
-            voiceSpeaker: source.voiceSpeaker,
-            characterSizeBytes: source.character.sizeBytes,
-            ttsOperationId: task.ttsOperationId,
-            ttsStarted: task.ttsStarted,
-            lipSyncClientToken: task.lipSyncClientToken,
-            lipSyncStarted: task.lipSyncStarted,
-            lipSyncTaskId: task.lipSyncTaskId,
-          });
+      if ((task.executionKind === 'NATIVE') !== (source.mode === 'NATIVE'))
+        conflict('口播任务输入与生成模式不一致');
+      const input =
+        source.mode === 'NATIVE'
+          ? parseAvatarNativeWorkerInput({
+              schemaVersion: 4,
+              prompt: source.scriptText,
+              ...source.native,
+              ...(source.referenceAudio
+                ? {
+                    referenceAudio: {
+                      mimeType: source.referenceAudio.mimeType,
+                      sizeBytes: source.referenceAudio.sizeBytes,
+                      sha256: source.referenceAudio.sha256,
+                    },
+                  }
+                : {}),
+              nativeStarted: task.nativeStarted,
+              nativeTaskId: task.nativeTaskId,
+            })
+          : segments
+            ? source.tailChain
+              ? await tailChainWorkerInput(tx, ids, task, segments, source)
+              : await longWorkerInput(tx, ids, segments, source)
+            : parseAvatarSyncWorkerInput({
+                schemaVersion: 1,
+                scriptText: source.scriptText,
+                voiceSpeaker: source.voiceSpeaker,
+                characterSizeBytes: source.character.sizeBytes,
+                ttsOperationId: task.ttsOperationId,
+                ttsStarted: task.ttsStarted,
+                lipSyncClientToken: task.lipSyncClientToken,
+                lipSyncStarted: task.lipSyncStarted,
+                lipSyncTaskId: task.lipSyncTaskId,
+              });
       const attemptToken = randomUUID();
       await tx.fissionAvatarSyncTask.update({
         where: { id: task.id },
         data: {
           status: 'RUNNING',
-          phase: task.phase === 'QUEUED' ? 'TTS' : task.phase,
+          phase:
+            task.phase === 'QUEUED' ? (source.mode === 'NATIVE' ? 'LIP_SYNC' : 'TTS') : task.phase,
           progress: Math.max(task.progress, 5),
           attemptCount: { increment: 1 },
           attemptToken,
@@ -630,7 +724,7 @@ export class AvatarSyncRepository {
           where: { id },
           data: { status: 'QUEUED', attemptToken: null, leaseExpiresAt: null },
         });
-        await this.enqueue(tx, ids, id, isSegmented(task));
+        await this.enqueue(tx, ids, id, task.executionKind);
       });
     }
   }
@@ -684,6 +778,7 @@ export class AvatarSyncRepository {
   ) {
     return this.withLease(ids, taskId, token, async (tx, task) => {
       if (isSegmented(task)) conflict('分段口播需使用分段检查点');
+      if (task.executionKind === 'NATIVE') conflict('口播任务与检查点模式不匹配');
       if (body.kind === 'LIP_SYNC_ACCEPTED') {
         if (!task.lipSyncStarted) conflict('口型任务尚未登记提交');
         if (task.lipSyncTaskId) {
@@ -710,6 +805,37 @@ export class AvatarSyncRepository {
         data: speech
           ? { ttsStarted: true, phase: 'TTS' }
           : { lipSyncStarted: true, phase: 'LIP_SYNC' },
+      });
+      return { allowed: true };
+    });
+  }
+
+  nativeCheckpoint(
+    ids: AvatarSyncScope,
+    taskId: string,
+    token: string,
+    body: AvatarNativeCheckpoint,
+  ) {
+    return this.withLease(ids, taskId, token, async (tx, task) => {
+      if (task.executionKind !== 'NATIVE') conflict('口播任务与检查点模式不匹配');
+      if (body.kind === 'NATIVE_ACCEPTED') {
+        if (!task.nativeStarted) conflict('原生画面任务尚未登记提交');
+        if (task.nativeTaskId) {
+          if (task.nativeTaskId !== body.providerTaskId) conflict('已绑定其他供应商任务');
+          return { allowed: true };
+        }
+        await assertUnusedArkReceipt(tx, body.providerTaskId);
+        await tx.fissionAvatarSyncTask.update({
+          where: { id: task.id },
+          data: { nativeTaskId: body.providerTaskId },
+        });
+        return { allowed: true };
+      }
+      if (task.nativeStarted) return { allowed: false };
+      if (!(await isAvatarSyncCurrent(tx, ids, snapshot(task)))) conflict('已确认输入或授权已变化');
+      await tx.fissionAvatarSyncTask.update({
+        where: { id: task.id },
+        data: { nativeStarted: true, phase: 'LIP_SYNC' },
       });
       return { allowed: true };
     });
@@ -743,11 +869,7 @@ export class AvatarSyncRepository {
           conflict('画面回执与当前口播分段不一致');
         if (body.providerTaskId === source.tailChain.sourceTaskId)
           conflict('画面回执不能使用已登记的原始形象任务');
-        const assigned = await tx.fissionAvatarSyncSegment.findUnique({
-          where: { pictureTaskId: body.providerTaskId },
-          select: { taskId: true },
-        });
-        if (assigned) conflict('该画面已绑定其他口播分段');
+        await assertUnusedArkReceipt(tx, body.providerTaskId);
         // Preserve an already-accepted receipt if the source changed while the POST was in flight.
         await tx.fissionAvatarSyncSegment.update({
           where: { taskId_ordinal: { taskId, ordinal: body.ordinal } },
@@ -892,6 +1014,7 @@ export class AvatarSyncRepository {
         projectName: project.name,
         resultFingerprint: segment.resultFingerprint,
         segmented: false,
+        native: false,
       };
     });
   }
@@ -949,7 +1072,21 @@ export class AvatarSyncRepository {
     return this.withLease(ids, taskId, token, async (tx, task) => {
       const frozen = snapshot(task);
       if (!(await isAvatarSyncCurrent(tx, ids, frozen))) conflict('冻结形象或授权已变化');
-      return frozen.character;
+      if (frozen.mode === 'NATIVE') {
+        if (frozen.native.image.kind !== 'BYTES') unavailable('形象图片不可读取');
+        return { ...frozen.character, mimeType: frozen.native.image.mimeType };
+      }
+      return { ...frozen.character, mimeType: 'video/mp4' };
+    });
+  }
+
+  referenceAudio(ids: AvatarSyncScope, taskId: string, token: string) {
+    return this.withLease(ids, taskId, token, async (tx, task) => {
+      const frozen = snapshot(task);
+      if (task.executionKind !== 'NATIVE' || frozen.mode !== 'NATIVE' || !frozen.referenceAudio)
+        unavailable('本次任务未使用参考音色');
+      if (!(await isAvatarSyncCurrent(tx, ids, frozen))) conflict('冻结音色或授权已变化');
+      return frozen.referenceAudio;
     });
   }
 
@@ -975,6 +1112,7 @@ export class AvatarSyncRepository {
         unknown ? UNKNOWN_CREATION : body.code,
         body.retryable && !unknown,
         !rejected && task.lipSyncStarted,
+        !rejected && task.nativeStarted,
       );
       return { accepted: true };
     });
@@ -983,7 +1121,8 @@ export class AvatarSyncRepository {
   private verifyCompletion(task: FissionAvatarSyncTask, token: string) {
     if (task.status === 'SUCCEEDED' && !!token && task.attemptToken === token) return;
     ensureLease(task, token);
-    if (!isSegmented(task) && !task.lipSyncTaskId) conflict('缺少已受理的口型任务');
+    if (task.executionKind === 'NATIVE' && !task.nativeTaskId) conflict('缺少已受理的原生视频任务');
+    if (task.executionKind === 'SHORT' && !task.lipSyncTaskId) conflict('缺少已受理的口型任务');
   }
 
   resultAdmission(ids: AvatarSyncScope, taskId: string, token: string) {
@@ -1008,6 +1147,7 @@ export class AvatarSyncRepository {
         projectName: project.name,
         resultFingerprint: task.resultFingerprint,
         segmented: isSegmented(task),
+        native: task.executionKind === 'NATIVE',
       };
     });
   }
@@ -1034,8 +1174,16 @@ export class AvatarSyncRepository {
       if (isSegmented(task)) {
         if (!isAvatarLongSyncMedia(media)) conflict('长片结果需提供接缝校验记录');
         validateSegmentedTimeline(await segmentsForTask(tx, task), media);
-        if (frozen.tailChain) validateTailChainTimeline(task, media);
-      } else if (isAvatarLongSyncMedia(media)) conflict('短片结果数据与任务不符');
+        if (frozen.mode !== 'NATIVE' && frozen.tailChain) validateTailChainTimeline(task, media);
+      } else if (frozen.mode === 'NATIVE') {
+        if (
+          !isAvatarNativeSyncMedia(media) ||
+          Math.abs(media.videoDurationMs - frozen.native.durationSeconds * 1000) >
+            AVATAR_SYNC_LIMITS.maxAudioLagMs
+        )
+          conflict('原生口播时长或媒体数据与所选规格不符');
+      } else if (isAvatarLongSyncMedia(media) || isAvatarNativeSyncMedia(media))
+        conflict('短片结果数据与任务不符');
       const previous = await this.result(tx, ids);
       const stored = await Promise.all(
         (['video', 'audio'] as const).map(async (role, sortOrder) => {
@@ -1121,7 +1269,7 @@ export class AvatarSyncRepository {
         file.fileObject.workflowRunId !== ids.workflowRunId
       )
         unavailable('口播媒体不可用');
-      return file.fileObject;
+      return { ...file.fileObject, native: origin.mode === 'NATIVE' };
     });
   }
 }

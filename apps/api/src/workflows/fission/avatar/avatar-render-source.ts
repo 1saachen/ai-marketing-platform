@@ -8,9 +8,12 @@ import {
   AVATAR_SYNC_ARTIFACT_KEY,
   AVATAR_SYNC_NODE,
   isAvatarLongSyncMedia,
+  isAvatarNativeRenderCompletion,
   type AvatarArtifactRef,
   type AvatarCaptionCue,
   type AvatarCompositionDraft,
+  type AvatarNativeRenderCompletion,
+  type AvatarRenderCompletion,
   type AvatarSyncMedia,
 } from '@ai-marketing/contracts';
 import type { FileObject, Prisma } from '../../../generated/prisma/client';
@@ -43,13 +46,33 @@ export type RenderSnapshot = RenderSource & {
   composition: WithHash;
   settings: CompositionPayload['settings'];
   background: Awaited<ReturnType<typeof findAvatarBackground>>;
+  nativeSourceAccepted?: AvatarArtifactRef;
 };
 export type OutputPayload = {
   origin: AvatarRenderOrigin;
   composition: WithHash;
   sync: WithHash;
   durationMs: number;
+  nativeValidation?: {
+    acceptedSource: AvatarArtifactRef;
+    timeline: AvatarNativeRenderCompletion;
+  };
 };
+
+export function matchesAvatarNativeRenderProof(
+  frozen: RenderSnapshot,
+  proof: AvatarRenderCompletion,
+  outputSha256: string | null | undefined,
+) {
+  if (!frozen.nativeSourceAccepted) return !isAvatarNativeRenderCompletion(proof);
+  return (
+    isAvatarNativeRenderCompletion(proof) &&
+    frozen.origin.mode === 'NATIVE' &&
+    sameAvatarArtifactRef(frozen.nativeSourceAccepted, frozen.sync) &&
+    proof.sourceVideoSha256 === frozen.video.sha256 &&
+    proof.outputVideoSha256 === outputSha256
+  );
+}
 
 const nodes = {
   sync: { nodeId: AVATAR_SYNC_NODE, artifactKey: AVATAR_SYNC_ARTIFACT_KEY },
@@ -168,15 +191,22 @@ export function suggestedCaptions(source: RenderSource): AvatarCaptionCue[] {
 }
 
 export function publicOrigin(frozen: RenderSnapshot): AvatarRenderOrigin {
-  const { character, voice } = frozen.origin;
+  const { character } = frozen.origin;
   const background = frozen.background;
-  return {
+  const base = {
     character,
-    voice,
     background: background
       ? { assetId: background.assetId, version: background.version, versionId: background.id }
       : null,
   };
+  return frozen.origin.mode === 'NATIVE'
+    ? {
+        ...base,
+        mode: 'NATIVE',
+        voice: null,
+        ...(frozen.origin.nativeVoice ? { nativeVoice: frozen.origin.nativeVoice } : {}),
+      }
+    : { ...base, voice: frozen.origin.voice };
 }
 
 export async function outputAuthorized(

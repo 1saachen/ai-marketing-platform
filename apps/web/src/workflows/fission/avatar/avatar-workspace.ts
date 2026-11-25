@@ -3,7 +3,10 @@ import type { AvatarAssetRef, AvatarDraftData, AvatarWorkspaceData } from '@ai-m
 import { ApiClientError, safeApiErrorMessage } from '../../../api/http-client';
 import { avatarApi } from './avatar.api';
 
-export function sameAvatarAsset(left: AvatarAssetRef | null, right: AvatarAssetRef | null) {
+export function sameAvatarAsset(
+  left: AvatarAssetRef | null | undefined,
+  right: AvatarAssetRef | null | undefined,
+) {
   return left?.assetId === right?.assetId && left?.version === right?.version;
 }
 
@@ -15,6 +18,7 @@ function sameDraft(left: AvatarDraftData, right: AvatarDraftData) {
   return (
     sameAvatarAsset(left.character, right.character) &&
     sameAvatarAsset(left.voice, right.voice) &&
+    sameAvatarAsset(left.nativeVoice ?? null, right.nativeVoice ?? null) &&
     sameScript(left, right)
   );
 }
@@ -24,6 +28,9 @@ function copyDraft(draft: AvatarDraftData): AvatarDraftData {
     ...draft,
     character: draft.character && { ...draft.character },
     voice: draft.voice && { ...draft.voice },
+    ...(draft.nativeVoice !== undefined
+      ? { nativeVoice: draft.nativeVoice && { ...draft.nativeVoice } }
+      : {}),
   };
 }
 
@@ -44,6 +51,7 @@ export function createAvatarWorkspace(api = avatarApi) {
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingSave: Promise<boolean> | undefined;
   let pendingConfirmation: Promise<boolean> | undefined;
+  let characterReadOrdinal = 0;
 
   function apply(next: AvatarWorkspaceData) {
     workspace.value = next;
@@ -233,6 +241,9 @@ export function createAvatarWorkspace(api = avatarApi) {
             ? { character: local.character }
             : {}),
           ...(!sameAvatarAsset(saved.voice, local.voice) ? { voice: local.voice } : {}),
+          ...(!sameAvatarAsset(saved.nativeVoice, local.nativeVoice)
+            ? { nativeVoice: local.nativeVoice ?? null }
+            : {}),
           ...(!sameScript(saved, local)
             ? { scriptText: local.scriptText, scriptSource: local.scriptSource }
             : {}),
@@ -245,6 +256,19 @@ export function createAvatarWorkspace(api = avatarApi) {
     } finally {
       if (!scope.signal.aborted) confirming.value = false;
     }
+  }
+
+  async function refreshCharacters() {
+    const scope = controller;
+    const previous = workspace.value;
+    if (!scope || !previous) return false;
+    const ordinal = ++characterReadOrdinal;
+    const { data } = await api.read(previous.projectId, previous.workflowRunId, scope.signal);
+    if (scope.signal.aborted || workspace.value !== previous || ordinal !== characterReadOrdinal)
+      return false;
+    assertScope(data, previous.projectId, previous.workflowRunId);
+    workspace.value = { ...previous, characters: data.characters };
+    return true;
   }
 
   return {
@@ -261,6 +285,7 @@ export function createAvatarWorkspace(api = avatarApi) {
     edit,
     confirm,
     resolveConflict,
+    refreshCharacters,
     flushPendingEdits,
     dispose,
   };

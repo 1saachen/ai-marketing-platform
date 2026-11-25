@@ -16,6 +16,7 @@ import {
   AVATAR_LONG_SEAMS_SCHEMA,
   validateAvatarLongSeams,
 } from './fission-avatar-long-sync';
+import { AVATAR_NATIVE_LIMITS } from './fission-avatar-native';
 
 export const AVATAR_COMPOSITION_NODE = 'AVATAR_COMPOSITION';
 export const AVATAR_OUTPUT_NODE = 'AVATAR_OUTPUT';
@@ -39,6 +40,16 @@ export const AVATAR_RENDER_LIMITS = {
   maxReviewOffsetMs: 100,
 } as const;
 
+export const AVATAR_NATIVE_RENDER_LIMITS = {
+  minDurationMs:
+    AVATAR_NATIVE_LIMITS.minDurationSeconds * 1000 - AVATAR_NATIVE_LIMITS.durationToleranceMs,
+  maxDurationMs: AVATAR_NATIVE_LIMITS.maxDurationSeconds * 1000,
+  durationToleranceMs: 2,
+  maxTimelineDriftUs: 2000,
+  maxVideoFrameCount: 1810,
+  maxAudioPacketCount: 6144,
+} as const;
+
 export const AVATAR_CAPTION_MODES = ['OFF', 'SIDECAR', 'BURN', 'BOTH'] as const;
 export const AVATAR_RENDER_STATUSES = [
   'QUEUED',
@@ -57,6 +68,7 @@ export const AVATAR_RENDER_PHASES = [
 ] as const;
 export const AVATAR_RENDER_FAILURE_CODES = [
   'MEDIA_INVALID',
+  'NATIVE_TIMELINE_INVALID',
   'RENDER_FAILED',
   'INTERNAL_API_FAILED',
   'INVALID_TASK',
@@ -81,7 +93,11 @@ export type AvatarCompositionDraftRequest = Omit<AvatarCompositionDraft, 'revisi
 export type AvatarCompositionConfirmRequest = { expectedRevision: number };
 export type AvatarCompositionResult = AvatarArtifactRef &
   Omit<AvatarCompositionDraft, 'revision'> & { stale: boolean };
-export type AvatarRenderCreateRequest = { idempotencyKey: string; composition: AvatarArtifactRef };
+export type AvatarRenderCreateRequest = {
+  idempotencyKey: string;
+  composition: AvatarArtifactRef;
+  nativeSourceAccepted?: AvatarArtifactRef;
+};
 export type AvatarRenderTask = {
   id: string;
   status: (typeof AVATAR_RENDER_STATUSES)[number];
@@ -113,6 +129,7 @@ export type AvatarRenderWorkspace = {
         durationMs: number;
         captions: AvatarCaptionCue[];
         seamTimesMs?: number[];
+        mode?: 'NATIVE';
       })
     | null;
   backgrounds: { assetId: string; version: number; name: string; previewUrl: string | null }[];
@@ -132,7 +149,12 @@ type LongAvatarRenderWorkerInput = Omit<ShortAvatarRenderWorkerInput, 'schemaVer
   schemaVersion: 2;
   seamTimesMs: number[];
 };
-export type AvatarRenderWorkerInput = ShortAvatarRenderWorkerInput | LongAvatarRenderWorkerInput;
+export type AvatarNativeRenderWorkerInput = Omit<ShortAvatarRenderWorkerInput, 'schemaVersion'> & {
+  schemaVersion: 3;
+  sourceVideoSha256: string;
+};
+export type AvatarRenderWorkerInput =
+  ShortAvatarRenderWorkerInput | LongAvatarRenderWorkerInput | AvatarNativeRenderWorkerInput;
 export type AvatarRenderClaim =
   | { status: 'BUSY' | 'INACTIVE' }
   | { status: 'CLAIMED'; attemptToken: string; input: AvatarRenderWorkerInput };
@@ -154,7 +176,18 @@ type LongAvatarRenderCompletion = ShortAvatarRenderCompletion & {
   schemaVersion: 2;
   seamTimesMs: number[];
 };
-export type AvatarRenderCompletion = ShortAvatarRenderCompletion | LongAvatarRenderCompletion;
+export type AvatarNativeRenderCompletion = {
+  schemaVersion: 3;
+  audioDurationMs: number;
+  videoDurationMs: number;
+  sourceVideoSha256: string;
+  outputVideoSha256: string;
+  videoFrameCount: number;
+  audioPacketCount: number;
+  maxTimelineDriftUs: number;
+};
+export type AvatarRenderCompletion =
+  ShortAvatarRenderCompletion | LongAvatarRenderCompletion | AvatarNativeRenderCompletion;
 export type AvatarRenderReview = {
   sha256: string;
   method: string;
@@ -204,7 +237,10 @@ const draftShape = (settings: typeof settingsShape) =>
     settings,
   });
 const confirmShape = object({ expectedRevision: revision });
-const createShape = object({ idempotencyKey: uuid, composition: artifactRef });
+const createShape = {
+  ...object({ idempotencyKey: uuid, composition: artifactRef, nativeSourceAccepted: artifactRef }),
+  required: ['idempotencyKey', 'composition'],
+};
 const heartbeatShape = object({
   phase: enumeration(...AVATAR_RENDER_ACTIVE_PHASES),
   progress: integer(1, 99),
@@ -213,8 +249,9 @@ const failureShape = object({
   code: enumeration(...AVATAR_RENDER_FAILURE_CODES),
   retryable: { type: 'boolean' },
 });
+const sha256 = { type: 'string', pattern: '^[a-f0-9]{64}$' };
 const reviewShape = object({
-  sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  sha256,
   method: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' },
   coveragePermille: integer(0, 1000),
   confidencePermille: integer(0, 1000),
@@ -280,6 +317,35 @@ export const FISSION_AVATAR_LONG_RENDER_COMPLETION_SCHEMA = published(
     audioDurationMs: longAudioDuration,
     videoDurationMs: longVideoDuration,
     seamTimesMs: AVATAR_LONG_SEAMS_SCHEMA,
+  }),
+);
+const nativeLimits = AVATAR_NATIVE_RENDER_LIMITS;
+const nativeSourceDuration = integer(nativeLimits.minDurationMs, nativeLimits.maxDurationMs);
+const nativeOutputDuration = integer(
+  nativeLimits.minDurationMs - nativeLimits.durationToleranceMs,
+  nativeLimits.maxDurationMs + nativeLimits.durationToleranceMs,
+);
+export const FISSION_AVATAR_NATIVE_RENDER_WORKER_INPUT_SCHEMA = published(
+  'fission-avatar-native-render-worker-input.schema.json',
+  object({
+    ...FISSION_AVATAR_RENDER_WORKER_INPUT_SCHEMA.properties!,
+    schemaVersion: { const: 3 },
+    sourceVideoSha256: sha256,
+    audioDurationMs: nativeSourceDuration,
+    videoDurationMs: nativeSourceDuration,
+  }),
+);
+export const FISSION_AVATAR_NATIVE_RENDER_COMPLETION_SCHEMA = published(
+  'fission-avatar-native-render-completion.schema.json',
+  object({
+    schemaVersion: { const: 3 },
+    audioDurationMs: nativeOutputDuration,
+    videoDurationMs: nativeOutputDuration,
+    sourceVideoSha256: sha256,
+    outputVideoSha256: sha256,
+    videoFrameCount: integer(1, nativeLimits.maxVideoFrameCount),
+    audioPacketCount: integer(1, nativeLimits.maxAudioPacketCount),
+    maxTimelineDriftUs: integer(0, nativeLimits.maxTimelineDriftUs),
   }),
 );
 
@@ -349,6 +415,7 @@ export function parseAvatarRenderWorkerInput(value: unknown): AvatarRenderWorker
       oneOf: [
         FISSION_AVATAR_RENDER_WORKER_INPUT_SCHEMA,
         FISSION_AVATAR_LONG_RENDER_WORKER_INPUT_SCHEMA,
+        FISSION_AVATAR_NATIVE_RENDER_WORKER_INPUT_SCHEMA,
       ],
     },
     value,
@@ -381,6 +448,7 @@ export function parseAvatarRenderCompletion(value: unknown): AvatarRenderComplet
       oneOf: [
         FISSION_AVATAR_RENDER_COMPLETION_SCHEMA,
         FISSION_AVATAR_LONG_RENDER_COMPLETION_SCHEMA,
+        FISSION_AVATAR_NATIVE_RENDER_COMPLETION_SCHEMA,
       ],
     },
     value,
@@ -395,6 +463,12 @@ export function isAvatarLongRenderCompletion(
   output: AvatarRenderCompletion,
 ): output is LongAvatarRenderCompletion {
   return 'schemaVersion' in output && output.schemaVersion === 2;
+}
+
+export function isAvatarNativeRenderCompletion(
+  output: AvatarRenderCompletion,
+): output is AvatarNativeRenderCompletion {
+  return 'schemaVersion' in output && output.schemaVersion === 3;
 }
 
 export function parseAvatarRenderReview(value: unknown): AvatarRenderReview {

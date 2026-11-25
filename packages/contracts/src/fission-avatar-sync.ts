@@ -1,5 +1,6 @@
 import { CLONE_UUID_PATTERN } from './fission-clone';
 import type { AvatarLongSyncWorkerInput } from './fission-avatar-long-sync';
+import { AVATAR_NATIVE_LIMITS, type AvatarNativeWorkerInput } from './fission-avatar-native';
 import type { AvatarTailChainWorkerInput } from './fission-avatar-tail-chain';
 import {
   array,
@@ -52,13 +53,17 @@ export type AvatarSyncActivePhase = (typeof AVATAR_SYNC_ACTIVE_PHASES)[number];
 export type AvatarSyncFailureCode = (typeof AVATAR_SYNC_FAILURE_CODES)[number];
 
 export type AvatarArtifactRef = { artifactId: string; revision: number };
-export type AvatarSyncCreateRequest = {
+type AvatarSyncCreateSource = {
   idempotencyKey: string;
   expectedDraftRevision: number;
   binding: AvatarArtifactRef;
   script: AvatarArtifactRef;
-  mode?: 'SEGMENTED';
 };
+export type AvatarSyncCreateRequest = AvatarSyncCreateSource &
+  (
+    | { mode?: 'SEGMENTED'; durationSeconds?: undefined }
+    | { mode: 'NATIVE'; durationSeconds: number }
+  );
 export type AvatarSyncWordTiming = {
   text: string;
   startMs: number;
@@ -74,7 +79,7 @@ export type AvatarSyncTask = {
   canRetry: boolean;
   canCancel: boolean;
   stale: boolean;
-  mode?: 'SEGMENTED';
+  mode?: 'SEGMENTED' | 'NATIVE';
   segments?: {
     total: number;
     completed: number;
@@ -90,6 +95,7 @@ export type AvatarSyncResult = {
   audioUrl: string | null;
   videoUrl: string | null;
   wordTimings: AvatarSyncWordTiming[];
+  mode?: 'NATIVE';
 };
 export type AvatarSyncWorkspace = {
   projectId: string;
@@ -98,6 +104,7 @@ export type AvatarSyncWorkspace = {
   canGenerate: boolean;
   blockedReason: string | null;
   long?: { enabled: boolean; canGenerate: boolean; blockedReason: string | null };
+  native?: { enabled: boolean; canGenerate: boolean; blockedReason: string | null };
   task: AvatarSyncTask | null;
   result: AvatarSyncResult | null;
 };
@@ -118,7 +125,11 @@ export type AvatarSyncClaim =
   | {
       status: 'CLAIMED';
       attemptToken: string;
-      input: AvatarSyncWorkerInput | AvatarLongSyncWorkerInput | AvatarTailChainWorkerInput;
+      input:
+        | AvatarSyncWorkerInput
+        | AvatarLongSyncWorkerInput
+        | AvatarTailChainWorkerInput
+        | AvatarNativeWorkerInput;
     };
 export type AvatarSyncHeartbeat = { phase: AvatarSyncActivePhase; progress: number };
 export type AvatarSyncCheckpoint =
@@ -153,6 +164,14 @@ const createSchema = object({
   script: refs,
 });
 const segmentedCreateSchema = object({ ...createSchema.properties!, mode: { const: 'SEGMENTED' } });
+const nativeCreateSchema = object({
+  ...createSchema.properties!,
+  mode: { const: 'NATIVE' },
+  durationSeconds: integer(
+    AVATAR_NATIVE_LIMITS.minDurationSeconds,
+    AVATAR_NATIVE_LIMITS.maxDurationSeconds,
+  ),
+});
 
 const heartbeatSchema = object({
   phase: enumeration(...AVATAR_SYNC_ACTIVE_PHASES),
@@ -201,7 +220,7 @@ export const FISSION_AVATAR_SYNC_COMPLETION_SCHEMA = published(
 );
 
 export function parseAvatarSyncCreateRequest(value: unknown): AvatarSyncCreateRequest {
-  return parse({ oneOf: [createSchema, segmentedCreateSchema] }, value);
+  return parse({ oneOf: [createSchema, segmentedCreateSchema, nativeCreateSchema] }, value);
 }
 
 export function parseAvatarSyncHeartbeat(value: unknown): AvatarSyncHeartbeat {

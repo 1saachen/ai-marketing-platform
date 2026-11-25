@@ -1,4 +1,4 @@
-import type { AvatarAssetRef } from '@ai-marketing/contracts';
+import { AVATAR_NATIVE_LIMITS, type AvatarAssetRef } from '@ai-marketing/contracts';
 import { ApiHttpException } from '../../common/api-http-exception';
 import type { Prisma } from '../../generated/prisma/client';
 
@@ -51,15 +51,39 @@ export function findCurrentAvatarGrant(
   });
 }
 
+export function nativeVoiceReferenceMimeType(mimeType: string): 'audio/mpeg' | 'audio/wav' | null {
+  if (mimeType === 'audio/mpeg' || mimeType === 'audio/mp3') return 'audio/mpeg';
+  if (['audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave'].includes(mimeType))
+    return 'audio/wav';
+  return null;
+}
+
+export function isAvatarNativeVoiceReference(
+  grant: NonNullable<Awaited<ReturnType<typeof findCurrentAvatarGrant>>>,
+) {
+  const { version } = grant;
+  return (
+    grant.seedanceVoiceReference &&
+    version.asset.type === 'VOICE_PROFILE' &&
+    version.asset.hasFile &&
+    Boolean(version.storageKey) &&
+    version.sizeBytes > 0 &&
+    version.sizeBytes <= AVATAR_NATIVE_LIMITS.maxReferenceAudioBytes &&
+    nativeVoiceReferenceMimeType(version.mimeType) !== null
+  );
+}
+
 export function avatarSyncReconciliationFilter(
   includeSegments = true,
   includePicture = includeSegments,
+  includeNative = true,
 ): Prisma.FissionAvatarSyncTaskWhereInput {
   return {
     updatedAt: { gt: new Date(Date.now() - AVATAR_SYNC_RECONCILE_MS) },
     OR: [
       { lipSyncStarted: true, lipSyncTaskId: null },
       { errorCode: 'PROVIDER_CREATION_UNKNOWN' },
+      ...(includeNative ? [{ nativeStarted: true, nativeTaskId: null }] : []),
       ...(includeSegments
         ? [{ segments: { some: { lipSyncStarted: true, lipSyncTaskId: null } } }]
         : []),

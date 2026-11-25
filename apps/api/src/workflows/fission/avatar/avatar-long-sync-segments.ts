@@ -13,7 +13,7 @@ import type {
   Prisma,
 } from '../../../generated/prisma/client';
 import { workflowStateHash } from '../../../platform/workflow/workflow-state-hash';
-import type { AvatarSyncScope, AvatarSyncSources } from './avatar-sync-source';
+import type { AvatarSyncScope, LegacyAvatarSyncSources } from './avatar-sync-source';
 
 export type AvatarSegmentRole = 'audio' | 'video';
 
@@ -75,7 +75,7 @@ export async function longWorkerInput(
   tx: Prisma.TransactionClient,
   ids: AvatarSyncScope,
   segments: FissionAvatarSyncSegment[],
-  source: AvatarSyncSources,
+  source: LegacyAvatarSyncSources,
 ) {
   const descriptors = [];
   for (const segment of segments) {
@@ -129,7 +129,7 @@ export async function tailChainWorkerInput(
   ids: AvatarSyncScope,
   task: FissionAvatarSyncTask,
   segments: FissionAvatarSyncSegment[],
-  source: AvatarSyncSources,
+  source: LegacyAvatarSyncSources,
 ) {
   const descriptors = [];
   for (const segment of segments) {
